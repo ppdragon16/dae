@@ -13,7 +13,6 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	dnsmessage "github.com/miekg/dns"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
@@ -125,24 +124,21 @@ func (m *DnsManager) read(buf []byte) (data []byte, err error) {
 }
 
 func (m *DnsManager) feed(data []byte) {
-	var msg dnsmessage.Msg
-	err := msg.Unpack(data)
-	if err != nil {
-		log.Warnf("Failed to unpack dns resp, stream: %v, err: %v, data: %v", m.stream, err, data)
-		return
-	}
-	conn, ok := m.recvMap.Load(msg.Id)
+	id := dnsId(data)
+	conn, ok := m.recvMap.Load(id)
 	if !ok {
-		log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
+		log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, id)
 		// Ignore message from unknown session
 		return
 	}
 
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
 	select {
-	case conn.(chan *dnsmessage.Msg) <- &msg:
+	case conn.(chan []byte) <- dataCopy:
 		// OK
 	default:
-		log.Debugf("Drop dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
+		log.Debugf("Drop dns resp msg, stream: %v, id: %v", m.stream, id)
 		// Channel full, drop the message
 	}
 }
@@ -156,59 +152,45 @@ func (m *DnsManager) IsClosed() bool {
 	return m.ctx.Err() != nil
 }
 
-func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
-	origMsgId := msg.Id
-	msg.Id = uint16(fastrand.Intn(math.MaxUint16))
-	defer func() { msg.Id = origMsgId }()
-	buf := pool.GetBuffer(1024)
-	defer pool.PutBuffer(buf)
-	var data []byte
-	var err error
+func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
+	origMsgId := dnsId(data)
+	newId := uint16(fastrand.Intn(math.MaxUint16))
+	dnsIdSet(data, newId)
+	defer func() { dnsIdSet(data, origMsgId) }()
+	dataToWrite := data
 	if m.stream {
-		if data, err = msg.PackBuffer(buf[2:]); err == nil {
-			dataLen := uint16(len(data))
-			binary.BigEndian.PutUint16(buf, dataLen)
-			data = buf[:dataLen+2]
-		}
-	} else {
-		data, err = msg.PackBuffer(buf)
-	}
-	if err != nil {
-		return oops.Wrapf(err, "pack DNS packet")
+		dataToWrite = pool.GetBuffer(len(data) + 2)
+		defer pool.PutBuffer(dataToWrite)
+		binary.BigEndian.PutUint16(dataToWrite, uint16(len(data)))
+		copy(dataToWrite[2:], data)
 	}
 
-	recvCh := make(chan *dnsmessage.Msg, 1)
-	m.recvMap.Store(msg.Id, recvCh)
-	defer m.recvMap.Delete(msg.Id)
+	recvCh := make(chan []byte, 1)
+	m.recvMap.Store(newId, recvCh)
+	defer m.recvMap.Delete(newId)
 
 	timer := time.NewTimer(dnsRetryInterval)
 	defer timer.Stop()
 
 	for i := range dnsRetryCount {
-		if _, err := m.conn.Write(data); err != nil {
-			return err
+		if _, err := m.conn.Write(dataToWrite); err != nil {
+			return nil, err
 		}
 		if i > 0 {
 			timer.Reset(dnsRetryInterval)
 		}
 		select {
 		case <-m.ctx.Done():
-			return net.ErrClosed
+			return nil, net.ErrClosed
 		case <-ctx.Done():
-			return context.Canceled
+			return nil, context.Canceled
 		case recvMsg := <-recvCh:
-			*msg = *recvMsg
-			return nil
+			return recvMsg, nil
 		case <-timer.C:
 		}
 	}
 
-	var qname string
-	var qtype uint16
-	if len(msg.Question) > 0 {
-		qname = msg.Question[0].Name
-		qtype = msg.Question[0].Qtype
-	}
-	log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qname, qtype)
-	return context.DeadlineExceeded
+	qInfo := dnsQueryInfo(data)
+	log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qInfo.qname, qInfo.qtype)
+	return nil, context.DeadlineExceeded
 }

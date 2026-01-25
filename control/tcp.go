@@ -32,41 +32,17 @@ const (
 	DefaultNatTimeoutTCPEstablished = 21600 * time.Second
 )
 
-func readDnsMsg(r io.Reader) (*dnsmessage.Msg, error) {
-	var length uint16
-	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
-		return nil, err
-	}
-	m := pool.GetBuffer(int(length))
-	defer pool.PutBuffer(m)
-	if _, err := io.ReadFull(r, m); err != nil {
-		return nil, err
-	}
-	msg := new(dnsmessage.Msg)
-	if err := msg.Unpack(m); err != nil {
-		return nil, err
-	}
-	return msg, nil
-}
-
-func writeDnsMsg(msg *dnsmessage.Msg, w io.Writer) error {
-	buf := pool.GetBuffer(512)
-	defer pool.PutBuffer(buf)
-	res, err := msg.PackBuffer(buf)
-	if err != nil {
-		return err
-	}
-	if err = binary.Write(w, binary.BigEndian, uint16(len(res))); err == nil {
-		if _, err = w.Write(res); err == nil {
-			return nil
-		}
-	}
-	return err
-}
-
 func (c *ControlPlane) handleTcpDns(
 	lConn net.Conn, src, dst netip.AddrPort, routingResult *bpfRoutingResult) error {
-	msg, err := readDnsMsg(lConn)
+	var length uint16
+	var err error
+	var data []byte
+	// Read dns request
+	if err = binary.Read(lConn, binary.BigEndian, &length); err == nil {
+		data = pool.GetBuffer(int(length))
+		defer pool.PutBuffer(data)
+		_, err = io.ReadFull(lConn, data)
+	}
 	if err != nil {
 		log.Debugf("failed to read tcp dns request: %v", err)
 		// It's common to get EOF when reading tcp dns request.
@@ -78,16 +54,24 @@ func (c *ControlPlane) handleTcpDns(
 		routingResult: routingResult,
 		isTcp:         true,
 	}
-	queryInfo := c.dnsController.prepareQueryInfo(msg)
-	if err = c.dnsController.handleDNSRequest(msg, req, queryInfo); err != nil {
+	queryInfo := dnsQueryInfo(data)
+	var respData dnsResponseData
+	if respData, err = c.dnsController.handleDNSRequest(data, req, queryInfo); err != nil {
 		log.Errorf("Failed to handle tcp dns request: %v", err)
-		msg.Response = true
-		msg.SetRcode(msg, dnsmessage.RcodeServerFailure)
+		dnsRcodeSet(respData.respData, dnsmessage.RcodeServerFailure)
 	}
-	if err = writeDnsMsg(msg, lConn); err != nil {
-		return oops.Wrapf(err, "failed to write tcp dns response")
+	if len(respData.respData) == 0 {
+		return nil
 	}
-	return nil
+	if respData.fromPool {
+		defer pool.PutBuffer(respData.respData)
+	}
+	if err = binary.Write(lConn, binary.BigEndian, uint16(len(respData.respData))); err == nil {
+		if _, err = lConn.Write(respData.respData); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func (c *ControlPlane) handleConn(lConn net.Conn) error {

@@ -20,6 +20,7 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/daeuniverse/dae/component/dns"
+	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	dnsmessage "github.com/miekg/dns"
@@ -35,7 +36,7 @@ const (
 
 // TODO: Connection reuse
 type DnsForwarder interface {
-	ForwardDNS(msg *dnsmessage.Msg) error
+	ForwardDNS(data []byte) ([]byte, error)
 }
 
 func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForwarder, error) {
@@ -86,7 +87,7 @@ type DoH struct {
 	http3        bool
 }
 
-func (d *DoH) ForwardDNS(msg *dnsmessage.Msg) error {
+func (d *DoH) ForwardDNS(data []byte) ([]byte, error) {
 	var roundTripper http.RoundTripper
 	if d.http3 {
 		roundTripper = d.getHttp3RoundTripper()
@@ -102,7 +103,19 @@ func (d *DoH) ForwardDNS(msg *dnsmessage.Msg) error {
 		Path:   d.Upstream.Path,
 	}
 
-	return netutils.ResolveHttp(client, serverURL, msg)
+	msg := &dnsmessage.Msg{}
+	if err := msg.Unpack(data); err != nil {
+		return nil, err
+	}
+	if err := netutils.ResolveHttp(client, serverURL, msg); err != nil {
+		return nil, err
+	}
+	r := pool.GetBuffer(consts.EthernetMtu)
+	resp, err := msg.PackBuffer(r)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func (d *DoH) getHttpRoundTripper() *http.Transport {
@@ -150,7 +163,7 @@ type DoQ struct {
 	conn         quic.Connection
 }
 
-func (d *DoQ) ForwardDNS(msg *dnsmessage.Msg) (err error) {
+func (d *DoQ) ForwardDNS(data []byte) (resp []byte, err error) {
 	if d.conn == nil || d.conn.Context().Err() != nil {
 		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 		defer cancel()
@@ -172,8 +185,19 @@ func (d *DoQ) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 	}
 
 	defer stream.Close()
-	err = netutils.ResolveStream(stream, msg, true)
-	return
+	msg := &dnsmessage.Msg{}
+	if err = msg.Unpack(data); err != nil {
+		return
+	}
+	if err := netutils.ResolveStream(stream, msg, true); err != nil {
+		return nil, err
+	}
+	r := pool.GetBuffer(consts.EthernetMtu)
+	resp, err = msg.PackBuffer(r)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func (c *DoQ) Close() error {
@@ -203,23 +227,35 @@ type DoTLS struct {
 	dialArgument dialArgument
 }
 
-func (d *DoTLS) ForwardDNS(msg *dnsmessage.Msg) error {
+func (d *DoTLS) ForwardDNS(data []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	conn, err := d.dialArgument.Dialer.DialContext(ctx, "tcp", d.dialArgument.Target.String())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tlsConn := tls.Client(conn, &tls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         d.Upstream.Hostname,
 	})
 	if err = tlsConn.Handshake(); err != nil {
-		return err
+		return nil, err
 	}
 
 	defer tlsConn.Close()
-	return netutils.ResolveStream(conn, msg, false)
+	msg := &dnsmessage.Msg{}
+	if err := msg.Unpack(data); err != nil {
+		return nil, err
+	}
+	if err := netutils.ResolveStream(conn, msg, false); err != nil {
+		return nil, err
+	}
+	r := pool.GetBuffer(consts.EthernetMtu)
+	resp, err := msg.PackBuffer(r)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 type DoTcpOrUdp struct {
@@ -230,38 +266,38 @@ type DoTcpOrUdp struct {
 }
 
 // TODO: Connection reuse
-func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
+func (d *DoTcpOrUdp) ForwardDNS(data []byte) (resp []byte, err error) {
 	// Retry once on net.ErrClosed which may happen when race condition between DnsManager's Resolve() and read().
 	maxRetries := 1
 	for i := 0; i <= maxRetries; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), consts.DefaultDialTimeout)
-		err = d.forwardDnsWithContext(ctx, msg)
+		resp, err = d.forwardDnsWithContext(ctx, data)
 		cancel()
 		if !errors.Is(err, net.ErrClosed) {
 			break
 		}
 	}
-	return err
+	return resp, err
 }
 
-func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, msg *dnsmessage.Msg) error {
+func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, data []byte) ([]byte, error) {
 	d.mu.Lock()
 	if d.dnsManager == nil || d.dnsManager.IsClosed() {
 		conn, err := d.dialArgument.Dialer.DialContext(ctx, d.network, d.dialArgument.Target.String())
 		if err != nil {
 			d.mu.Unlock()
-			return err
+			return nil, err
 		}
 		d.dnsManager = NewDnsManager(conn, d.network == "tcp", d.dialArgument.Dialer.Name)
 	}
 	mgr := d.dnsManager
 	d.mu.Unlock()
 
-	err := mgr.Resolve(ctx, msg)
+	resp, err := mgr.Resolve(ctx, data)
 	if errors.Is(err, net.ErrClosed) {
 		mgr.Close()
 	}
-	return err
+	return resp, err
 }
 
 type DoTcpAndUdp struct {
@@ -274,12 +310,12 @@ type DoTcpAndUdp struct {
 }
 
 type dnsResult struct {
-	msg *dnsmessage.Msg
-	tcp bool
-	err error
+	tcp      bool
+	respData []byte
+	err      error
 }
 
-func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
+func (d *DoTcpAndUdp) ForwardDNS(data []byte) ([]byte, error) {
 	canUseUdp := true
 	now := time.Now().Unix()
 	rt := atomic.LoadInt64(&d.reviveTime)
@@ -301,38 +337,46 @@ func (d *DoTcpAndUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 	defer cancel()
 
 	go func() {
-		m := msg.Copy()
-		resCh <- dnsResult{m, true, d.doTcp.forwardDnsWithContext(ctx, m)}
+		r, err := d.doTcp.forwardDnsWithContext(ctx, data)
+		resCh <- dnsResult{true, r, err}
 	}()
 
 	if canUseUdp {
 		go func() {
-			m := msg.Copy()
+			var r []byte
 			var e error
 			// Note: don't give ctx here, avoid canceling udp to count udp timeouts as fails.
-			if e = d.doUdp.ForwardDNS(m); e != nil {
+			// Copy data here becauase data could have been recycled while waiting for udp dns timeout.
+			dataCopy := pool.GetBuffer(len(data))
+			defer pool.PutBuffer(dataCopy)
+			copy(dataCopy, data)
+			if r, e = d.doUdp.ForwardDNS(dataCopy); e != nil {
 				d.maybeSuspendUdp()
 			} else {
 				d.maybeReviveUdp()
 			}
-			resCh <- dnsResult{m, false, e}
+			resCh <- dnsResult{false, r, e}
 		}()
 	}
 
+	var respData []byte
 	var firstErr error
 	for i := 0; i < n; i++ {
 		res := <-resCh
 		if res.err == nil {
 			// cancel() only works for the tcp goroutine.
 			cancel()
-			res.msg.CopyTo(msg)
-			log.Debugf("tcp+udp dns resp, tcp: %v, qname: %s, qtype: %v", res.tcp, msg.Question[0].Name, msg.Question[0].Qtype)
-			return nil
+			respData = res.respData
+			if log.IsLevelEnabled(log.DebugLevel) {
+				qInfo := dnsQueryInfo(data)
+				log.Debugf("tcp+udp dns resp, tcp: %v, qname: %v, qtype: %v", res.tcp, qInfo.qname, qInfo.qtype)
+			}
+			return respData, nil
 		}
 		firstErr = res.err
 	}
 
-	return firstErr
+	return respData, firstErr
 }
 
 func (d *DoTcpAndUdp) maybeSuspendUdp() {

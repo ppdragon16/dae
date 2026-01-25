@@ -1009,11 +1009,10 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 							continue
 						}
 						if routingResult.Must == 0 {
-							var dnsMessage dnsmessage.Msg
-							if err := dnsMessage.Unpack(data); err == nil {
-								dnsReq := newDnsRequest(src, dst, routingResult)
-								c.dnsController.Handle(&dnsMessage, dnsReq)
-								dnsRequestPool.Put(dnsReq)
+							dnsReq := newDnsRequest(src, dst, routingResult)
+							handled := c.dnsController.Handle(data, dnsReq)
+							dnsRequestPool.Put(dnsReq)
+							if handled {
 								pool.PutBuffer(data)
 								c.core.RecycleRoutingResult(routingResult)
 								continue
