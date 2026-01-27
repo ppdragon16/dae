@@ -127,14 +127,10 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 	}, nil
 }
 
-func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, fqdn string, data []byte) {
-	infos, minTTL := dnsExtractMetadata(data)
-	if fixedTtl, ok := c.fixedDomainTtl[fqdn]; ok {
-		for _, info := range infos {
-			binary.BigEndian.PutUint32(data[info.TTLOffset:info.TTLOffset+4], uint32(fixedTtl))
-		}
-	}
-	c.dnsCache.UpdateTtl(cacheKey, data, infos, minTTL)
+func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, data []byte) {
+	infos, _ := dnsExtractMetadata(data)
+	fixedTtl, _ := c.fixedDomainTtl[cacheKey.qname]
+	c.dnsCache.UpdateAnswers(cacheKey, data, infos, fixedTtl)
 }
 
 type dnsRequest struct {
@@ -533,32 +529,52 @@ func (c *DnsController) reject(data []byte) {
 	data[10], data[11] = 0, 0 // ARCOUNT = 0
 }
 
-func (c *DnsController) rejectMsg(msg *dnsmessage.Msg) {
-	// Reject with empty answer.
-	msg.Answer = []dnsmessage.RR{}
-	msg.Rcode = dnsmessage.RcodeSuccess
-	msg.Response = true
-	msg.RecursionAvailable = true
-	msg.Truncated = false
-}
-
-func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArgument *dialArgument, queryInfo queryInfo) (dnsResponseData, error) {
-	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArgument.Outbound}
+func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo) (dnsResponseData, error) {
+	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
 		if cache := c.dnsCache.Get(cacheKey); cache != nil {
-			if respData := CopyResponseFromCache(cache); respData != nil {
-				if log.IsLevelEnabled(log.DebugLevel) {
-					log.WithFields(log.Fields{
-						"answer": FormatDnsRsc(respData),
-					}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
-				}
-				return dnsResponseData{respData: respData, fromPool: true}, nil
+			respData, expired := CopyResponseFromCache(cache)
+			if expired {
+				dataCopy := pool.GetBuffer(len(data))
+				copy(dataCopy, data)
+				go func(d []byte, arg dialArgument) {
+					defer pool.PutBuffer(d)
+					// Refresh cache asynchronously.
+					if _, _, err := c.singleFlightForwardDNS(cacheKey, d, upstream, &arg); err != nil {
+						log.Warnf("failed to refresh dns cache for %v: %+v", cacheKey, err)
+					}
+				}(dataCopy, *dialArg)
 			}
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"answer": FormatDnsRsc(respData),
+				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
+			}
+			return dnsResponseData{respData: respData, fromPool: true}, nil
 		}
 	}
-	isLeader := false
 	// Pending for the same lookup.
+	respData, isLeader, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
+	dnsResp := dnsResponseData{}
+	if respData != nil {
+		if isLeader {
+			dnsResp.respData = respData
+			dnsResp.fromPool = false
+		} else {
+			// Each dns handler goroutine should NOT share the same response data.
+			dnsResp.respData = pool.GetBuffer(len(respData))
+			copy(dnsResp.respData, respData)
+			dnsResp.fromPool = true
+		}
+		dnsIdSet(dnsResp.respData, dnsId(data)) // keep the same id with request
+	}
+	return dnsResp, err
+}
+
+func (c *DnsController) singleFlightForwardDNS(
+	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument) ([]byte, bool, error) {
+	isLeader := false
 	v, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		isLeader = true
 		var forwarder DnsForwarder
@@ -587,8 +603,8 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArgume
 
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
-				"qname": queryInfo.qname,
-				"qtype": queryInfo.qtype,
+				"qname": cacheKey.qname,
+				"qtype": cacheKey.qtype,
 				"rcode": rcode,
 				"ans":   FormatDnsRsc(r),
 			}).Debugf("Got DNS response")
@@ -600,8 +616,8 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArgume
 		}
 		if !isDnsResponseValid(r) {
 			log.WithFields(log.Fields{
-				"qname": queryInfo.qname,
-				"qtype": queryInfo.qtype,
+				"qname": cacheKey.qname,
+				"qtype": cacheKey.qtype,
 				"rcode": rcode,
 				"ans":   FormatDnsRsc(r),
 			}).Tracef("Not a valid DNS response")
@@ -611,8 +627,8 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArgume
 		if c.enableCache {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
-					"qname":    queryInfo.qname,
-					"qtype":    queryInfo.qtype,
+					"qname":    cacheKey.qname,
+					"qtype":    cacheKey.qtype,
 					"rcode":    rcode,
 					"ans":      FormatDnsRsc(r),
 					"upstream": upstream,
@@ -620,25 +636,14 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArgume
 					"outbound": dialArgument.Outbound,
 				}).Debugf("Update DNS record cache")
 			}
-			c.UpdateDnsCacheTtl(cacheKey, queryInfo.qname, r)
+			c.UpdateDnsCacheTtl(cacheKey, r)
 		}
 		return r, nil
 	})
-	dnsResp := dnsResponseData{}
 	if v != nil {
-		respData := v.([]byte)
-		if isLeader {
-			dnsResp.respData = respData
-			dnsResp.fromPool = false
-		} else {
-			// Each dns handler goroutine should NOT share the same response data.
-			dnsResp.respData = pool.GetBuffer(len(respData))
-			copy(dnsResp.respData, respData)
-			dnsResp.fromPool = true
-		}
-		dnsIdSet(dnsResp.respData, dnsId(data)) // keep the same id with request
+		return v.([]byte), isLeader, err
 	}
-	return dnsResp, err
+	return nil, isLeader, err
 }
 
 func (c *DnsController) Close() error {
