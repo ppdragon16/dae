@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
@@ -157,20 +158,30 @@ type UpstreamResolver struct {
 	FinishInitCallback func(raw *url.URL, upstream *Upstream)
 	mu                 sync.Mutex
 	upstream           *Upstream
-	init               bool
+	init               uint32
 }
 
 func (u *UpstreamResolver) GetUpstream() (_ *Upstream, err error) {
+	if atomic.LoadUint32(&u.init) == 1 {
+		return u.upstream, nil
+	}
+
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if !u.init {
-		ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
-		defer cancel()
-		if u.upstream, err = NewUpstream(ctx, u.Raw, u.Network); err != nil {
-			return nil, fmt.Errorf("failed to init dns upstream: %w", err)
-		}
-		u.FinishInitCallback(u.Raw, u.upstream)
-		u.init = true
+
+	if u.init == 1 {
+		return u.upstream, nil
 	}
+
+	ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
+	defer cancel()
+	upstream, err := NewUpstream(ctx, u.Raw, u.Network)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init dns upstream: %w", err)
+	}
+	u.upstream = upstream
+	u.FinishInitCallback(u.Raw, u.upstream)
+
+	atomic.StoreUint32(&u.init, 1)
 	return u.upstream, nil
 }

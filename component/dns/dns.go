@@ -89,7 +89,6 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 			}(i),
 			mu:       sync.Mutex{},
 			upstream: nil,
-			init:     false,
 		}
 		upstreamName2Id[tag] = uint8(len(s.upstream))
 		s.upstream = append(s.upstream, r)
