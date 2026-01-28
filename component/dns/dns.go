@@ -7,9 +7,11 @@ package dns
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/netip"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/assets"
@@ -20,6 +22,11 @@ import (
 
 var ErrBadUpstreamFormat = fmt.Errorf("bad upstream format")
 
+type routeCacheKey struct {
+	qname string
+	qtype uint16
+}
+
 type Dns struct {
 	upstream         []*UpstreamResolver
 	upstream2IndexMu sync.Mutex
@@ -27,6 +34,7 @@ type Dns struct {
 	reqMatcher       *RequestMatcher
 	respMatcher      *ResponseMatcher
 	hasResponseRules bool
+	routeCache       *common.ShardedLruCache[routeCacheKey, consts.DnsRequestOutboundIndex]
 }
 
 type NewOption struct {
@@ -35,11 +43,21 @@ type NewOption struct {
 	UpstreamResolverNetwork string
 }
 
+func RouteCacheKeyHash(k routeCacheKey) uint32 {
+	h := fnv.New32a()
+	// WriteString 内部不涉及字节切片拷贝，能减少内存分配
+	h.Write([]byte(k.qname))
+	h.Write([]byte{byte(k.qtype >> 8), byte(k.qtype)})
+	return h.Sum32()
+}
+
 func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 	s = &Dns{
 		upstream2Index: map[*Upstream]int{
 			nil: int(consts.DnsRequestOutboundIndex_AsIs),
 		},
+		routeCache: common.NewShardedLru[routeCacheKey, consts.DnsRequestOutboundIndex](
+			4096, 16, 6*time.Hour, RouteCacheKeyHash),
 	}
 	// Parse upstream.
 	upstreamName2Id := map[string]uint8{}
@@ -132,11 +150,16 @@ func (s *Dns) HasResponseRules() bool {
 }
 
 func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
+	key := routeCacheKey{qname, qtype}
+	if val, ok := s.routeCache.Get(key); ok {
+		return val, nil
+	}
 	// Route.
 	upstreamIndex, err = s.reqMatcher.Match(qname, qtype)
 	if err != nil {
 		return 0, err
 	}
+	s.routeCache.Add(key, upstreamIndex)
 	// nil indicates AsIs.
 	if upstreamIndex == consts.DnsRequestOutboundIndex_AsIs ||
 		upstreamIndex == consts.DnsRequestOutboundIndex_Reject {
