@@ -25,6 +25,7 @@ type DnsCache struct {
 	Data       []byte
 	TTLOffsets []int
 	FetchedAt  time.Time
+	IsNew      bool
 	timer      *time.Timer
 }
 
@@ -84,6 +85,16 @@ func (c *commonDnsCache[K]) Get(cacheKey K) *DnsCache {
 	return val.(*DnsCache)
 }
 
+func (c *commonDnsCache[K]) Used(cacheKey K, cache *DnsCache) bool {
+	if !cache.IsNew {
+		return false
+	}
+	// Keep DnsCache instance as immutable, so make a copy and modify.
+	copied := *cache
+	copied.IsNew = false
+	return c.cache.CompareAndSwap(cacheKey, cache, &copied)
+}
+
 func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixedTtl int) *DnsCache {
 	if len(rrs) == 0 {
 		return nil
@@ -117,9 +128,10 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixe
 		Data:       dataCopy,
 		TTLOffsets: ttlOffsets,
 		FetchedAt:  time.Now(),
+		IsNew:      true,
 	}
 	newCache.timer = time.AfterFunc(time.Duration(maxTTL)*time.Second+extendCacheDur, func() {
-		if c.cache.CompareAndDelete(key, newCache) {
+		if _, ok := c.cache.LoadAndDelete(key); ok {
 			common.DnsCacheSize.Dec()
 		}
 	})

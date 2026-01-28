@@ -161,6 +161,7 @@ type queryInfo struct {
 type dnsResponseData struct {
 	respData []byte
 	fromPool bool
+	isNew    bool
 }
 
 type dnsCacheKey struct {
@@ -413,7 +414,7 @@ Dial:
 	// TODO: 不再存储Bitmap, 提高更新代码可读性
 	// 但在有bump_map的情况下这不是大问题
 	// TOOD: 细分日志
-	if isDnsResponseValid(dnsResp.respData) {
+	if dnsResp.isNew && isDnsResponseValid(dnsResp.respData) {
 		if domainBitmap, allZero, shouldUpdate := c.checkDomainBitmap(queryInfo.qname); shouldUpdate {
 			ips, ttl := dnsAnswers(dnsResp.respData)
 			err = c.updateLookupCache(queryInfo.qname, domainBitmap, allZero, ips, time.Duration(ttl)*time.Second)
@@ -534,6 +535,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 	// Lookup Cache
 	if c.enableCache {
 		if cache := c.dnsCache.Get(cacheKey); cache != nil {
+			c.dnsCache.Used(cacheKey, cache)
 			respData, expired := CopyResponseFromCache(cache)
 			if expired {
 				dataCopy := pool.GetBuffer(len(data))
@@ -551,12 +553,12 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 					"answer": FormatDnsRsc(respData),
 				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 			}
-			return dnsResponseData{respData: respData, fromPool: true}, nil
+			return dnsResponseData{respData: respData, fromPool: true, isNew: cache.IsNew}, nil
 		}
 	}
 	// Pending for the same lookup.
 	respData, isLeader, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
-	dnsResp := dnsResponseData{}
+	dnsResp := dnsResponseData{isNew: true}
 	if respData != nil {
 		if isLeader {
 			dnsResp.respData = respData
