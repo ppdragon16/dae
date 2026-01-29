@@ -54,6 +54,16 @@ var (
 	LogFileDir string
 )
 
+type dnsRouteCacheKey struct {
+	upstream *dns.Upstream
+	srcIP    [16]byte
+	mac      [6]uint8
+	pname    [16]uint8
+	ifindex  uint32
+	dscp     uint8
+	_        [1]uint8 // padding.
+}
+
 type ControlPlane struct {
 	core       *controlPlaneCore
 	deferFuncs []func() error
@@ -89,6 +99,7 @@ type ControlPlane struct {
 
 	outboundRedirects map[consts.OutboundIndex]consts.OutboundIndex
 	dialOptionPool    sync.Pool
+	dnsRouteCache     sync.Map
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -1120,6 +1131,18 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		bestTarget   netip.AddrPort
 		// dialMark     uint32
 	)
+	var routeKey *dnsRouteCacheKey
+	if !dnsUpstream.IsAsIs {
+		// AsIs's upstream instance is dynamic, so it doesn't support route cache.
+		routeKey = &dnsRouteCacheKey{
+			upstream: dnsUpstream,
+			srcIP:    req.src.Addr().As16(),
+			mac:      req.routingResult.Mac,
+			pname:    req.routingResult.Pname,
+			ifindex:  req.routingResult.Ifindex,
+			dscp:     req.routingResult.Dscp,
+		}
+	}
 	// Get the min latency path.
 	var networkType *common.NetworkType
 	for _, networkType = range allNetworkTypes {
@@ -1137,13 +1160,27 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		default:
 			return oops.Errorf("unexpected ipversion: %v", ver)
 		}
-		// TODO: Mark
-		outboundIndex, _, _, err := c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
-		if err != nil {
-			return err
+		var outboundIndex consts.OutboundIndex
+		shouldRoute := true
+		if routeKey != nil {
+			if v, ok := c.dnsRouteCache.Load(*routeKey); ok {
+				outboundIndex = v.(consts.OutboundIndex)
+				shouldRoute = false
+			}
 		}
-		if int(outboundIndex) >= len(c.outbounds) {
-			return oops.Errorf("bad outbound index: %v", outboundIndex)
+		if shouldRoute {
+			var err error
+			// TODO: Mark
+			outboundIndex, _, _, err = c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
+			if err != nil {
+				return err
+			}
+			if int(outboundIndex) >= len(c.outbounds) {
+				return oops.Errorf("bad outbound index: %v", outboundIndex)
+			}
+		}
+		if routeKey != nil {
+			c.dnsRouteCache.Store(*routeKey, outboundIndex)
 		}
 		// Handles outbound redirects
 		if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
