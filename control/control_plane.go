@@ -99,8 +99,8 @@ type ControlPlane struct {
 
 	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
 	dialOptionPool        sync.Pool
-	dnsRouteCache         sync.Map
-	dnsRoutingResultCache sync.Map
+	dnsRouteCache         *CacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex]
+	dnsRoutingResultCache *CacheWithTTL[netip.Addr, *bpfRoutingResult]
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -430,6 +430,10 @@ func NewControlPlane(
 				return &DialOption{}
 			},
 		},
+		dnsRouteCache: NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
+		dnsRoutingResultCache: NewCacheWithTTL(1*time.Hour, func(_ netip.Addr, v *bpfRoutingResult) {
+			core.RecycleRoutingResult(v)
+		}),
 	}
 	defer func() {
 		if err != nil {
@@ -1017,9 +1021,8 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 				// To keep consistency with kernel program, we only sniff DNS request sent to 53.
 				if dst.Port() == 53 {
 					var routingResult *bpfRoutingResult
-					if v, ok := c.dnsRoutingResultCache.Load(src); ok {
-						routingResult = v.(*bpfRoutingResult)
-					} else {
+					var ok bool
+					if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
 						var err error
 						// Due to the cache, no need to call RecycleRoutingResult().
 						routingResult, err = c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
@@ -1028,7 +1031,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 							pool.PutBuffer(data)
 							return
 						}
-						c.dnsRoutingResultCache.Store(src, routingResult)
+						c.dnsRoutingResultCache.Save(src.Addr(), routingResult)
 					}
 					if routingResult.Must == 0 {
 						dnsReq := newDnsRequest(src, dst, routingResult)
@@ -1142,14 +1145,11 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			return oops.Errorf("unexpected ipversion: %v", ver)
 		}
 		var outboundIndex consts.OutboundIndex
-		shouldRoute := true
+		hasCache := true
 		if routeKey != nil {
-			if v, ok := c.dnsRouteCache.Load(*routeKey); ok {
-				outboundIndex = v.(consts.OutboundIndex)
-				shouldRoute = false
-			}
+			outboundIndex, hasCache = c.dnsRouteCache.Get(*routeKey)
 		}
-		if shouldRoute {
+		if !hasCache {
 			var err error
 			// TODO: Mark
 			outboundIndex, _, _, err = c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
@@ -1159,9 +1159,9 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			if int(outboundIndex) >= len(c.outbounds) {
 				return oops.Errorf("bad outbound index: %v", outboundIndex)
 			}
-		}
-		if routeKey != nil {
-			c.dnsRouteCache.Store(*routeKey, outboundIndex)
+			if routeKey != nil {
+				c.dnsRouteCache.Save(*routeKey, outboundIndex)
+			}
 		}
 		// Handles outbound redirects
 		if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
