@@ -1021,6 +1021,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 						routingResult = v.(*bpfRoutingResult)
 					} else {
 						var err error
+						// Due to the cache, no need to call RecycleRoutingResult().
 						routingResult, err = c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
 						if err != nil {
 							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
@@ -1035,11 +1036,9 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 						dnsRequestPool.Put(dnsReq)
 						if handled {
 							pool.PutBuffer(data)
-							c.core.RecycleRoutingResult(routingResult)
 							return
 						}
 					}
-					c.core.RecycleRoutingResult(routingResult)
 				}
 
 				DefaultUdpTaskPool.EmitTask(src, func() {
