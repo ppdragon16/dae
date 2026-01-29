@@ -224,9 +224,11 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 	ipVersion := consts.IpVersionFromAddr(dst.Addr())
 	bSrc := src.Addr().As16()
 	bDst := dst.Addr().As16()
+	var bMac [16]byte
+	copy(bMac[10:], routingResult.Mac[:])
 	return c.routingMatcher.Match(
-		bSrc[:],
-		bDst[:],
+		bSrc,
+		bDst,
 		src.Port(),
 		dst.Port(),
 		ipVersion,
@@ -235,7 +237,7 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 		routingResult.Pname,
 		routingResult.Ifindex,
 		routingResult.Dscp,
-		append([]uint8{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, routingResult.Mac[:]...),
+		bMac,
 	)
 }
 

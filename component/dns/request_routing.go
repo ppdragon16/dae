@@ -165,10 +165,9 @@ func (m *RequestMatcher) Match(
 	qName string,
 	qType uint16,
 ) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
-	var domainMatchBitmap []uint32
+	var domainMatchBitmap [32]uint32
 	if qName != "" {
-		domainMatchBitmap = m.domainMatcher.MatchDomainBitmap(qName)
-		defer domain_matcher.ReleaseBitmap(domainMatchBitmap)
+		m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap[:])
 	}
 
 	goodSubrule := false
@@ -179,7 +178,7 @@ func (m *RequestMatcher) Match(
 		}
 		switch match.Type {
 		case consts.MatchType_DomainSet:
-			if domainMatchBitmap != nil && (domainMatchBitmap[i/32]>>(i%32))&1 > 0 {
+			if (domainMatchBitmap[i>>5] & (1 << (uint(i) & 31))) != 0 {
 				goodSubrule = true
 			}
 		case consts.MatchType_QType:

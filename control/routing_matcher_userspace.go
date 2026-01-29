@@ -8,12 +8,9 @@ package control
 import (
 	"encoding/binary"
 	"fmt"
-	"net"
-	"net/netip"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/routing"
-	"github.com/daeuniverse/dae/component/routing/domain_matcher"
 	"github.com/daeuniverse/dae/pkg/trie"
 )
 
@@ -26,8 +23,8 @@ type RoutingMatcher struct {
 
 // Match is modified from kern/tproxy.c; please keep sync.
 func (m *RoutingMatcher) Match(
-	sourceAddr []byte,
-	destAddr []byte,
+	sourceAddr [16]byte,
+	destAddr [16]byte,
 	sourcePort uint16,
 	destPort uint16,
 	ipVersion consts.IpVersionType,
@@ -36,21 +33,16 @@ func (m *RoutingMatcher) Match(
 	processName [16]uint8,
 	ifindex uint32,
 	tos uint8,
-	mac []byte,
+	mac [16]byte,
 ) (outboundIndex consts.OutboundIndex, mark uint32, must bool, err error) {
-	if len(sourceAddr) != net.IPv6len || len(destAddr) != net.IPv6len || len(mac) != net.IPv6len {
-		return 0, 0, false, fmt.Errorf("bad address length")
-	}
+	var bin128s [consts.MatchType_Mac + 1][16]byte
+	bin128s[consts.MatchType_IpSet] = destAddr
+	bin128s[consts.MatchType_SourceIpSet] = sourceAddr
+	bin128s[consts.MatchType_Mac] = mac
 
-	bin128s := make([]string, consts.MatchType_Mac+1)
-	bin128s[consts.MatchType_IpSet] = trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(*(*[16]byte)(destAddr)), 128))
-	bin128s[consts.MatchType_SourceIpSet] = trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(*(*[16]byte)(sourceAddr)), 128))
-	bin128s[consts.MatchType_Mac] = trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(*(*[16]byte)(mac)), 128))
-
-	var domainMatchBitmap []uint32
+	var domainMatchBitmap [32]uint32
 	if domain != "" {
-		domainMatchBitmap = m.domainMatcher.MatchDomainBitmap(domain)
-		defer domain_matcher.ReleaseBitmap(domainMatchBitmap)
+		m.domainMatcher.MatchDomainBitmapInplace(domain, domainMatchBitmap[:])
 	}
 
 	goodSubrule := false
@@ -63,11 +55,11 @@ func (m *RoutingMatcher) Match(
 		case consts.MatchType_IpSet, consts.MatchType_SourceIpSet, consts.MatchType_Mac:
 			lpmIndex := uint32(binary.LittleEndian.Uint16(match.Value[:]))
 			m := m.lpmMatcher[lpmIndex]
-			if m.HasPrefix(bin128s[match.Type]) {
+			if m.HasPrefixAddr(bin128s[match.Type]) {
 				goodSubrule = true
 			}
 		case consts.MatchType_DomainSet:
-			if domainMatchBitmap != nil && (domainMatchBitmap[i/32]>>(i%32))&1 > 0 {
+			if (domainMatchBitmap[i>>5] & (1 << (uint(i) & 31))) != 0 {
 				goodSubrule = true
 			}
 		case consts.MatchType_Port:

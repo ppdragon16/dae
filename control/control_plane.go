@@ -445,8 +445,8 @@ func NewControlPlane(
 		return nil, err
 	}
 	if plane.dnsController, err = NewDnsController(dnsUpstream, &DnsControllerOption{
-		MatchBitmap: func(fqdn string) []uint32 {
-			return plane.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn)
+		MatchBitmap: func(fqdn string, bitmap []uint32) {
+			plane.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap)
 		},
 		NewLookupCache: func(ip netip.Addr, domainBitmap [32]uint32) error {
 			// Write mappings into eBPF map:
@@ -767,7 +767,9 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 		// Successful sniff without DNS lookup record.
 		// Only tries to reroute when the domain is mentioned in routing rules.
 		shouldRerouteFunc = func() bool {
-			for _, v := range c.routingMatcher.domainMatcher.MatchDomainBitmap(fqdn) {
+			var bitmap [32]uint32
+			c.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap[:])
+			for _, v := range bitmap {
 				if v != 0 {
 					return true
 				}

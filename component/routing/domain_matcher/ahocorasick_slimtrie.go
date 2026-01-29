@@ -110,7 +110,42 @@ func (n *AhocorasickSlimtrie) MatchDomainBitmap(domain string) (bitmap []uint32)
 		bitmap[i] = 0
 	}
 
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	n.MatchDomainBitmapInplace(domain, bitmap)
+	return bitmap
+}
+func (n *AhocorasickSlimtrie) MatchDomainBitmapInplace(domain string, bitmap []uint32) {
+	N := len(n.ac) / 32
+	if len(n.ac)%32 != 0 {
+		N++
+	}
+	if len(bitmap) < N {
+		return
+	}
+	for i := range bitmap {
+		bitmap[i] = 0
+	}
+
+	var buf [256]byte
+	dLen := len(domain)
+	if dLen == 0 || dLen > 253 {
+		return
+	}
+
+	// Faster byte level: strings.ToLower(strings.TrimSuffix(domain, "."))
+	if domain[dLen-1] == '.' {
+		dLen--
+	}
+	acDomainBytes := buf[:dLen+2] // ^domain$
+	acDomainBytes[0] = '^'
+	for i := 0; i < dLen; i++ {
+		c := domain[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		acDomainBytes[i+1] = c
+	}
+	acDomainBytes[dLen+1] = '$'
+
 	// Domain should consist of 'a'-'z' and '.' and '-'
 	// NOTE: DO NOT VERIFY THE DOMAIN TO MATCH: https://github.com/daeuniverse/dae/issues/528
 	// for _, b := range []byte(domain) {
@@ -119,42 +154,43 @@ func (n *AhocorasickSlimtrie) MatchDomainBitmap(domain string) (bitmap []uint32)
 	// 	}
 	// }
 	// Suffix matching via backward iteration (avoids string reversal allocation).
-	checkDomain := "^" + domain
+	checkDomain := acDomainBytes[:dLen+1] // ^domain
 	for _, i := range n.validTrieIndexes {
-		if bitmap[i/32]&(1<<(i%32)) > 0 {
+		idx, bit := i>>5, uint(i)&31
+		if bitmap[idx]&(1<<bit) != 0 {
 			continue
 		}
 		if n.trie[i].HasSuffix(checkDomain) {
-			bitmap[i/32] |= 1 << (i % 32)
+			bitmap[idx] |= 1 << bit
 		}
 	}
 	// Keyword matching.
 	// Add magic chars as head and tail.
-	acDomain := "^" + domain + "$"
 	for _, i := range n.validAcIndexes {
-		if bitmap[i/32]&(1<<(i%32)) > 0 {
-			// Already matched.
+		idx, bit := i>>5, uint(i)&31
+		if bitmap[idx]&(1<<bit) != 0 {
 			continue
 		}
-		if n.ac[i].Contains([]byte(acDomain)) {
-			bitmap[i/32] |= 1 << (i % 32)
+		if n.ac[i].Contains(acDomainBytes) {
+			bitmap[idx] |= 1 << bit
 		}
 	}
 	// Regex matching.
+	domainBytes := acDomainBytes[1 : dLen+1] // domain
 	for _, i := range n.validRegexpIndexes {
-		if bitmap[i/32]&(1<<(i%32)) > 0 {
-			// Already matched.
+		idx, bit := i>>5, uint(i)&31
+		if bitmap[idx]&(1<<bit) != 0 {
 			continue
 		}
 		for _, r := range n.regexp[i] {
-			if r.MatchString(domain) {
-				bitmap[i/32] |= 1 << (i % 32)
+			if r.Match(domainBytes) {
+				bitmap[idx] |= 1 << bit
 				break
 			}
 		}
 	}
-	return bitmap
 }
+
 // ReleaseBitmap returns the bitmap to the pool.
 func ReleaseBitmap(bitmap []uint32) {
 	if bitmap == nil {

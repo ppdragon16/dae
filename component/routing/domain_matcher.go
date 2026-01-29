@@ -11,4 +11,5 @@ type DomainMatcher interface {
 	AddSet(bitIndex int, patterns []string, typ consts.RoutingDomainKey)
 	Build() error
 	MatchDomainBitmap(domain string) (bitmap []uint32)
+	MatchDomainBitmapInplace(domain string, bitmap []uint32)
 }

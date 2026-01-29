@@ -7,9 +7,10 @@ package domain_matcher
 
 import (
 	"fmt"
-	"github.com/daeuniverse/dae/common/consts"
 	"regexp"
 	"strings"
+
+	"github.com/daeuniverse/dae/common/consts"
 )
 
 type GoRegexpNfa struct {
@@ -63,13 +64,23 @@ func (n *GoRegexpNfa) MatchDomainBitmap(domain string) (bitmap []uint32) {
 		N++
 	}
 	bitmap = make([]uint32, N)
+	n.MatchDomainBitmapInplace(domain, bitmap)
+	return bitmap
+}
+func (n *GoRegexpNfa) MatchDomainBitmapInplace(domain string, bitmap []uint32) {
+	N := len(n.nfa) / 32
+	if len(n.nfa)%32 != 0 {
+		N++
+	}
+	if len(bitmap) < N {
+		return
+	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	for _, i := range n.validIndexes {
 		if n.nfa[i].MatchString(domain) {
 			bitmap[i/32] |= 1 << (i % 32)
 		}
 	}
-	return bitmap
 }
 func (n *GoRegexpNfa) Build() error {
 	if n.err != nil {

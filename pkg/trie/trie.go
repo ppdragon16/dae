@@ -215,6 +215,36 @@ func NewTrie(keys []string, chars *ValidChars) (*Trie, error) {
 	return ss, nil
 }
 
+// HasPrefix query to accept [16]byte to match IP Addr, for zero-alloc.
+func (ss *Trie) HasPrefixAddr(ip [16]byte) bool {
+	nodeId, bmIdx := 0, 0
+
+	for i := range 128 {
+		if (ss.leaves[nodeId>>6] & (1 << uint(nodeId&63))) != 0 {
+			return true
+		}
+
+		bit := (ip[i>>3] >> (7 - (i & 7))) & 1
+
+		for ; ; bmIdx++ {
+			if (ss.labelBitmap[bmIdx>>6] & (1 << uint(bmIdx&63))) != 0 {
+				// no more labels in this node
+				return false
+			}
+
+			if byte(ss.labels.Get(bmIdx-nodeId)) == byte(bit) {
+				break
+			}
+		}
+
+		// go to next level
+		nodeId = countZeros(ss.labelBitmap, ss.ranksBL, bmIdx+1)
+		bmIdx = selectIthOne(ss.labelBitmap, ss.ranksBL, ss.selectsBL, nodeId-1) + 1
+	}
+
+	return (ss.leaves[nodeId>>6] & (1 << uint(nodeId&63))) != 0
+}
+
 // HasPrefix query for a word and return whether a prefix of the word is in the Trie.
 func (ss *Trie) HasPrefix(word string) bool {
 
@@ -250,11 +280,11 @@ func (ss *Trie) HasPrefix(word string) bool {
 
 // HasSuffix iterates word backwards and checks if any suffix matches the Trie.
 // The Trie must have been built with reversed strings (via ToSuffixTrieString).
-func (ss *Trie) HasSuffix(word string) bool {
+func (ss *Trie) HasSuffix(word []byte) bool {
 	// Determine label bit size.
 	// We cannot access ss.labels.unitBitSize directly as it is private, but it is derived from chars.Size().
 	unitBitSize := bits.Len(uint(ss.chars.Size()))
-	
+
 	nodeId, bmIdx := 0, 0
 	labelsRaw := ss.labels.Raw()
 
@@ -280,12 +310,12 @@ func (ss *Trie) HasSuffix(word string) bool {
 				bitPos := offset * 6
 				wordIdx := bitPos >> 4
 				bitShift := bitPos & 15
-				
+
 				v := labelsRaw[wordIdx] >> bitShift
 				if bitShift > 10 {
 					v |= labelsRaw[wordIdx+1] << (16 - bitShift)
 				}
-				
+
 				if byte(v&0x3F) == charIndex {
 					break
 				}

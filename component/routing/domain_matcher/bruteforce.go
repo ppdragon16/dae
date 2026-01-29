@@ -7,10 +7,11 @@ package domain_matcher
 
 import (
 	"fmt"
-	"github.com/daeuniverse/dae/common/consts"
-	"github.com/daeuniverse/dae/component/routing"
 	"regexp"
 	"strings"
+
+	"github.com/daeuniverse/dae/common/consts"
+	"github.com/daeuniverse/dae/component/routing"
 )
 
 type Bruteforce struct {
@@ -42,8 +43,19 @@ func (n *Bruteforce) MatchDomainBitmap(domain string) (bitmap []uint32) {
 	if len(n.simulatedDomainSet)%32 != 0 {
 		N++
 	}
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	bitmap = make([]uint32, N)
+	n.MatchDomainBitmapInplace(domain, bitmap)
+	return bitmap
+}
+func (n *Bruteforce) MatchDomainBitmapInplace(domain string, bitmap []uint32) {
+	N := len(n.simulatedDomainSet) / 32
+	if len(n.simulatedDomainSet)%32 != 0 {
+		N++
+	}
+	if len(bitmap) < N {
+		return
+	}
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	for _, s := range n.simulatedDomainSet {
 		for _, d := range s.Domains {
 			var hit bool
@@ -72,7 +84,6 @@ func (n *Bruteforce) MatchDomainBitmap(domain string) (bitmap []uint32) {
 			}
 		}
 	}
-	return bitmap
 }
 func (n *Bruteforce) Build() error {
 	if n.err != nil {

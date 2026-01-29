@@ -222,8 +222,8 @@ func (m *ResponseMatcher) Match(
 	if qName == "" {
 		return 0, fmt.Errorf("qName cannot be empty")
 	}
-	domainMatchBitmap := m.domainMatcher.MatchDomainBitmap(qName)
-	defer domain_matcher.ReleaseBitmap(domainMatchBitmap)
+	var domainMatchBitmap [32]uint32
+	m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap[:])
 	bin128 := make([]string, 0, len(ips))
 	for _, ip := range ips {
 		bin128 = append(bin128, trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(ip.As16()), 128)))
@@ -237,7 +237,7 @@ func (m *ResponseMatcher) Match(
 		}
 		switch match.Type {
 		case consts.MatchType_DomainSet:
-			if domainMatchBitmap != nil && (domainMatchBitmap[i/32]>>(i%32))&1 > 0 {
+			if (domainMatchBitmap[i>>5] & (1 << (uint(i) & 31))) != 0 {
 				goodSubrule = true
 			}
 		case consts.MatchType_IpSet:
