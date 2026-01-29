@@ -41,9 +41,7 @@ func (m *RoutingMatcher) Match(
 	bin128s[consts.MatchType_Mac] = mac
 
 	var domainMatchBitmap [32]uint32
-	if domain != "" {
-		m.domainMatcher.MatchDomainBitmapInplace(domain, domainMatchBitmap[:])
-	}
+	bitmapFetched := domain == ""
 
 	goodSubrule := false
 	badRule := false
@@ -59,6 +57,10 @@ func (m *RoutingMatcher) Match(
 				goodSubrule = true
 			}
 		case consts.MatchType_DomainSet:
+			if !bitmapFetched {
+				m.domainMatcher.MatchDomainBitmapInplace(domain, domainMatchBitmap[:])
+				bitmapFetched = true
+			}
 			if (domainMatchBitmap[i>>5] & (1 << (uint(i) & 31))) != 0 {
 				goodSubrule = true
 			}
