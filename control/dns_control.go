@@ -53,8 +53,8 @@ var (
 
 type DnsControllerOption struct {
 	MatchBitmap        func(fqdn string, bitmap []uint32)
-	NewLookupCache     func(ip netip.Addr, domainBitmap [32]uint32) error
-	LookupCacheTimeout func(ip netip.Addr, domainBitmap [32]uint32) error
+	NewLookupCache     func(ip netip.Addr, domainBitmap *[32]uint32) error
+	LookupCacheTimeout func(ip netip.Addr, domainBitmap *[32]uint32) error
 	BestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error
 	IpVersionPrefer    int
 	FixedDomainTtl     map[string]int
@@ -68,8 +68,8 @@ type DnsController struct {
 	qtypePrefer uint16
 
 	matchBitmap        func(fqdn string, bitmap []uint32)
-	newLookupCache     func(ip netip.Addr, domainBitmap [32]uint32) error
-	lookupCacheTimeout func(ip netip.Addr, domainBitmap [32]uint32) error
+	newLookupCache     func(ip netip.Addr, domainBitmap *[32]uint32) error
+	lookupCacheTimeout func(ip netip.Addr, domainBitmap *[32]uint32) error
 	bestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error
 
 	fixedDomainTtl    map[string]int
@@ -417,9 +417,9 @@ Dial:
 	// TOOD: 细分日志
 	if dnsResp.isNew && isDnsResponseValid(dnsResp.respData) {
 		var domainBitmap [32]uint32
-		if allZero, shouldUpdate := c.checkDomainBitmap(queryInfo.qname, domainBitmap[:]); shouldUpdate {
+		if allZero, shouldUpdate := c.checkDomainBitmap(queryInfo.qname, &domainBitmap); shouldUpdate {
 			ips, ttl := dnsAnswers(dnsResp.respData)
-			err = c.updateLookupCache(queryInfo.qname, domainBitmap, allZero, ips, time.Duration(ttl)*time.Second)
+			err = c.updateLookupCache(queryInfo.qname, &domainBitmap, allZero, ips, time.Duration(ttl)*time.Second)
 		}
 	}
 	return dnsResp, err
@@ -452,8 +452,8 @@ func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgume
 	}
 }
 
-func (c *DnsController) checkDomainBitmap(qname string, domainBitmap []uint32) (allZero bool, shouldUpdateLookupCache bool) {
-	c.matchBitmap(qname, domainBitmap)
+func (c *DnsController) checkDomainBitmap(qname string, domainBitmap *[32]uint32) (allZero bool, shouldUpdateLookupCache bool) {
+	c.matchBitmap(qname, domainBitmap[:])
 	allZero = true
 	for _, v := range domainBitmap {
 		if v != 0 {
@@ -468,7 +468,7 @@ func (c *DnsController) checkDomainBitmap(qname string, domainBitmap []uint32) (
 	return
 }
 
-func (c *DnsController) updateLookupCache(qname string, domainBitmap [32]uint32, allZero bool, ips []netip.Addr, ttl time.Duration) error {
+func (c *DnsController) updateLookupCache(qname string, domainBitmap *[32]uint32, allZero bool, ips []netip.Addr, ttl time.Duration) error {
 	if len(ips) == 0 {
 		return nil
 	}
@@ -514,8 +514,8 @@ func (c *DnsController) MaybeUpdateLookupCache(qname string, ips []netip.Addr, t
 		return nil
 	}
 	var domainBitmap [32]uint32
-	if allZero, shouldUpdate := c.checkDomainBitmap(qname, domainBitmap[:]); shouldUpdate {
-		return c.updateLookupCache(qname, domainBitmap, allZero, ips, ttl)
+	if allZero, shouldUpdate := c.checkDomainBitmap(qname, &domainBitmap); shouldUpdate {
+		return c.updateLookupCache(qname, &domainBitmap, allZero, ips, ttl)
 	}
 	return nil
 }

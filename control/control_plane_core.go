@@ -679,7 +679,7 @@ func clearBitArray(bitmap *[32]uint32, index int) {
 // BatchNewDomain update bpf map domain_bump and domain_routing. This function should be invoked every new cache.
 // TODO: 处理域名 IP 变更的情况
 // 这需要对新增的 answers 单独调用 BatchNewDomain, 同时针对每个 answer 单独处理过期时的 BatchRemoveDomain
-func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap [32]uint32) error {
+func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap *[32]uint32) error {
 	// Update bpf map.
 	// Construct keys and vals, and BpfMapBatchUpdate.
 	c.bumpMapMu.Lock()
@@ -696,7 +696,7 @@ func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap [32]uint32
 		c.domainUnmatchedMap[ip] = make([]uint32, consts.MaxMatchSetLen)
 	}
 	for index := 0; index < consts.MaxMatchSetLen; index++ {
-		current := getBitArray(&domainBitmap, index)
+		current := getBitArray(domainBitmap, index)
 		c.domainBumpMap[ip][index] += current
 		if current == 0 {
 			c.domainUnmatchedMap[ip][index]++
@@ -711,7 +711,7 @@ func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap [32]uint32
 
 	if !exists {
 		// New IP, init routingMap
-		c.domainRoutingMap[ip] = domainBitmap
+		c.domainRoutingMap[ip] = *domainBitmap
 	} else {
 		// Old IP, Update routingMap
 		routingMap := c.domainRoutingMap[ip]
@@ -719,7 +719,7 @@ func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap [32]uint32
 			// If this domain matches the current rule, all previous domains also match the current rule, then it still matches, so no need to update
 			// If previous domains not match the current rule, then it still not match, so no need to update
 			// If previous domains match the current rule, but current domain not match, then it does not match, so need to update
-			if getBitArray(&routingMap, index) == 1 && getBitArray(&domainBitmap, index) != 1 {
+			if getBitArray(&routingMap, index) == 1 && getBitArray(domainBitmap, index) != 1 {
 				clearBitArray(&routingMap, index)
 			}
 		}
@@ -739,7 +739,7 @@ func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap [32]uint32
 
 // TODO: 如果不 GC 有什么代价呢? 随着时间增加准确性下降?
 // BatchRemoveDomainBump update or remove bpf map domain_bump and domain_routing.
-func (c *controlPlaneCore) BatchRemoveDomain(ip netip.Addr, domainBitmap [32]uint32) error {
+func (c *controlPlaneCore) BatchRemoveDomain(ip netip.Addr, domainBitmap *[32]uint32) error {
 	// Update bpf map.
 	// Update and determine whether to delete
 
@@ -747,7 +747,7 @@ func (c *controlPlaneCore) BatchRemoveDomain(ip netip.Addr, domainBitmap [32]uin
 	defer c.bumpMapMu.Unlock()
 
 	for index := 0; index < consts.MaxMatchSetLen; index++ {
-		current := getBitArray(&domainBitmap, index)
+		current := getBitArray(domainBitmap, index)
 		c.domainBumpMap[ip][index] -= current
 		if current == 0 {
 			c.domainUnmatchedMap[ip][index]--

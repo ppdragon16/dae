@@ -97,9 +97,10 @@ type ControlPlane struct {
 	trafficLogger      *TrafficLogger
 	PrometheusRegistry *prometheus.Registry
 
-	outboundRedirects map[consts.OutboundIndex]consts.OutboundIndex
-	dialOptionPool    sync.Pool
-	dnsRouteCache     sync.Map
+	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
+	dialOptionPool        sync.Pool
+	dnsRouteCache         sync.Map
+	dnsRoutingResultCache sync.Map
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -459,7 +460,7 @@ func NewControlPlane(
 		MatchBitmap: func(fqdn string, bitmap []uint32) {
 			plane.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap)
 		},
-		NewLookupCache: func(ip netip.Addr, domainBitmap [32]uint32) error {
+		NewLookupCache: func(ip netip.Addr, domainBitmap *[32]uint32) error {
 			// Write mappings into eBPF map:
 			// IP record (from dns lookup) -> domain routing
 			if err := core.BatchNewDomain(ip, domainBitmap); err != nil {
@@ -467,7 +468,7 @@ func NewControlPlane(
 			}
 			return nil
 		},
-		LookupCacheTimeout: func(ip netip.Addr, domainBitmap [32]uint32) error {
+		LookupCacheTimeout: func(ip netip.Addr, domainBitmap *[32]uint32) error {
 			if err := core.BatchRemoveDomain(ip, domainBitmap); err != nil {
 				return oops.Wrapf(err, "BatchRemoveDomain")
 			}
@@ -996,61 +997,10 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	}
 
 	go func() {
-		// Workder pool for dns.
-		const workerCount = 64 // or runtime.NumCPU()
-		workerChans := make([]chan *udpJob, workerCount)
-		defer func() {
-			for _, ch := range workerChans {
-				close(ch)
-			}
-		}()
-		for i := range workerCount {
-			workerChans[i] = make(chan *udpJob, 1000)
-			go func(id int, ch chan *udpJob) {
-				for job := range ch {
-					dst := common.ConvergeAddrPort(RetrieveOriginalDest(job.oob))
-					pool.PutBuffer(job.oob)
-					src := common.ConvergeAddrPort(job.src)
-					data := job.data
-					/// Handle DNS
-					// To keep consistency with kernel program, we only sniff DNS request sent to 53.
-					if dst.Port() == 53 {
-						routingResult, err := c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
-						if err != nil {
-							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
-							pool.PutBuffer(data)
-							continue
-						}
-						if routingResult.Must == 0 {
-							dnsReq := newDnsRequest(src, dst, routingResult)
-							handled := c.dnsController.Handle(data, dnsReq)
-							dnsRequestPool.Put(dnsReq)
-							if handled {
-								pool.PutBuffer(data)
-								c.core.RecycleRoutingResult(routingResult)
-								continue
-							}
-						}
-						c.core.RecycleRoutingResult(routingResult)
-					}
-
-					DefaultUdpTaskPool.EmitTask(src, func() {
-						defer pool.PutBuffer(data)
-						if e := c.handlePkt(udpConn, data, src, dst, false); e != nil && c.ctx.Err() == nil {
-							log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
-						}
-					})
-				}
-			}(i, workerChans[i])
-		}
-
-		buf := pool.GetBuffer(consts.EthernetMtu)
-		oob := pool.GetBuffer(120)
-		defer pool.PutBuffer(buf)
-		defer pool.PutBuffer(oob)
-		index := 0
 		for {
-			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(buf, oob)
+			buf := pool.GetBuffer(consts.EthernetMtu)
+			oobBuf := pool.GetBuffer(120)
+			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(buf, oobBuf)
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
 					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -1059,14 +1009,46 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 				}
 				break
 			}
+			go func(data, oob []byte) {
+				dst := common.ConvergeAddrPort(RetrieveOriginalDest(oob))
+				pool.PutBuffer(oob)
+				src := common.ConvergeAddrPort(src)
+				/// Handle DNS
+				// To keep consistency with kernel program, we only sniff DNS request sent to 53.
+				if dst.Port() == 53 {
+					var routingResult *bpfRoutingResult
+					if v, ok := c.dnsRoutingResultCache.Load(src); ok {
+						routingResult = v.(*bpfRoutingResult)
+					} else {
+						var err error
+						routingResult, err = c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
+						if err != nil {
+							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
+							pool.PutBuffer(data)
+							return
+						}
+						c.dnsRoutingResultCache.Store(src, routingResult)
+					}
+					if routingResult.Must == 0 {
+						dnsReq := newDnsRequest(src, dst, routingResult)
+						handled := c.dnsController.Handle(data, dnsReq)
+						dnsRequestPool.Put(dnsReq)
+						if handled {
+							pool.PutBuffer(data)
+							c.core.RecycleRoutingResult(routingResult)
+							return
+						}
+					}
+					c.core.RecycleRoutingResult(routingResult)
+				}
 
-			oobData := pool.GetBuffer(oobn)
-			copy(oobData, oob[:oobn])
-			data := pool.GetBuffer(n)
-			copy(data, buf[:n])
-
-			workerChans[index%workerCount] <- &udpJob{src: src, oob: oobData, data: data}
-			index++
+				DefaultUdpTaskPool.EmitTask(src, func() {
+					defer pool.PutBuffer(data)
+					if e := c.handlePkt(udpConn, data, src, dst, false); e != nil && c.ctx.Err() == nil {
+						log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
+					}
+				})
+			}(buf[:n], oobBuf[:oobn])
 		}
 	}()
 	<-c.ctx.Done()
