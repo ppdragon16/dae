@@ -537,7 +537,6 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 	// Lookup Cache
 	if c.enableCache {
 		if cache := c.dnsCache.Get(cacheKey); cache != nil {
-			c.dnsCache.Used(cacheKey, cache)
 			respData, expired := CopyResponseFromCache(cache)
 			if expired {
 				dataCopy := pool.GetBuffer(len(data))
