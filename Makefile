@@ -9,6 +9,7 @@
 CLANG ?= clang
 STRIP ?= llvm-strip
 CFLAGS := -O2 -Wall -Werror $(CFLAGS)
+GOAMD64 ?= v2
 TARGET ?= bpfel,bpfeb
 OUTPUT ?= dae
 MAX_MATCH_SET_LEN ?= 1024
@@ -39,7 +40,7 @@ else
 	VERSION ?= unstable-$(date).r$(count).$(commit)
 endif
 
-BUILD_ARGS := -trimpath -ldflags "-s -w -X github.com/daeuniverse/dae/cmd.Version=$(VERSION) -X github.com/daeuniverse/dae/common/consts.MaxMatchSetLen_=$(MAX_MATCH_SET_LEN)" $(BUILD_ARGS)
+BUILD_ARGS := -trimpath -pgo=auto -ldflags "-s -w -X github.com/daeuniverse/dae/cmd.Version=$(VERSION) -X github.com/daeuniverse/dae/common/consts.MaxMatchSetLen_=$(MAX_MATCH_SET_LEN)" $(BUILD_ARGS)
 
 .PHONY: clean-ebpf ebpf dae submodule submodules
 
@@ -50,7 +51,7 @@ dae: export CGO_ENABLED=0
 endif
 dae: ebpf
 	@echo $(CFLAGS)
-	go build -tags=$(shell cat $(BUILD_TAGS_FILE)) -o $(OUTPUT) $(BUILD_ARGS) .
+	GOAMD64=$(GOAMD64) go build -tags=$(shell cat $(BUILD_TAGS_FILE)) -o $(OUTPUT) $(BUILD_ARGS) .
 ## End Dae Build
 
 ## Begin Git Submodules
