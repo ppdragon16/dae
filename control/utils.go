@@ -165,7 +165,9 @@ func (tc *TrafficLogConn) Read(p []byte) (int, error) {
 	if tc.flushTimer == nil {
 		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
 	}
-	tc.logger.Log(tc.src, tc.dst, "down", int64(n))
+	if tc.logger != nil {
+		tc.logger.Log(tc.src, tc.dst, "down", int64(n))
+	}
 	return n, err
 }
 
@@ -175,7 +177,9 @@ func (tc *TrafficLogConn) Write(p []byte) (int, error) {
 	if tc.flushTimer == nil {
 		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
 	}
-	tc.logger.Log(tc.src, tc.dst, "up", int64(n))
+	if tc.logger != nil {
+		tc.logger.Log(tc.src, tc.dst, "up", int64(n))
+	}
 	return n, err
 }
 

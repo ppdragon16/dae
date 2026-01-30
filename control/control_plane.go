@@ -395,9 +395,12 @@ func NewControlPlane(
 	if err != nil {
 		return nil, oops.Errorf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
-	trafficLogger, err := NewTrafficLogger(filepath.Join(LogFileDir, "traffic.log"), 5*time.Minute)
-	if err != nil {
-		return nil, oops.Errorf("NewTrafficLogger: %w", err)
+	var trafficLogger *TrafficLogger
+	if global.EnableTrafficLog {
+		trafficLogger, err = NewTrafficLogger(filepath.Join(LogFileDir, "traffic.log"), 5*time.Minute)
+		if err != nil {
+			return nil, oops.Errorf("NewTrafficLogger: %w", err)
+		}
 	}
 
 	// New control plane.

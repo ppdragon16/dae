@@ -58,6 +58,7 @@ type Global struct {
 	// TODO: skip?
 	NoConnectivityBehavior string        `mapstructure:"no_connectivity_behavior" default:"block"`
 	UDPHopInterval         time.Duration `mapstructure:"udphop_interval" default:"30s"`
+	EnableTrafficLog       bool          `mapstructure:"enable_traffic_log" default:"false"`
 }
 
 type Utls struct {
