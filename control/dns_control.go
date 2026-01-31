@@ -407,6 +407,9 @@ Dial:
 			}).Debugln("Change DNS upstream and resend")
 		}
 		upstream = nextUpstream
+		if dnsResp.respData != nil && dnsResp.fromPool {
+			pool.PutBuffer(dnsResp.respData)
+		}
 	}
 	// TODO: dial_mode: domain 的逻辑失效问题
 	// TODO: 我们现在缓存了它, 但并不响应缓存, 这是一个workround, 会导致污染其他非AsIs的查询
