@@ -561,10 +561,10 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 		}
 	}
 	// Pending for the same lookup.
-	respData, isLeader, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
+	respData, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
 	dnsResp := dnsResponseData{isNew: true}
 	if respData != nil {
-		if isLeader {
+		if !shared {
 			dnsResp.respData = respData
 			dnsResp.fromPool = false
 		} else {
@@ -580,9 +580,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 
 func (c *DnsController) singleFlightForwardDNS(
 	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument) ([]byte, bool, error) {
-	isLeader := false
-	v, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
-		isLeader = true
+	v, err, shared := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		var forwarder DnsForwarder
 		key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
 		// get forwarder from cache
@@ -647,9 +645,9 @@ func (c *DnsController) singleFlightForwardDNS(
 		return r, nil
 	})
 	if v != nil {
-		return v.([]byte), isLeader, err
+		return v.([]byte), shared, err
 	}
-	return nil, isLeader, err
+	return nil, false, err
 }
 
 func (c *DnsController) Close() error {

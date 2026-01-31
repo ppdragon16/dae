@@ -81,14 +81,12 @@ func NewDnsManager(conn net.Conn, stream bool, dialer string) *DnsManager {
 }
 
 func (m *DnsManager) run() {
-	buf := pool.GetBuffer(consts.EthernetMtu)
-	defer pool.PutBuffer(buf)
 	for {
 		var data []byte
 		var err error
-		if data, err = m.read(buf); err != nil {
+		if data, err = m.read(); err != nil {
 			var le LeveledError
-			if errors.As(err, &le) {
+			if errors.As(err, &le) && log.IsLevelEnabled(le.Level()) {
 				log.WithError(err).Logf(le.Level(), "DnsManager closed, dialer: %v", m.dialer)
 			}
 			m.Close()
@@ -98,27 +96,28 @@ func (m *DnsManager) run() {
 	}
 }
 
-func (m *DnsManager) read(buf []byte) (data []byte, err error) {
+func (m *DnsManager) read() (data []byte, err error) {
 	if m.stream {
-		msgLenBuf := buf[:2]
+		var lenBuf [2]byte
 		// Read two byte length.
-		if _, err = io.ReadFull(m.conn, msgLenBuf); err != nil {
+		if _, err = io.ReadFull(m.conn, lenBuf[:]); err != nil {
 			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload length"))
 		}
-		msgLen := int(binary.BigEndian.Uint16(msgLenBuf))
-		if msgLen > len(buf) {
-			return data, AsWarn(oops.Wrapf(err, "tcp dns msg len too large: %d > %d", msgLen, len(buf)))
+		msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+		if msgLen > consts.EthernetMtu {
+			return data, AsWarn(oops.Wrapf(err, "tcp dns msg len too large: %d > %d", msgLen, consts.EthernetMtu))
 		}
-		data = buf[:msgLen]
+		data = make([]byte, msgLen)
 		if _, err = io.ReadFull(m.conn, data); err != nil {
 			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload"))
 		}
 	} else {
+		data = make([]byte, consts.EthernetMtu)
 		var n int
-		if n, err = m.conn.Read(buf); err != nil {
+		if n, err = m.conn.Read(data); err != nil {
 			return data, AsError(oops.Wrapf(err, "failed to read udp DNS resp payload"))
 		}
-		data = buf[:n]
+		data = data[:n]
 	}
 	return data, nil
 }
@@ -127,18 +126,20 @@ func (m *DnsManager) feed(data []byte) {
 	id := dnsId(data)
 	conn, ok := m.recvMap.Load(id)
 	if !ok {
-		log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, id)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, id)
+		}
 		// Ignore message from unknown session
 		return
 	}
 
-	dataCopy := make([]byte, len(data))
-	copy(dataCopy, data)
 	select {
-	case conn.(chan []byte) <- dataCopy:
+	case conn.(chan []byte) <- data:
 		// OK
 	default:
-		log.Debugf("Drop dns resp msg, stream: %v, id: %v", m.stream, id)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.Debugf("Drop dns resp msg, stream: %v, id: %v", m.stream, id)
+		}
 		// Channel full, drop the message
 	}
 }

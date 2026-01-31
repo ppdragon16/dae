@@ -110,12 +110,7 @@ func (d *DoH) ForwardDNS(data []byte) ([]byte, error) {
 	if err := netutils.ResolveHttp(client, serverURL, msg); err != nil {
 		return nil, err
 	}
-	r := pool.GetBuffer(consts.EthernetMtu)
-	resp, err := msg.PackBuffer(r)
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return msg.Pack()
 }
 
 func (d *DoH) getHttpRoundTripper() *http.Transport {
@@ -192,12 +187,7 @@ func (d *DoQ) ForwardDNS(data []byte) (resp []byte, err error) {
 	if err := netutils.ResolveStream(stream, msg, true); err != nil {
 		return nil, err
 	}
-	r := pool.GetBuffer(consts.EthernetMtu)
-	resp, err = msg.PackBuffer(r)
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return msg.Pack()
 }
 
 func (c *DoQ) Close() error {
@@ -250,12 +240,7 @@ func (d *DoTLS) ForwardDNS(data []byte) ([]byte, error) {
 	if err := netutils.ResolveStream(conn, msg, false); err != nil {
 		return nil, err
 	}
-	r := pool.GetBuffer(consts.EthernetMtu)
-	resp, err := msg.PackBuffer(r)
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return msg.Pack()
 }
 
 type DoTcpOrUdp struct {
