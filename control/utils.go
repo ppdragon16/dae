@@ -235,7 +235,7 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 	)
 }
 
-func (c *controlPlaneCore) RetrieveRoutingResult(src, dst netip.AddrPort, l4proto uint8) (result *bpfRoutingResult, err error) {
+func (c *controlPlaneCore) RetrieveRoutingResult(src, dst netip.AddrPort, l4proto uint8, outResult *bpfRoutingResult) error {
 	srcIp6 := src.Addr().As16()
 	dstIp6 := dst.Addr().As16()
 
@@ -253,15 +253,10 @@ func (c *controlPlaneCore) RetrieveRoutingResult(src, dst netip.AddrPort, l4prot
 		L4proto: l4proto,
 	}
 
-	routingResult := c.routingResultPool.Get().(*bpfRoutingResult)
-	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, routingResult); err != nil {
-		return nil, fmt.Errorf("reading map: key [%v, %v, %v]: %w", src.String(), l4proto, dst.String(), err)
+	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, outResult); err != nil {
+		return fmt.Errorf("reading map: key [%v, %v, %v]: %w", src.String(), l4proto, dst.String(), err)
 	}
-	return routingResult, nil
-}
-
-func (c *controlPlaneCore) RecycleRoutingResult(routingResult *bpfRoutingResult) {
-	c.routingResultPool.Put(routingResult)
+	return nil
 }
 
 func RetrieveOriginalDest(oob []byte) netip.AddrPort {

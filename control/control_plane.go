@@ -429,9 +429,7 @@ func NewControlPlane(
 		PrometheusRegistry:     prometheusRegistry,
 		outboundRedirects:      outboundRedirects,
 		dnsRouteCache:          NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
-		dnsRoutingResultCache: NewCacheWithTTL(1*time.Hour, func(_ netip.Addr, v *bpfRoutingResult) {
-			core.RecycleRoutingResult(v)
-		}),
+		dnsRoutingResultCache:  NewCacheWithTTL[netip.Addr, *bpfRoutingResult](1*time.Hour, nil),
 	}
 	defer func() {
 		if err != nil {
@@ -1003,9 +1001,8 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 					var ok bool
 					if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
 						var err error
-						// Due to the cache, no need to call RecycleRoutingResult().
-						routingResult, err = c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
-						if err != nil {
+						routingResult = new(bpfRoutingResult)
+						if err = c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP, routingResult); err != nil {
 							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
 							pool.PutBuffer(data)
 							return

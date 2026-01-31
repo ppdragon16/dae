@@ -128,14 +128,13 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 	}
 	if !ok {
 		// Use an empty AddrPort for dst
-		routingResult, err := c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP)
-		if err != nil {
+		var routingResult bpfRoutingResult
+		if err := c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP, &routingResult); err != nil {
 			return oops.Wrapf(err, "No AddrPort presented")
 		}
-		defer c.core.RecycleRoutingResult(routingResult)
 
 		// Route
-		dialOption, err := c.RouteDialOption(src, dst, domain, networkType, routingResult)
+		dialOption, err := c.RouteDialOption(src, dst, domain, networkType, &routingResult)
 		if err != nil {
 			return err
 		}
@@ -155,7 +154,7 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 
 		// Dial
 		// Only print routing for new connection to avoid the log exploded (Quic and BT).
-		LogDial(src, dst, domain, dialOption, networkType, routingResult)
+		LogDial(src, dst, domain, dialOption, networkType, &routingResult)
 		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 		defer cancel()
 		udpConn, err := dialOption.Dialer.ListenPacket(ctx, dialOption.DialTarget)

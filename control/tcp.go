@@ -80,16 +80,15 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	dstTcpAddr := lConn.LocalAddr().(*net.TCPAddr)
 	dst := dstTcpAddr.AddrPort()
 	istcpdns := IsPrivateIP(dstTcpAddr.IP) && dstTcpAddr.Port == 53
-	routingResult, err := c.core.RetrieveRoutingResult(src, dst, unix.IPPROTO_TCP)
-	if err != nil {
+	var routingResult bpfRoutingResult
+	if err := c.core.RetrieveRoutingResult(src, dst, unix.IPPROTO_TCP, &routingResult); err != nil {
 		return oops.Wrapf(err, "failed to retrieve target info %v", dst.String())
 	}
-	defer c.core.RecycleRoutingResult(routingResult)
 
 	src = common.ConvergeAddrPort(src)
 	dst = common.ConvergeAddrPort(dst)
 	if istcpdns {
-		return c.handleTcpDns(lConn, src, dst, routingResult)
+		return c.handleTcpDns(lConn, src, dst, &routingResult)
 	}
 
 	// Sniff target domain.
@@ -116,7 +115,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		L4Proto:   consts.L4ProtoStr_TCP,
 		IpVersion: consts.IpVersionStrFromAddr(dst.Addr()),
 	}
-	dialOption, err := c.RouteDialOption(src, dst, domain, networkType, routingResult)
+	dialOption, err := c.RouteDialOption(src, dst, domain, networkType, &routingResult)
 	if err != nil {
 		return err
 	}
@@ -129,7 +128,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	}
 
 	// Dial
-	LogDial(src, dst, domain, dialOption, networkType, routingResult)
+	LogDial(src, dst, domain, dialOption, networkType, &routingResult)
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	start := time.Now()
