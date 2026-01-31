@@ -209,7 +209,7 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 				if !ok {
 					log.Warnf("%+v", err)
 				} else if !netErr.Timeout() {
-					if dialOption.Dialer.NeedAliveState() {
+					if ue.dialer.NeedAliveState() {
 						common.ErrorCount.With(labels).Inc()
 						ue.dialer.ReportUnavailable()
 						log.Warnf("%+v", err)
