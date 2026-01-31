@@ -120,7 +120,6 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	defer c.RecycleDialOption(dialOption)
 
 	labels := prometheus.Labels{
 		"outbound": dialOption.Outbound.Name,

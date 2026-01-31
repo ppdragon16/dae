@@ -139,7 +139,6 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 		if err != nil {
 			return err
 		}
-		defer c.RecycleDialOption(dialOption)
 
 		// Do not overwrite target.
 		// This fixes a problem that quic connection to google servers.

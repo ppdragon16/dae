@@ -43,16 +43,6 @@ func IsNetError(err error) (netErr net.Error, ok bool) {
 	return
 }
 
-func (c *ControlPlane) RecycleDialOption(dialOption *DialOption) {
-	dialOption.DialTarget = ""
-	dialOption.Dialer = nil
-	dialOption.Outbound = nil
-	dialOption.FallbackIpVersion = false
-	dialOption.FallbackDialer = false
-	// dialOption.Mark = 0
-	c.dialOptionPool.Put(dialOption)
-}
-
 func (c *ControlPlane) RouteDialOption(
 	src, dst netip.AddrPort,
 	domain string,
@@ -115,14 +105,14 @@ func (c *ControlPlane) RouteDialOption(
 		}
 		fallbackDialer = true
 	}
-	option := c.dialOptionPool.Get().(*DialOption)
-	option.DialTarget = dialTarget
-	option.Dialer = dialer
-	option.Outbound = outbound
-	option.FallbackIpVersion = fallback
-	option.FallbackDialer = fallbackDialer
-	// option.Mark = mark
-	return option, nil
+	return &DialOption{
+		DialTarget:        dialTarget,
+		Dialer:            dialer,
+		Outbound:          outbound,
+		FallbackIpVersion: fallback,
+		FallbackDialer:    fallbackDialer,
+		// Mark:          mark,
+	}, nil
 }
 
 type TrafficLogConn struct {
