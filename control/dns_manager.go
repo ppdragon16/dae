@@ -101,21 +101,21 @@ func (m *DnsManager) read() (data []byte, err error) {
 		var lenBuf [2]byte
 		// Read two byte length.
 		if _, err = io.ReadFull(m.conn, lenBuf[:]); err != nil {
-			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload length"))
+			return nil, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload length"))
 		}
 		msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
 		if msgLen > consts.EthernetMtu {
-			return data, AsWarn(oops.Wrapf(err, "tcp dns msg len too large: %d > %d", msgLen, consts.EthernetMtu))
+			return nil, AsWarn(oops.Wrapf(err, "tcp dns msg len too large: %d > %d", msgLen, consts.EthernetMtu))
 		}
 		data = make([]byte, msgLen)
 		if _, err = io.ReadFull(m.conn, data); err != nil {
-			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload"))
+			return nil, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload"))
 		}
 	} else {
 		data = make([]byte, consts.EthernetMtu)
 		var n int
 		if n, err = m.conn.Read(data); err != nil {
-			return data, AsError(oops.Wrapf(err, "failed to read udp DNS resp payload"))
+			return nil, AsError(oops.Wrapf(err, "failed to read udp DNS resp payload"))
 		}
 		data = data[:n]
 	}
@@ -123,6 +123,10 @@ func (m *DnsManager) read() (data []byte, err error) {
 }
 
 func (m *DnsManager) feed(data []byte) {
+	if len(data) < 12 {
+		log.Errorf("Wrong DNS response: length %d too short, data: %v", len(data), data)
+		return
+	}
 	id := dnsId(data)
 	conn, ok := m.recvMap.Load(id)
 	if !ok {
