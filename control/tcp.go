@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/sniffing"
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
@@ -54,6 +56,9 @@ func (c *ControlPlane) handleTcpDns(
 		routingResult: routingResult,
 		isTcp:         true,
 	}
+	id := dnsId(data)
+	// Avoids duplicated id from clients, so make the id unique.
+	dnsIdSet(data, uint16(fastrand.Intn(math.MaxUint16)))
 	queryInfo := dnsQueryInfo(data)
 	var respData dnsResponseData
 	if respData, err = c.dnsController.handleDNSRequest(data, req, queryInfo); err != nil {
@@ -66,6 +71,8 @@ func (c *ControlPlane) handleTcpDns(
 	if respData.fromPool {
 		defer pool.PutBuffer(respData.respData)
 	}
+	// Keep the id the same with request.
+	dnsIdSet(respData.respData, id)
 	if err = binary.Write(lConn, binary.BigEndian, uint16(len(respData.respData))); err == nil {
 		if _, err = lConn.Write(respData.respData); err == nil {
 			return nil
