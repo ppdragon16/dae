@@ -1313,6 +1313,12 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 		bpf_printk("GO OUTBOUND_DIRECT");
 #endif
+		// Fix win10 "nslookup -vc ..." stuck issue. It's weird that the first tcp 53 packet route to
+		// direct but there is already an entry in the map!
+		// Not sure whether this is common, only delete it from map for tcp 53 to avoid perf regression.
+		if (routing_tuples_key.l4proto == IPPROTO_TCP && routing_tuples_key.dport == bpf_htons(53)) {
+			bpf_map_delete_elem(&routing_tuples_map, &routing_tuples_key);
+		}
 		goto direct;
 	case OUTBOUND_BLOCK:
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
