@@ -189,9 +189,7 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 		return false
 	}
 
-	if dnsResponse(data) {
-		log.Errorln("DNS request expected but DNS response received")
-	}
+	dnsResponseSet(data, false)
 
 	queryInfo := dnsQueryInfo(data)
 	if log.IsLevelEnabled(log.TraceLevel) {

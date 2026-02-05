@@ -177,6 +177,16 @@ func dnsResponse(data []byte) bool {
 	return data[2]&0x80 != 0 // QR
 }
 
+func dnsResponseSet(data []byte, res bool) {
+	if len(data) >= 3 {
+		if res {
+			data[2] |= 0x80
+		} else {
+			data[2] &= 0x7F
+		}
+	}
+}
+
 func isDnsResponseValid(resp []byte) bool {
 	// DNS Header 固定为 12 字节
 	if len(resp) < 12 {
