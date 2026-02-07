@@ -364,7 +364,9 @@ Dial:
 			return dnsResp, fmt.Errorf("DNS response expected but DNS request received")
 		}
 		if !c.routing.HasResponseRules() {
-			c.logDnsResponse(req, &dialArgument, queryInfo, true)
+			if dnsResp.isNew {
+				c.logDnsResponse(req, &dialArgument, queryInfo, true)
+			}
 			break Dial
 		}
 		// Route response.
@@ -376,7 +378,9 @@ Dial:
 			return dnsResp, err
 		}
 		if ResponseIndex.IsReserved() {
-			c.logDnsResponse(req, &dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
+			if dnsResp.isNew {
+				c.logDnsResponse(req, &dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
+			}
 			switch ResponseIndex {
 			case consts.DnsResponseOutboundIndex_Reject:
 				// Reject
@@ -541,7 +545,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 				go func(d []byte, arg dialArgument) {
 					defer pool.PutBuffer(d)
 					// Refresh cache asynchronously.
-					if _, _, err := c.singleFlightForwardDNS(cacheKey, d, upstream, &arg); err != nil {
+					if _, _, _, err := c.singleFlightForwardDNS(cacheKey, d, upstream, &arg); err != nil {
 						log.Warnf("failed to refresh dns cache for %v: %+v", cacheKey, err)
 					}
 				}(dataCopy, *dialArg)
@@ -555,8 +559,8 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 		}
 	}
 	// Pending for the same lookup.
-	respData, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
-	dnsResp := dnsResponseData{isNew: true}
+	respData, leader, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
+	dnsResp := dnsResponseData{isNew: leader}
 	if respData != nil {
 		if !shared {
 			dnsResp.respData = respData
@@ -573,8 +577,10 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 }
 
 func (c *DnsController) singleFlightForwardDNS(
-	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument) ([]byte, bool, error) {
-	v, err, shared := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
+	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument) (v []byte, leader bool, shared bool, err error) {
+	var _v any
+	_v, err, shared = c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
+		leader = true
 		var forwarder DnsForwarder
 		key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
 		// get forwarder from cache
@@ -638,10 +644,10 @@ func (c *DnsController) singleFlightForwardDNS(
 		}
 		return r, nil
 	})
-	if v != nil {
-		return v.([]byte), shared, err
+	if _v != nil {
+		return _v.([]byte), leader, shared, err
 	}
-	return nil, false, err
+	return nil, false, false, err
 }
 
 func (c *DnsController) Close() error {
