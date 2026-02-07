@@ -359,10 +359,6 @@ Dial:
 				}
 			}
 		}
-
-		if !dnsResponse(dnsResp.respData) {
-			return dnsResp, fmt.Errorf("DNS response expected but DNS request received")
-		}
 		if !c.routing.HasResponseRules() {
 			if dnsResp.isNew {
 				c.logDnsResponse(req, &dialArgument, queryInfo, true)
@@ -441,14 +437,22 @@ func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgume
 			"pname":    ProcessName2String(req.routingResult.Pname[:]),
 			"mac":      Mac2String(req.routingResult.Mac[:]),
 		}
-		if accepted {
-			tcpDnsStr := ""
-			if req.isTcp {
-				tcpDnsStr = "(TCP)"
-			}
-			log.WithFields(fields).Infof("[DNS%s] %v <-> %v", tcpDnsStr, RefineSourceToShow(req.src, req.dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
+		var source string
+		if req.isTcp {
+			source = fmt.Sprintf("[DNS(TCP)] %s", RefineSourceToShow(req.src, req.dst.Addr()))
 		} else {
-			log.WithFields(fields).Infof("[DNS] %v <-> %v Reject with empty answer", RefineSourceToShow(req.src, req.dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
+			source = fmt.Sprintf("[DNS] %s", RefineSourceToShow(req.src, req.dst.Addr()))
+		}
+		var target string
+		if dialArgument.Target == req.dst {
+			target = RefineAddrPortToShow(dialArgument.Target)
+		} else {
+			target = fmt.Sprintf("%s (%s)", RefineAddrPortToShow(dialArgument.Target), RefineAddrPortToShow(req.dst))
+		}
+		if accepted {
+			log.WithFields(fields).Infof("%s <-> %s", source, target)
+		} else {
+			log.WithFields(fields).Infof("%s <-> %s Reject with empty answer", source, target)
 		}
 	}
 }
