@@ -372,8 +372,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	}
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
-		wg.Add(1)
-		go func() {
+		wg.Go(func() {
 			d.supported[i], latency[i], err[i] = d.Check(opt)
 			if d.supported[i] {
 				log.WithFields(log.Fields{
@@ -394,8 +393,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 					}).Infoln(oops.Wrapf(err[i], "Inital Connectivity Check Failed"))
 				}
 			}
-			wg.Done()
-		}()
+		})
 	}
 	wg.Wait()
 	for _, opt := range checkOpts {
