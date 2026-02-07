@@ -223,10 +223,18 @@ type relayResult struct {
 func relayDirection(dst, src net.Conn, result chan<- relayResult, direction bool) {
 	src.SetReadDeadline(time.Now().Add(DefaultNatTimeoutTCPEstablished))
 
-	// As `io.Copy` uses a 32KB buffer, we create a buffer of the same size.
+	// As `io.Copy` uses a 32KB buffer.
 	// See https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/io/io.go;l=419
-	bufSize := 16 * 1024
+	// Uses a smaller buffer for less memory blooming. And 2K is enough for tcp dns.
+	remote := src
 	if direction {
+		remote = dst
+	}
+	remotePort := remote.RemoteAddr().(*net.TCPAddr).Port
+	bufSize := 16 * 1024
+	if remotePort == 53 || remotePort == 853 {
+		bufSize = 2 * 1024
+	} else if direction {
 		bufSize = 8 * 1024
 	}
 	bufPtr := pool.GetBuffer(bufSize)
