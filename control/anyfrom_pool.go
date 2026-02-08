@@ -8,12 +8,11 @@ package control
 import (
 	"context"
 	"errors"
-	"math"
 	"net"
 	"net/netip"
 	"os"
-	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -29,24 +28,32 @@ type Anyfrom struct {
 	// GSO support is modified from quic-go with many thanks.
 	gso         bool
 	gotGSOError bool
+	lastRefresh int64
 }
 
 func (a *Anyfrom) afterWrite(err error) {
-	if !a.gotGSOError && isGSOError(err) {
+	if a.gso && !a.gotGSOError && isGSOError(err) {
 		a.gotGSOError = true
 	}
 	a.RefreshTtl()
 }
 func (a *Anyfrom) RefreshTtl() {
-	if a.deadlineTimer != nil {
-		a.deadlineTimer.Reset(a.ttl)
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&a.lastRefresh)
+	if now-last > int64(time.Second) {
+		if atomic.CompareAndSwapInt64(&a.lastRefresh, last, now) {
+			a.deadlineTimer.Reset(a.ttl)
+		}
 	}
 }
 func (a *Anyfrom) SupportGso(size int) bool {
-	if size > math.MaxUint16 {
-		return false
-	}
-	return a.gso && !a.gotGSOError
+	// TODO: We disable GSO because we haven't thought through how to design to use larger packets (we assume the max size of packet is 1500).
+	// See https://github.com/daeuniverse/dae/blob/cab1e4290967340923d7d5ca52b80f781711c18e/control/control_plane.go#L721C37-L721C37.
+	return false
+	// if size > math.MaxUint16 {
+	// 	return false
+	// }
+	// return a.gso && !a.gotGSOError
 }
 func (a *Anyfrom) ReadFrom(b []byte) (int, net.Addr, error) {
 	defer a.RefreshTtl()
@@ -117,21 +124,21 @@ func isGSOSupported(uc *net.UDPConn) bool {
 	// TODO: We disable GSO because we haven't thought through how to design to use larger packets (we assume the max size of packet is 1500).
 	// See https://github.com/daeuniverse/dae/blob/cab1e4290967340923d7d5ca52b80f781711c18e/control/control_plane.go#L721C37-L721C37.
 	return false
-	conn, err := uc.SyscallConn()
-	if err != nil {
-		return false
-	}
-	disabled, err := strconv.ParseBool(os.Getenv("DAE_DISABLE_GSO"))
-	if err == nil && disabled {
-		return false
-	}
-	var serr error
-	if err := conn.Control(func(fd uintptr) {
-		_, serr = unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_SEGMENT)
-	}); err != nil {
-		return false
-	}
-	return serr == nil
+	// conn, err := uc.SyscallConn()
+	// if err != nil {
+	// 	return false
+	// }
+	// disabled, err := strconv.ParseBool(os.Getenv("DAE_DISABLE_GSO"))
+	// if err == nil && disabled {
+	// 	return false
+	// }
+	// var serr error
+	// if err := conn.Control(func(fd uintptr) {
+	// 	_, serr = unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_SEGMENT)
+	// }); err != nil {
+	// 	return false
+	// }
+	// return serr == nil
 }
 func isGSOError(err error) bool {
 	var serr *os.SyscallError
@@ -162,7 +169,7 @@ func appendUDPSegmentSizeMsg(b []byte, size uint16) []byte {
 // AnyfromPool is a full-cone udp listener pool
 type AnyfromPool struct {
 	pool map[netip.AddrPort]*Anyfrom
-	mu   sync.Mutex
+	mu   sync.RWMutex
 }
 
 var DefaultAnyfromPool = NewAnyfromPool()
@@ -174,11 +181,20 @@ func NewAnyfromPool() *AnyfromPool {
 }
 
 func (p *AnyfromPool) GetOrCreate(lAddr netip.AddrPort, ttl time.Duration) (conn *Anyfrom, isNew bool, err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
 
 	af, ok := p.pool[lAddr]
 	if ok {
+		af.RefreshTtl()
+		p.mu.RUnlock()
+		return af, false, nil
+	}
+	p.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if af, ok = p.pool[lAddr]; ok {
 		af.RefreshTtl()
 		return af, false, nil
 	}
@@ -207,6 +223,7 @@ func (p *AnyfromPool) GetOrCreate(lAddr netip.AddrPort, ttl time.Duration) (conn
 		ttl:           ttl,
 		gotGSOError:   false,
 		gso:           isGSOSupported(uConn),
+		lastRefresh:   time.Now().UnixNano(),
 	}
 
 	if ttl > 0 {
