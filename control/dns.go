@@ -44,15 +44,15 @@ func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForw
 		if upstream.Scheme == dns.UpstreamScheme_TCP_UDP {
 			// Despite of the network of dialArgument, always use both tcp and udp.
 			// The DnsManager will try both and could fallback to tcp if udp is failed for N times.
-			doTcp := &DoTcpOrUdp{dialArgument: dialArgument, network: "tcp"}
-			doUdp := &DoTcpOrUdp{dialArgument: dialArgument, network: "udp"}
+			doTcp := NewTcpForwarder(dialArgument)
+			doUdp := NewUdpForwarder(dialArgument)
 			return &DoTcpAndUdp{doTcp: doTcp, doUdp: doUdp}, nil
 		}
 		switch dialArgument.networkType.L4Proto {
 		case consts.L4ProtoStr_TCP:
 			switch upstream.Scheme {
 			case dns.UpstreamScheme_TCP, dns.UpstreamScheme_TCP_UDP:
-				return &DoTcpOrUdp{dialArgument: dialArgument, network: "tcp"}, nil
+				return NewTcpForwarder(dialArgument), nil
 			case dns.UpstreamScheme_TLS:
 				return &DoTLS{Upstream: *upstream, dialArgument: dialArgument}, nil
 			case dns.UpstreamScheme_HTTPS:
@@ -63,7 +63,7 @@ func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForw
 		case consts.L4ProtoStr_UDP:
 			switch upstream.Scheme {
 			case dns.UpstreamScheme_UDP, dns.UpstreamScheme_TCP_UDP:
-				return &DoTcpOrUdp{dialArgument: dialArgument, network: "udp"}, nil
+				return NewUdpForwarder(dialArgument), nil
 			case dns.UpstreamScheme_QUIC:
 				return &DoQ{Upstream: *upstream, dialArgument: dialArgument}, nil
 			case dns.UpstreamScheme_H3:
@@ -243,11 +243,35 @@ func (d *DoTLS) ForwardDNS(data []byte) ([]byte, error) {
 	return msg.Pack()
 }
 
+const (
+	TCP_POOL_SIZE = 3
+	UDP_POOL_SIZE = 10
+)
+
 type DoTcpOrUdp struct {
 	dialArgument dialArgument
-	dnsManager   *DnsManager
+	dnsManager   []*DnsManager
 	network      string // "tcp" or "udp"
-	mu           sync.Mutex
+	mu           []sync.Mutex
+	next         int32
+}
+
+func NewTcpForwarder(dialArg dialArgument) *DoTcpOrUdp {
+	return &DoTcpOrUdp{
+		dialArgument: dialArg,
+		network:      "tcp",
+		dnsManager:   make([]*DnsManager, TCP_POOL_SIZE),
+		mu:           make([]sync.Mutex, TCP_POOL_SIZE),
+	}
+}
+
+func NewUdpForwarder(dialArg dialArgument) *DoTcpOrUdp {
+	return &DoTcpOrUdp{
+		dialArgument: dialArg,
+		network:      "udp",
+		dnsManager:   make([]*DnsManager, UDP_POOL_SIZE),
+		mu:           make([]sync.Mutex, UDP_POOL_SIZE),
+	}
 }
 
 // TODO: Connection reuse
@@ -266,17 +290,19 @@ func (d *DoTcpOrUdp) ForwardDNS(data []byte) (resp []byte, err error) {
 }
 
 func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, data []byte) ([]byte, error) {
-	d.mu.Lock()
-	if d.dnsManager == nil || d.dnsManager.IsClosed() {
+	index := atomic.LoadInt32(&d.next)
+	atomic.CompareAndSwapInt32(&d.next, index, (index+1)%int32(len(d.mu)))
+	d.mu[index].Lock()
+	if d.dnsManager[index] == nil || d.dnsManager[index].IsClosed() {
 		conn, err := d.dialArgument.Dialer.DialContext(ctx, d.network, d.dialArgument.Target.String())
 		if err != nil {
-			d.mu.Unlock()
+			d.mu[index].Unlock()
 			return nil, err
 		}
-		d.dnsManager = NewDnsManager(conn, d.network == "tcp", d.dialArgument.Dialer.Name)
+		d.dnsManager[index] = NewDnsManager(conn, d.network == "tcp", d.dialArgument.Dialer.Name)
 	}
-	mgr := d.dnsManager
-	d.mu.Unlock()
+	mgr := d.dnsManager[index]
+	d.mu[index].Unlock()
 
 	resp, err := mgr.Resolve(ctx, data)
 	if errors.Is(err, net.ErrClosed) {
