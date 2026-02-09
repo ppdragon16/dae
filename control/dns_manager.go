@@ -115,7 +115,7 @@ func (m *DnsManager) read() (data []byte, err error) {
 		data = make([]byte, consts.EthernetMtu)
 		var n int
 		if n, err = m.conn.Read(data); err != nil {
-			return nil, AsError(oops.Wrapf(err, "failed to read udp DNS resp payload"))
+			return nil, AsDebug(oops.Wrapf(err, "failed to read udp DNS resp payload"))
 		}
 		data = data[:n]
 	}
