@@ -223,8 +223,9 @@ func (d *DoTLS) ForwardDNS(msg *dnsmessage.Msg) error {
 }
 
 const (
-	TCP_POOL_SIZE = 3
-	UDP_POOL_SIZE = 10
+	TCP_POOL_SIZE    = 3
+	UDP_POOL_SIZE    = 10
+	TCP_UDP_POOL_TTL = 5 * time.Minute
 )
 
 type DoTcpOrUdp struct {
@@ -233,6 +234,9 @@ type DoTcpOrUdp struct {
 	network      string // "tcp" or "udp"
 	mu           []sync.Mutex
 	next         int32
+	active       int32
+	timer        *time.Timer
+	timerMu      sync.Mutex
 }
 
 func NewTcpForwarder(dialArg dialArgument) *DoTcpOrUdp {
@@ -258,9 +262,7 @@ func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 	// Retry once on net.ErrClosed which may happen when race condition between DnsManager's Resolve() and read().
 	maxRetries := 1
 	for i := 0; i <= maxRetries; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), consts.DefaultDialTimeout)
-		err = d.forwardDnsWithContext(ctx, msg)
-		cancel()
+		err = d.forwardDnsWithContext(context.Background(), msg)
 		if !errors.Is(err, net.ErrClosed) {
 			break
 		}
@@ -269,11 +271,31 @@ func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 }
 
 func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, msg *dnsmessage.Msg) error {
+	if atomic.SwapInt32(&d.active, 1) == 0 {
+		d.timerMu.Lock()
+		if d.timer == nil {
+			var t *time.Timer
+			t = time.AfterFunc(TCP_UDP_POOL_TTL, func() {
+				d.timerMu.Lock()
+				defer d.timerMu.Unlock()
+				if atomic.SwapInt32(&d.active, 0) == 0 {
+					d.closeDnsManagers()
+					d.timer = nil
+				} else {
+					t.Reset(TCP_UDP_POOL_TTL)
+				}
+			})
+			d.timer = t
+		}
+		d.timerMu.Unlock()
+	}
 	index := atomic.LoadInt32(&d.next)
 	atomic.CompareAndSwapInt32(&d.next, index, (index+1)%int32(len(d.mu)))
 	d.mu[index].Lock()
 	if d.dnsManager[index] == nil || d.dnsManager[index].IsClosed() {
-		conn, err := d.dialArgument.Dialer.DialContext(ctx, d.network, d.dialArgument.Target.String())
+		ctxTimeout, cancel := context.WithTimeout(ctx, consts.DefaultDialTimeout)
+		conn, err := d.dialArgument.Dialer.DialContext(ctxTimeout, d.network, d.dialArgument.Target.String())
+		cancel()
 		if err != nil {
 			d.mu[index].Unlock()
 			return err
@@ -288,6 +310,29 @@ func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, msg *dnsmessage.
 		mgr.Close()
 	}
 	return err
+}
+
+func (d *DoTcpOrUdp) closeDnsManagers() (err error) {
+	log.Infof("Close dns managers, dialer: %s, target: %v", d.dialArgument.Dialer.Name, d.dialArgument.Target)
+	for i := range d.mu {
+		d.mu[i].Lock()
+		if d.dnsManager[i] != nil {
+			err = d.dnsManager[i].Close()
+			d.dnsManager[i] = nil
+		}
+		d.mu[i].Unlock()
+	}
+	return
+}
+
+func (d *DoTcpOrUdp) Close() (err error) {
+	d.timerMu.Lock()
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	d.timerMu.Unlock()
+	return d.closeDnsManagers()
 }
 
 type DoTcpAndUdp struct {
@@ -380,4 +425,10 @@ func (d *DoTcpAndUdp) maybeReviveUdp() {
 		atomic.StoreInt64(&d.lastReviveTime, time.Now().Unix())
 		log.Warnf("Udp dns revived!")
 	}
+}
+
+func (d *DoTcpAndUdp) Close() (err error) {
+	err = d.doTcp.Close()
+	err = d.doUdp.Close()
+	return
 }

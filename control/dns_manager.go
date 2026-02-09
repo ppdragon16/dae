@@ -117,7 +117,7 @@ func (m *DnsManager) read(buf []byte) (data []byte, err error) {
 	} else {
 		var n int
 		if n, err = m.conn.Read(buf); err != nil {
-			return data, AsError(oops.Wrapf(err, "failed to read udp DNS resp payload"))
+			return data, AsDebug(oops.Wrapf(err, "failed to read udp DNS resp payload"))
 		}
 		data = buf[:n]
 	}
