@@ -135,6 +135,10 @@ type Dns struct {
 	Routing         DnsRouting      `mapstructure:"routing"`
 	MinSniffingTtl  time.Duration   `mapstructure:"min_sniffing_ttl" default:"24h"`
 	EnableCache     bool            `mapstructure:"enable_cache" default:"true"`
+	UdpPoolSize     int             `mapstructure:"udp_pool_size" default:"10"`
+	UdpPoolTtl      time.Duration   `mapstructure:"udp_pool_ttl" default:"10m"`
+	TcpPoolSize     int             `mapstructure:"tcp_pool_size" default:"3"`
+	TcpPoolTtl      time.Duration   `mapstructure:"tcp_pool_ttl" default:"60s"`
 }
 
 type Routing struct {

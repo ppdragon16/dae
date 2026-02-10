@@ -34,6 +34,13 @@ const (
 	reviveExtendRatio  = 3
 )
 
+var (
+	UdpPoolSize = 10
+	UdpPoolTtl  = 10 * time.Minute
+	TcpPoolSize = 3
+	TcpPoolTtl  = 60 * time.Second
+)
+
 // TODO: Connection reuse
 type DnsForwarder interface {
 	ForwardDNS(data []byte) ([]byte, error)
@@ -243,12 +250,6 @@ func (d *DoTLS) ForwardDNS(data []byte) ([]byte, error) {
 	return msg.Pack()
 }
 
-const (
-	TCP_POOL_SIZE    = 3
-	UDP_POOL_SIZE    = 10
-	TCP_UDP_POOL_TTL = 5 * time.Minute
-)
-
 type DoTcpOrUdp struct {
 	dialArgument dialArgument
 	dnsManager   []*DnsManager
@@ -258,14 +259,16 @@ type DoTcpOrUdp struct {
 	active       int32
 	timer        *time.Timer
 	timerMu      sync.Mutex
+	ttl          time.Duration
 }
 
 func NewTcpForwarder(dialArg dialArgument) *DoTcpOrUdp {
 	return &DoTcpOrUdp{
 		dialArgument: dialArg,
 		network:      "tcp",
-		dnsManager:   make([]*DnsManager, TCP_POOL_SIZE),
-		mu:           make([]sync.Mutex, TCP_POOL_SIZE),
+		dnsManager:   make([]*DnsManager, TcpPoolSize),
+		mu:           make([]sync.Mutex, TcpPoolSize),
+		ttl:          TcpPoolTtl,
 	}
 }
 
@@ -273,8 +276,9 @@ func NewUdpForwarder(dialArg dialArgument) *DoTcpOrUdp {
 	return &DoTcpOrUdp{
 		dialArgument: dialArg,
 		network:      "udp",
-		dnsManager:   make([]*DnsManager, UDP_POOL_SIZE),
-		mu:           make([]sync.Mutex, UDP_POOL_SIZE),
+		dnsManager:   make([]*DnsManager, UdpPoolSize),
+		mu:           make([]sync.Mutex, UdpPoolSize),
+		ttl:          UdpPoolTtl,
 	}
 }
 
@@ -296,14 +300,14 @@ func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, data []byte) ([]
 		d.timerMu.Lock()
 		if d.timer == nil {
 			var t *time.Timer
-			t = time.AfterFunc(TCP_UDP_POOL_TTL, func() {
+			t = time.AfterFunc(d.ttl, func() {
 				d.timerMu.Lock()
 				defer d.timerMu.Unlock()
 				if atomic.SwapInt32(&d.active, 0) == 0 {
 					d.closeDnsManagers()
 					d.timer = nil
 				} else {
-					t.Reset(TCP_UDP_POOL_TTL)
+					t.Reset(d.ttl)
 				}
 			})
 			d.timer = t
@@ -334,14 +338,21 @@ func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, data []byte) ([]
 }
 
 func (d *DoTcpOrUdp) closeDnsManagers() (err error) {
-	log.Infof("Close dns managers, dialer: %s, target: %v", d.dialArgument.Dialer.Name, d.dialArgument.Target)
+	count := 0
 	for i := range d.mu {
 		d.mu[i].Lock()
 		if d.dnsManager[i] != nil {
-			err = d.dnsManager[i].Close()
+			if !d.dnsManager[i].IsClosed() {
+				err = d.dnsManager[i].Close()
+				count++
+			}
 			d.dnsManager[i] = nil
 		}
 		d.mu[i].Unlock()
+	}
+	if count > 0 {
+		log.Infof("Closed %d %s dns managers, dialer: %s, target: %v",
+			count, d.network, d.dialArgument.Dialer.Name, d.dialArgument.Target)
 	}
 	return
 }
