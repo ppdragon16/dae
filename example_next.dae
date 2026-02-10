@@ -1,0 +1,177 @@
+global {
+    lan_interface: eth0,wg0
+    wan_interface: auto
+    log_level: info
+    auto_config_kernel_parameter: true
+    tproxy_port: 12345
+    metrics_port: 2112
+    command_port: 1111 # Handles RESTful HTTP commands.
+    so_mark_from_dae: 1234
+    #pprof_port: 8888
+    #dial_target_override: false # default: true
+    #reroute_mode: 'none' # default: while_needed
+    sniff_verify_mode: 'none' # default: loose
+    allow_insecure: false
+    tls_implementation: utls
+    utls_imitate: chrome_auto
+    disable_waiting_network: true
+    check_interval: 30s
+    check_tolerance: 30ms
+    udp_check_dns: 'one.one.one.one:53,1.1.1.1' # No ipv6 connectivity test
+    enable_traffic_log: true # default: false, save traffic info to "traffic.log" file
+}
+
+subscription {
+  sub1: 'file://sub1.sub'
+  sub2: 'file://sub2.sub'
+  sub3: 'file://sub3.sub'
+}
+
+group {
+  macbook {
+    redirect: tw
+    filter: subtag(sub1)
+    policy: fixed(0)
+  }
+  wg {
+    redirect: hk
+    filter: subtag(sub1)
+    policy: fixed(0)
+  }
+  ai {
+    redirect: sg
+    filter: subtag(sub1)
+    policy: fixed(0)
+  }
+  yt {
+    redirect: hk
+    filter: subtag(sub1)
+    policy: fixed(0)
+  }
+  fb {
+    redirect: hk
+    filter: subtag(sub1)
+    policy: fixed(0)
+  }
+  hk {
+    filter: subtag(sub1) && name(regex:'香港') [priority: '0,2(,300ms)']
+    filter: subtag(sub2) && name(regex:'香港') [priority: '0,1(,200ms)']
+    filter: subtag(sub3) && name(regex:'香港')
+    policy: min_moving_avg(10s, 0.2)
+  }
+  tw {
+    filter: subtag(sub1) && name(regex:'台湾') [priority: '0,2(,300ms)']
+    filter: subtag(sub2) && name(regex:'台湾') [priority: '0,1(,200ms)']
+    filter: subtag(sub3) && name(regex:'台湾')
+    policy: min_moving_avg(10s, 0.2)
+  }
+  sg {
+    filter: subtag(sub1) && name(regex:'新加坡') [priority: '0,2(,300ms)']
+    filter: subtag(sub2) && name(regex:'新加坡') [priority: '0,1(,200ms)']
+    filter: subtag(sub3) && name(regex:'新加坡')
+    policy: min_moving_avg(10s, 0.2)
+  }
+}
+
+dns {
+  enable_cache: true # dns cache can be completely turned off
+  min_sniffing_ttl: 30m # The ttl to expire the saved IP-DomainBitmap info in ebpf
+  udp_pool_size: 10 # UDP connnection pool for each dns forwarder (key'ed by upstream+dialer+target)
+  udp_pool_ttl: 10m # TTL to recycle UDP connnections in pool
+  tcp_pool_size: 2 # TCP connnection pool for each dns forwarder (key'ed by upstream+dialer+target)
+  tcp_pool_ttl: 30s  # TTL to recycle TCP connnections in pool
+  upstream {
+    dnsmasq_dns: 'udp://127.0.0.1:53'
+    cn_dns: 'udp://223.5.5.5:53'
+    proxy_dns: 'tcp+udp://1.1.1.1:53'
+  }
+  routing {
+    request {
+      qtype(ptr) && qname(geosite:private) -> dnsmasq_dns
+      qname(suffix:ppdn.us) -> dnsmasq_dns
+      qtype(ptr, https) -> reject
+      qname(suffix:.lan, suffix:telemetry.coder.com, regex:'mcdn\.bilivideo\.(com|cn)$', suffix:szbdyd.com) -> reject
+      qname(regex:'^(ssl|www)\.gstatic\.com', regex:'(fonts|update)\.googleapis\.com$') -> cn_dns
+      qname(geosite:gfw, regex:'google|cloudflare') -> proxy_dns
+      fallback: cn_dns
+    }
+  }
+}
+
+routing {
+    pname(dnsmasq) -> must_rules
+    pname(mihomo) -> must_direct
+    mac('02:42:AC:16:43:77') -> must_direct # qBittorrent-container
+
+    # Handles tcp dns in user space code.
+    dip(geoip:private) && l4proto(tcp) && dport(53) -> fb
+    dip(geoip:private) -> direct
+
+    # Faster match for the dns servers.
+    dip(223.5.5.5/32, 119.29.29.29/32, 114.114.114.114/32, 180.76.76.76/32, 123.123.123.123/32) -> direct
+
+    dip(geoip:cn) && !dip(geoip:tw) -> direct
+    domain(suffix:qwen.ai, suffix:steamserver.net, regex:'(dns|short|wxapp\.tc)\.weixin\.qq') -> direct
+
+    l4proto(udp) && dport(443) -> block
+    l4proto(udp) && dport(3478) -> direct
+
+    domain(keyword:gemini, keyword:aistudio, keyword:generativelanguage, keyword:chatgpt, keyword:openai) -> ai
+    domain(suffix:youtu.be, keyword:youtube, keyword:googlevideo, keyword:ytimg) -> yt
+
+    mac('11:22:33:44:55:66') -> macbook
+    sip(10.0.0.1/24) -> wg
+    fallback: fb
+}
+
+### Command server usage:
+
+## List all outbounds with redirects
+#  curl http://localhost:1111/redirect
+#  output:
+#  - direct
+#  - block
+#  - macbook -> tw
+#  - wg -> hk
+#  - fb -> hk
+#  - ai -> sg
+#  - yt -> hk
+#  - hk
+#  - tw
+#  - sg
+
+## Redirects 'fb' outbound to 'tw'
+#  curl -X PUT http://localhost:1111/redirect/fb -H "Content-Type: text/plain" -d 'tw'
+
+## List all priorities
+#  curl http://localhost:1111/priority
+#  output:
+#  *** Outbound 'direct':
+#  -   [] direct: 0;[]
+#  *** Outbound 'block':
+#  -   [] block: 0;[]
+#  *** Outbound 'macbook':
+#  -   [sub1] [sub1]香港: 0;[]
+#  *** Outbound 'wg':
+#  -   [sub1] [sub1]香港: 0;[]
+#  *** Outbound 'fb':
+#  -   [sub1] [sub1]香港: 0;[]
+#  *** Outbound 'ai':
+#  -   [sub1] [sub1]香港: 0;[]
+#  *** Outbound 'yt':
+#  -   [sub1] [sub1]香港: 0;[]
+#  *** Outbound 'hk':
+#  -   [sub3] [sub3]香港: 0;[]
+#  -   [sub2] [sub2]香港: 0;[(1,0s,200ms)]
+#  -   [sub1] [sub1]香港: 0;[(2,0s,300ms)]
+#  *** Outbound 'tw':
+#  -   [sub3] [sub3]台湾: 0;[]
+#  -   [sub2] [sub2]台湾: 0;[(1,0s,200ms)]
+#  -   [sub1] [sub1]台湾: 0;[(2,0s,300ms)]
+#  *** Outbound 'sg':
+#  -   [sub3] [sub3]新加坡: 0;[]
+#  -   [sub2] [sub2]新加坡: 0;[(1,0s,200ms)]
+#  -   [sub1] [sub1]新加坡: 0;[(2,0s,300ms)]
+
+## Changes a specific dialer's priority
+#  curl -X PUT http://localhost:1111/priority/outbound:hk/subtag:sub3/dialer:香港 -H "Content-Type: text/plain" -d '0,3(,300ms)'
