@@ -456,6 +456,10 @@ func NewControlPlane(
 	if err != nil {
 		return nil, err
 	}
+	UdpPoolSize = dnsConfig.UdpPoolSize
+	UdpPoolTtl = dnsConfig.UdpPoolTtl
+	TcpPoolSize = dnsConfig.TcpPoolSize
+	TcpPoolTtl = dnsConfig.TcpPoolTtl
 	if plane.dnsController, err = NewDnsController(dnsUpstream, &DnsControllerOption{
 		MatchBitmap: func(fqdn string, bitmap []uint32) {
 			plane.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap)
