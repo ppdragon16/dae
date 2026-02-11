@@ -145,7 +145,7 @@ type dialArgument struct {
 }
 
 type dnsForwarderKey struct {
-	upstream     string
+	upstream     dns.Upstream
 	dialArgument dialArgument
 }
 
@@ -558,7 +558,7 @@ func (c *DnsController) singleFlightForwardDNS(
 	cacheKey dnsCacheKey, msg *dnsmessage.Msg, upstream *dns.Upstream, dialArgument *dialArgument) (*dnsmessage.Msg, error) {
 	resp, err, _ := c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		var forwarder DnsForwarder
-		key := dnsForwarderKey{upstream: upstream.String(), dialArgument: *dialArgument}
+		key := dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument}
 		// get forwarder from cache
 		value, ok := c.dnsForwarderCache.Load(key)
 		if ok {
