@@ -42,12 +42,11 @@ func (d *Dialer) Supported(typ *common.NetworkType) bool {
 	return d.supported[common.NetworkTypeToIndex(typ)]
 }
 
-func parseIp46FromList(ip []string) (ip46 *netutils.Ip46, err error) {
-	ip46 = new(netutils.Ip46)
+func parseIp46FromList(ip []string) (ip46 netutils.Ip46, err error) {
 	for _, ip := range ip {
 		addr, err := netip.ParseAddr(ip)
 		if err != nil {
-			return nil, oops.Errorf("invalid ip address: %w", err)
+			return ip46, oops.Errorf("invalid ip address: %w", err)
 		}
 		if addr.Is4() || addr.Is4In6() {
 			ip46.Ip4 = addr
@@ -63,7 +62,7 @@ func parseIp46FromList(ip []string) (ip46 *netutils.Ip46, err error) {
 
 type TcpCheckOption struct {
 	Url *netutils.URL
-	*netutils.Ip46
+	netutils.Ip46
 	Method string
 }
 
@@ -78,7 +77,7 @@ func ParseTcpCheckOption(rawURL []string, method string) (opt *TcpCheckOption, e
 	if err != nil {
 		return nil, err
 	}
-	var ip46 *netutils.Ip46
+	var ip46 netutils.Ip46
 	if len(rawURL) > 1 {
 		ip46, err = parseIp46FromList(rawURL[1:])
 		if err != nil {
@@ -103,7 +102,7 @@ func ParseTcpCheckOption(rawURL []string, method string) (opt *TcpCheckOption, e
 type CheckDnsOption struct {
 	DnsHost string
 	DnsPort uint16
-	*netutils.Ip46
+	netutils.Ip46
 }
 
 func ParseCheckDnsOption(dnsHostPort []string) (opt *CheckDnsOption, err error) {
@@ -119,7 +118,7 @@ func ParseCheckDnsOption(dnsHostPort []string) (opt *CheckDnsOption, err error) 
 	if err != nil {
 		return nil, oops.Errorf("bad port: %v", err)
 	}
-	var ip46 *netutils.Ip46
+	var ip46 netutils.Ip46
 	if len(dnsHostPort) > 1 {
 		ip46, err = parseIp46FromList(dnsHostPort[1:])
 		if err != nil {

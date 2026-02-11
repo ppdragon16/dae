@@ -95,7 +95,7 @@ type Upstream struct {
 	Hostname string
 	Port     uint16
 	Path     string
-	*netutils.Ip46
+	netutils.Ip46
 	IsAsIs bool
 }
 
