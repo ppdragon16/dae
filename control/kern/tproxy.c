@@ -1196,7 +1196,7 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 		return TC_ACT_PIPE;
 	}
 
-	bool isdns = tuples.five.dport == bpf_htons(53) && l4proto == IPPROTO_UDP;
+	bool isdns = tuples.five.dport == bpf_htons(53) && (l4proto == IPPROTO_UDP || l4proto == IPPROTO_TCP);
 
 	struct tuples_key routing_tuples_key = tuples.five;
 	if (l4proto == IPPROTO_UDP) {
