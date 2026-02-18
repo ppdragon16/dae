@@ -7,7 +7,6 @@ package sniffing
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -21,17 +20,13 @@ import (
 
 type Sniffer struct {
 	// Stream
-	stream    bool
 	r         io.Reader
-	dataReady chan struct{}
 	dataError error
+	readMu    sync.Mutex
 
 	// Common
 	sniffed string
 	buf     *bytes.Buffer
-	readMu  sync.Mutex
-	ctx     context.Context
-	cancel  func()
 
 	// Packet
 	data         [][]byte
@@ -41,17 +36,12 @@ type Sniffer struct {
 }
 
 func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	buffer := pool.GetBytesBuffer()
 	buffer.Grow(AssumedTlsClientHelloMaxLength)
 	buffer.Reset()
 	s := &Sniffer{
-		stream:    true,
-		r:         r,
-		buf:       buffer,
-		dataReady: make(chan struct{}),
-		ctx:       ctx,
-		cancel:    cancel,
+		r:   r,
+		buf: buffer,
 	}
 	return s
 }
@@ -59,15 +49,10 @@ func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
 func NewPacketSniffer(data []byte, timeout time.Duration) *Sniffer {
 	buffer := pool.GetBytesBuffer()
 	buffer.Write(data)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	s := &Sniffer{
-		stream:    false,
-		r:         nil,
-		buf:       buffer,
-		data:      [][]byte{buffer.Bytes()},
-		dataReady: make(chan struct{}),
-		ctx:       ctx,
-		cancel:    cancel,
+		r:    nil,
+		buf:  buffer,
+		data: [][]byte{buffer.Bytes()},
 	}
 	return s
 }
@@ -96,57 +81,42 @@ func (s *Sniffer) SniffTcp() (d string, err error) {
 			s.sniffed = d
 		}
 	}()
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
 	var oerr error
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("%w: %w", oerr, err)
 		}
 	}()
+	buf := pool.GetBuffer(consts.EthernetMtu)
+	defer pool.PutBuffer(buf)
 	for {
-		if s.stream {
-			go func() {
-				defer close(s.dataReady)
-				// Read once.
-				buf := pool.GetBuffer(consts.EthernetMtu)
-				defer pool.PutBuffer(buf)
-				n, err := s.r.Read(buf)
-				if err != nil {
-					s.dataError = err
-					return
-				}
+		n, rerr := s.r.Read(buf)
+		if n > 0 {
+			if s.buf != nil {
 				s.buf.Write(buf[:n])
-			}()
-
-			// Waiting 100ms for data.
-			select {
-			case <-s.dataReady:
-				if s.dataError != nil {
-					return "", s.dataError
-				}
-			case <-s.ctx.Done():
-				return "", fmt.Errorf("%w: %w", ErrNotApplicable, context.DeadlineExceeded)
 			}
-		} else {
-			close(s.dataReady)
+		}
+
+		if s.buf.Len() > 0 {
+			d, err = sniffGroup(s.SniffTls, s.SniffHttp)
+			if err == nil {
+				return d, nil
+			}
+			if !errors.Is(err, ErrNeedMore) {
+				return "", err
+			}
+		}
+
+		if rerr != nil {
+			s.dataError = rerr
+			return "", rerr
 		}
 
 		if s.buf.Len() == 0 {
 			return "", ErrNotApplicable
 		}
 
-		d, err = sniffGroup(
-			// Most sniffable traffic is TLS, thus we sniff it first.
-			s.SniffTls,
-			s.SniffHttp,
-		)
-		if errors.Is(err, ErrNeedMore) {
-			oerr = err
-			s.dataReady = make(chan struct{})
-			continue
-		}
-		return d, err
+		oerr = err
 	}
 }
 
@@ -159,20 +129,6 @@ func (s *Sniffer) SniffUdp() (d string, err error) {
 			s.sniffed = d
 		}
 	}()
-	defer func() {
-		if err == nil {
-			s.sniffed = d
-		}
-	}()
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
-
-	// Always ready.
-	select {
-	case <-s.dataReady:
-	default:
-		close(s.dataReady)
-	}
 
 	if s.buf.Len() == 0 {
 		return "", ErrNotApplicable
@@ -199,34 +155,32 @@ func (s *Sniffer) NeedMore() bool {
 }
 
 func (s *Sniffer) Read(p []byte) (n int, err error) {
-	<-s.dataReady
-
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 
-	if s.dataError != nil {
-		n, _ = s.buf.Read(p)
-		return n, s.dataError
+	if s.buf != nil {
+		if s.buf.Len() > 0 {
+			return s.buf.Read(p)
+		}
+		pool.PutBytesBuffer(s.buf)
+		s.buf = nil
 	}
 
-	if s.buf.Len() > 0 {
-		// Read buf first.
-		return s.buf.Read(p)
+	if s.dataError != nil {
+		err = s.dataError
+		s.dataError = nil
+		return 0, err
 	}
-	if !s.stream {
-		return 0, io.EOF
-	}
+
 	return s.r.Read(p)
 }
 
 func (s *Sniffer) Close() (err error) {
-	select {
-	case <-s.ctx.Done():
-	default:
-		s.cancel()
-		if s.buf.Len() == 0 {
-			pool.PutBytesBuffer(s.buf)
-		}
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	if s.buf != nil {
+		pool.PutBytesBuffer(s.buf)
+		s.buf = nil
 	}
 	return nil
 }
