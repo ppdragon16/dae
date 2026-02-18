@@ -103,7 +103,9 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	// ConnSniffer should be used later, so we cannot close it now.
 	defer sniffer.Close()
 
+	lConn.SetReadDeadline(time.Now().Add(c.sniffingTimeout))
 	domain, err := sniffer.SniffTcp()
+	lConn.SetReadDeadline(time.Time{})
 	if err != nil && !sniffing.IsSniffingError(err) {
 		// We ignore lConn errors or temporary network errors
 		if _, ok := IsNetError(err); ok {
@@ -259,7 +261,7 @@ func RelayTCP(lConn, rConn net.Conn) error {
 
 	// Start relay goroutines for both directions.
 	go relayDirection(lConn, rConn, resultCh, false) // rConn -> lConn
-	go relayDirection(rConn, lConn, resultCh, true)  // lConn -> rConn
+	relayDirection(rConn, lConn, resultCh, true)     // lConn -> rConn
 	result := <-resultCh
 	<-resultCh
 
