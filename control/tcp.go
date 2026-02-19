@@ -30,8 +30,7 @@ import (
 )
 
 const (
-	// Value from OpenWRT default sysctl config
-	DefaultNatTimeoutTCPEstablished = 21600 * time.Second
+	DefaultTCPIdleTimeout = 60 * time.Minute
 )
 
 func readDnsMsg(r io.Reader) (*dnsmessage.Msg, error) {
@@ -114,25 +113,32 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		return c.handleTcpDns(lConn, src, dst, &routingResult)
 	}
 
-	// Sniff target domain.
-	sniffer := sniffing.NewConnSniffer(lConn, c.sniffingTimeout)
-	// ConnSniffer should be used later, so we cannot close it now.
-	defer sniffer.Close()
+	// No need sniffer for tcp://8.8.8.8:53.
+	sniffedDomain := ""
+	lConnRelay := lConn
+	if dstTcpAddr.Port != 53 {
+		// Sniff target domain.
+		sniffer := sniffing.NewConnSniffer(lConn, c.sniffingTimeout)
+		// ConnSniffer should be used later, so we cannot close it now.
+		defer sniffer.Close()
 
-	lConn.SetReadDeadline(time.Now().Add(c.sniffingTimeout))
-	domain, err := sniffer.SniffTcp()
-	lConn.SetReadDeadline(time.Time{})
-	if err != nil && !sniffing.IsSniffingError(err) {
-		// We ignore lConn errors or temporary network errors
-		if _, ok := IsNetError(err); ok {
-			return nil
+		lConn.SetReadDeadline(time.Now().Add(c.sniffingTimeout))
+		domain, err := sniffer.SniffTcp()
+		lConn.SetReadDeadline(time.Time{})
+		if err != nil && !sniffing.IsSniffingError(err) {
+			// We ignore lConn errors or temporary network errors
+			if _, ok := IsNetError(err); ok {
+				return nil
+			}
+			// Avoid massive EOF logs. A common case: clients (e.g. browser) tend to establish both
+			// ipv4 and ipv6 connections, and then close one of them.
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return oops.Wrapf(err, "Sniff Failed")
 		}
-		// Avoid massive EOF logs. A common case: clients (e.g. browser) tend to establish both
-		// ipv4 and ipv6 connections, and then close one of them.
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		return oops.Wrapf(err, "Sniff Failed")
+		sniffedDomain = domain
+		lConnRelay = sniffer
 	}
 
 	// Route
@@ -140,7 +146,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		L4Proto:   consts.L4ProtoStr_TCP,
 		IpVersion: consts.IpVersionStrFromAddr(dst.Addr()),
 	}
-	dialOption, err := c.RouteDialOption(src, dst, domain, networkType, &routingResult)
+	dialOption, err := c.RouteDialOption(src, dst, sniffedDomain, networkType, &routingResult)
 	if err != nil {
 		return err
 	}
@@ -153,7 +159,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	}
 
 	// Dial
-	LogDial(src, dst, domain, dialOption, networkType, &routingResult)
+	LogDial(src, dst, sniffedDomain, dialOption, networkType, &routingResult)
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	start := time.Now()
@@ -173,7 +179,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 			With("Dialer", dialOption.Dialer.Name).
 			With("src", src.String()).
 			With("dst", dst.String()).
-			With("domain", domain).
+			With("domain", sniffedDomain).
 			Wrapf(err, "failed to DialContext")
 		if !ok {
 			return err
@@ -203,7 +209,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	defer rLogConn.Close()
 
 	// Relay
-	if err := RelayTCP(sniffer, rLogConn); err != nil {
+	if err := RelayTCP(lConnRelay, rLogConn); err != nil {
 		netErr, ok := IsNetError(err)
 		err = oops.
 			In("RelayTCP").
@@ -214,7 +220,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 			With("Dialer", dialOption.Dialer.Name).
 			With("src", src.String()).
 			With("dst", dst.String()).
-			With("domain", domain).
+			With("domain", sniffedDomain).
 			Wrapf(err, "failed to RelayTCP")
 		if !ok {
 			return err
@@ -239,25 +245,39 @@ type relayResult struct {
 }
 
 func relayDirection(dst, src net.Conn, result chan<- relayResult, direction bool) {
-	src.SetReadDeadline(time.Now().Add(DefaultNatTimeoutTCPEstablished))
-
 	// As `io.Copy` uses a 32KB buffer.
 	// See https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/io/io.go;l=419
 	// Uses a smaller buffer for less memory blooming. And 2K is enough for tcp dns.
-	remote := src
-	if direction {
-		remote = dst
+	var err error
+	bufSize := 2 * 1024 // initial 2K, the bufSize will dynamically increase as needed
+	maxBufSize := 32 * 1024
+	for {
+		src.SetReadDeadline(time.Now().Add(DefaultTCPIdleTimeout))
+		buf := pool.GetBuffer(bufSize)
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			_, werr := dst.Write(buf[:n])
+			pool.PutBuffer(buf)
+			if werr != nil {
+				err = werr
+				break
+			}
+			bufSize = min(n*2, maxBufSize)
+		} else {
+			pool.PutBuffer(buf)
+		}
+		if rerr != nil {
+			// Timeout / EOF is normal.
+			if netErr, ok := rerr.(net.Error); ok && netErr.Timeout() {
+				err = nil
+			} else if rerr == io.EOF {
+				err = nil
+			} else {
+				err = rerr
+			}
+			break
+		}
 	}
-	remotePort := remote.RemoteAddr().(*net.TCPAddr).Port
-	bufSize := 16 * 1024
-	if remotePort == 53 || remotePort == 853 {
-		bufSize = 2 * 1024
-	} else if direction {
-		bufSize = 8 * 1024
-	}
-	bufPtr := pool.GetBuffer(bufSize)
-	defer pool.PutBuffer(bufPtr)
-	_, err := io.CopyBuffer(dst, src, bufPtr)
 	result <- relayResult{err: err, direction: direction}
 	if err != nil {
 		dst.Close()
@@ -294,7 +314,6 @@ func RelayTCP(lConn, rConn net.Conn) error {
 			default:
 				err = oops.In("lConn -> rConn Relay").Wrap(err)
 			}
-
 		} else { // r -> l
 			switch {
 			case strings.Contains(err.Error(), "write:"): // lConn Write
