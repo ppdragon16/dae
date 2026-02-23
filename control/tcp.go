@@ -26,7 +26,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -103,7 +102,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	dst := dstTcpAddr.AddrPort()
 	istcpdns := IsPrivateIP(dstTcpAddr.IP) && dstTcpAddr.Port == 53
 	var routingResult bpfRoutingResult
-	if err := c.core.RetrieveRoutingResult(src, dst, unix.IPPROTO_TCP, &routingResult); err != nil {
+	if err := c.core.RetrieveTCPRoutingResult(src, dst, &routingResult); err != nil {
 		return oops.Wrapf(err, "failed to retrieve target info %v", dst.String())
 	}
 

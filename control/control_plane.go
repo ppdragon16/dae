@@ -41,7 +41,6 @@ import (
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/sys/unix"
 
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/meek"
@@ -1006,7 +1005,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 					if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
 						var err error
 						routingResult = new(bpfRoutingResult)
-						if err = c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP, routingResult); err != nil {
+						if err = c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
 							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
 							pool.PutBuffer(data)
 							return
