@@ -18,7 +18,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -129,7 +128,7 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 	if !ok {
 		// Use an empty AddrPort for dst
 		var routingResult bpfRoutingResult
-		if err := c.core.RetrieveRoutingResult(src, netip.AddrPort{}, unix.IPPROTO_UDP, &routingResult); err != nil {
+		if err := c.core.RetrieveUDPRoutingResult(src, &routingResult); err != nil {
 			return oops.Wrapf(err, "No AddrPort presented")
 		}
 

@@ -235,26 +235,39 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 	)
 }
 
-func (c *controlPlaneCore) RetrieveRoutingResult(src, dst netip.AddrPort, l4proto uint8, outResult *bpfRoutingResult) error {
-	srcIp6 := src.Addr().As16()
-	dstIp6 := dst.Addr().As16()
-
+func (c *controlPlaneCore) RetrieveTCPRoutingResult(src, dst netip.AddrPort, outResult *bpfRoutingResult) error {
 	tuples := &bpfTuplesKey{
 		Sip: struct {
 			_       structs.HostLayout
 			U6Addr8 [16]uint8
-		}{U6Addr8: srcIp6},
+		}{U6Addr8: src.Addr().As16()},
 		Sport: common.Htons(src.Port()),
 		Dip: struct {
 			_       structs.HostLayout
 			U6Addr8 [16]uint8
-		}{U6Addr8: dstIp6},
+		}{U6Addr8: dst.Addr().As16()},
 		Dport:   common.Htons(dst.Port()),
-		L4proto: l4proto,
+		L4proto: unix.IPPROTO_TCP,
 	}
 
 	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, outResult); err != nil {
-		return fmt.Errorf("reading map: key [%v, %v, %v]: %w", src.String(), l4proto, dst.String(), err)
+		return fmt.Errorf("reading map for tcp: key [%v, tcp, %v]: %w", src.String(), dst.String(), err)
+	}
+	return nil
+}
+
+func (c *controlPlaneCore) RetrieveUDPRoutingResult(src netip.AddrPort, outResult *bpfRoutingResult) error {
+	tuples := &bpfTuplesKey{
+		Sip: struct {
+			_       structs.HostLayout
+			U6Addr8 [16]uint8
+		}{U6Addr8: src.Addr().As16()},
+		Sport:   common.Htons(src.Port()),
+		L4proto: unix.IPPROTO_UDP,
+	}
+
+	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, outResult); err != nil {
+		return fmt.Errorf("reading map for udp: key [%v, udp, 0]: %w", src.String(), err)
 	}
 	return nil
 }
