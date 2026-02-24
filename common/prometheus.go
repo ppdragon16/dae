@@ -17,6 +17,10 @@ var (
 	ErrorCount         *prometheus.CounterVec
 	TrafficBytes       *prometheus.CounterVec
 	VmRssKb            prometheus.Gauge
+	StackInuse         prometheus.Gauge
+	HeapInuse          prometheus.Gauge
+	HeapIdle           prometheus.Gauge
+	HeapReleased       prometheus.Gauge
 )
 
 func InitPrometheus(registry *prometheus.Registry) {
@@ -84,11 +88,31 @@ func InitPrometheus(registry *prometheus.Registry) {
 		prometheus.CounterOpts{
 			Name: "dae_traffic_bytes",
 		},
-		[]string{"outbound", "subtag", "network", "dst"}, //, "direction", "src"},
+		[]string{"outbound", "subtag"}, //, "network", "dst", "direction", "src"},
 	)
 	VmRssKb = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dae_vm_rss_kb",
+		},
+	)
+	StackInuse = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_stack_inuse_kb",
+		},
+	)
+	HeapInuse = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_heap_inuse_kb",
+		},
+	)
+	HeapIdle = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_heap_idle_kb",
+		},
+	)
+	HeapReleased = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dae_heap_released_kb",
 		},
 	)
 	registry.MustRegister(ActiveConnections)
@@ -103,4 +127,8 @@ func InitPrometheus(registry *prometheus.Registry) {
 	registry.MustRegister(ErrorCount)
 	registry.MustRegister(TrafficBytes)
 	registry.MustRegister(VmRssKb)
+	registry.MustRegister(StackInuse)
+	registry.MustRegister(HeapInuse)
+	registry.MustRegister(HeapIdle)
+	registry.MustRegister(HeapReleased)
 }

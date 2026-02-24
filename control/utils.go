@@ -117,8 +117,7 @@ func (c *ControlPlane) RouteDialOption(
 
 type TrafficLogConn struct {
 	net.Conn
-	logger       *TrafficLogger
-	src, dst     string
+	onTraffic    func(dir string, n int64)
 	readBytes    int64
 	writtenBytes int64
 	counter      prometheus.Counter
@@ -126,14 +125,12 @@ type TrafficLogConn struct {
 	interval     time.Duration
 }
 
-func NewTrafficLogConn(conn net.Conn, logger *TrafficLogger, counter prometheus.Counter, src, dst string) *TrafficLogConn {
+func NewTrafficLogConn(conn net.Conn, counter prometheus.Counter, onTraffic func(dir string, n int64)) *TrafficLogConn {
 	return &TrafficLogConn{
-		Conn:     conn,
-		src:      src,
-		dst:      dst,
-		logger:   logger,
-		counter:  counter,
-		interval: 15 * time.Second,
+		onTraffic: onTraffic,
+		Conn:      conn,
+		counter:   counter,
+		interval:  15 * time.Second,
 	}
 }
 
@@ -155,8 +152,8 @@ func (tc *TrafficLogConn) Read(p []byte) (int, error) {
 	if tc.flushTimer == nil {
 		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
 	}
-	if tc.logger != nil {
-		tc.logger.Log(tc.src, tc.dst, "down", int64(n))
+	if tc.onTraffic != nil {
+		tc.onTraffic("down", int64(n))
 	}
 	return n, err
 }
@@ -167,8 +164,8 @@ func (tc *TrafficLogConn) Write(p []byte) (int, error) {
 	if tc.flushTimer == nil {
 		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
 	}
-	if tc.logger != nil {
-		tc.logger.Log(tc.src, tc.dst, "up", int64(n))
+	if tc.onTraffic != nil {
+		tc.onTraffic("up", int64(n))
 	}
 	return n, err
 }

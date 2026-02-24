@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -573,6 +574,9 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	params := parts[2:]
 
 	switch cmd {
+	case "gc":
+		runtime.GC()
+		fmt.Fprintf(writer, "OK\n")
 	case "redirect":
 		if r.Method == "GET" {
 			if len(params) > 0 {
@@ -936,11 +940,9 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	sentReady = true
 	readyChan <- true
 	tickerVmRSS := time.NewTicker(10 * time.Second)
-	tickerResetTraffic := time.NewTicker(1 * time.Hour)
 	go func() {
 		// Reports memory usage every 10 seconds.
 		defer tickerVmRSS.Stop()
-		defer tickerResetTraffic.Stop()
 		for {
 			select {
 			case <-tickerVmRSS.C:
@@ -949,8 +951,12 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 				if err != nil {
 					log.Warnf("getVmRSS error: %+v", err)
 				}
-			case <-tickerResetTraffic.C:
-				common.TrafficBytes.Reset()
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				common.StackInuse.Set(float64(ms.StackInuse) / 1024)
+				common.HeapInuse.Set(float64(ms.HeapInuse) / 1024)
+				common.HeapIdle.Set(float64(ms.HeapIdle) / 1024)
+				common.HeapReleased.Set(float64(ms.HeapReleased) / 1024)
 			case <-c.ctx.Done():
 				return
 			}
