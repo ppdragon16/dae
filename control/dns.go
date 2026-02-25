@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/daeuniverse/dae/component/dns"
+	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	dnsmessage "github.com/miekg/dns"
@@ -60,9 +62,9 @@ func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForw
 			case dns.UpstreamScheme_TCP, dns.UpstreamScheme_TCP_UDP:
 				return NewTcpForwarder(dialArgument), nil
 			case dns.UpstreamScheme_TLS:
-				return &DoTLS{Upstream: *upstream, dialArgument: dialArgument}, nil
+				return NewDoTLS(upstream, dialArgument), nil
 			case dns.UpstreamScheme_HTTPS:
-				return &DoH{Upstream: *upstream, dialArgument: dialArgument, http3: false}, nil
+				return NewDoH(upstream, dialArgument, false), nil
 			default:
 				return nil, fmt.Errorf("unexpected scheme: %v", upstream.Scheme)
 			}
@@ -71,9 +73,9 @@ func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForw
 			case dns.UpstreamScheme_UDP, dns.UpstreamScheme_TCP_UDP:
 				return NewUdpForwarder(dialArgument), nil
 			case dns.UpstreamScheme_QUIC:
-				return &DoQ{Upstream: *upstream, dialArgument: dialArgument}, nil
+				return NewDoQ(upstream, dialArgument), nil
 			case dns.UpstreamScheme_H3:
-				return &DoH{Upstream: *upstream, dialArgument: dialArgument, http3: true}, nil
+				return NewDoH(upstream, dialArgument, true), nil
 			default:
 				return nil, fmt.Errorf("unexpected scheme: %v", upstream.Scheme)
 			}
@@ -88,38 +90,62 @@ func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForw
 }
 
 type DoH struct {
-	dns.Upstream
-	dialArgument dialArgument
-	http3        bool
+	http3     bool
+	client    *http.Client
+	serverURL *url.URL
+}
+
+func NewDoH(upstream *dns.Upstream, dialArgument dialArgument, http3 bool) *DoH {
+	var roundTripper http.RoundTripper
+	if http3 {
+		roundTripper = getHttp3RoundTripper(upstream.Hostname, dialArgument.Dialer, dialArgument.Target)
+	} else {
+		roundTripper = getHttpRoundTripper(upstream.Hostname, dialArgument.Dialer, dialArgument.Target)
+	}
+	return &DoH{
+		http3:  http3,
+		client: &http.Client{Transport: roundTripper},
+		serverURL: &url.URL{
+			Scheme: "https",
+			Host:   dialArgument.Target.String(),
+			Path:   upstream.Path,
+		},
+	}
 }
 
 func (d *DoH) ForwardDNS(msg *dnsmessage.Msg) error {
-	var roundTripper http.RoundTripper
-	if d.http3 {
-		roundTripper = d.getHttp3RoundTripper()
-	} else {
-		roundTripper = d.getHttpRoundTripper()
+	data, err := msg.Pack()
+	if err != nil {
+		return err
 	}
-	client := &http.Client{
-		Transport: roundTripper,
+	resp, err := netutils.ResolveHttp(d.client, d.serverURL, data)
+	if err != nil {
+		return err
 	}
-	serverURL := &url.URL{
-		Scheme: "https",
-		Host:   d.dialArgument.Target.String(),
-		Path:   d.Upstream.Path,
-	}
-
-	return netutils.ResolveHttp(client, serverURL, msg)
+	return msg.Unpack(resp)
 }
 
-func (d *DoH) getHttpRoundTripper() *http.Transport {
+func (d *DoH) Close() error {
+	if d.http3 {
+		if tr, ok := d.client.Transport.(*http3.Transport); ok {
+			return tr.Close()
+		}
+	} else {
+		if tr, ok := d.client.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+	}
+	return nil
+}
+
+func getHttpRoundTripper(hostname string, dialer *dialer.Dialer, target netip.AddrPort) *http.Transport {
 	httpTransport := http.Transport{
 		TLSClientConfig: &tls.Config{
-			ServerName:         d.Upstream.Hostname,
+			ServerName:         hostname,
 			InsecureSkipVerify: false,
 		},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := d.dialArgument.Dialer.DialContext(ctx, "tcp", d.dialArgument.Target.String())
+			conn, err := dialer.DialContext(ctx, "tcp", target.String())
 			if err != nil {
 				return nil, err
 			}
@@ -130,22 +156,29 @@ func (d *DoH) getHttpRoundTripper() *http.Transport {
 	return &httpTransport
 }
 
-func (d *DoH) getHttp3RoundTripper() *http3.RoundTripper {
-	roundTripper := &http3.RoundTripper{
+func getHttp3RoundTripper(hostname string, dialer *dialer.Dialer, target netip.AddrPort) *http3.Transport {
+	roundTripper := &http3.Transport{
 		TLSClientConfig: &tls.Config{
-			ServerName:         d.Upstream.Hostname,
+			ServerName:         hostname,
 			NextProtos:         []string{"h3"},
 			InsecureSkipVerify: false,
 		},
-		QUICConfig: &quic.Config{},
+		QUICConfig: &quic.Config{
+			KeepAlivePeriod: 30 * time.Second,
+			MaxIdleTimeout:  45 * time.Second,
+		},
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-			udpAddr := net.UDPAddrFromAddrPort(d.dialArgument.Target)
-			conn, err := d.dialArgument.Dialer.ListenPacket(ctx, d.dialArgument.Target.String())
+			udpAddr := net.UDPAddrFromAddrPort(target)
+			conn, err := dialer.ListenPacket(ctx, target.String())
 			if err != nil {
 				return nil, err
 			}
-			c, e := quic.DialEarly(ctx, conn, udpAddr, tlsCfg, cfg)
-			return c, e
+			c, err := quic.DialEarly(ctx, conn, udpAddr, tlsCfg, cfg)
+			if err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return c, nil
 		},
 	}
 	return roundTripper
@@ -154,40 +187,15 @@ func (d *DoH) getHttp3RoundTripper() *http3.RoundTripper {
 type DoQ struct {
 	dns.Upstream
 	dialArgument dialArgument
+	mu           sync.RWMutex
 	conn         quic.Connection
 }
 
-func (d *DoQ) ForwardDNS(msg *dnsmessage.Msg) (err error) {
-	if d.conn == nil || d.conn.Context().Err() != nil {
-		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
-		defer cancel()
-		d.conn, err = d.createConnection(ctx)
-		if err != nil {
-			return
-		}
+func NewDoQ(upstream *dns.Upstream, dialArgument dialArgument) *DoQ {
+	return &DoQ{
+		Upstream:     *upstream,
+		dialArgument: dialArgument,
 	}
-
-	defer func() {
-		if err != nil {
-			d.Close()
-		}
-	}()
-
-	stream, err := d.conn.OpenStream()
-	if err != nil {
-		return
-	}
-
-	defer stream.Close()
-	err = netutils.ResolveStream(stream, msg, true)
-	return
-}
-
-func (c *DoQ) Close() error {
-	if c.conn != nil {
-		c.conn.CloseWithError(0x101, "")
-	}
-	return nil
 }
 
 func (d *DoQ) createConnection(ctx context.Context) (quic.EarlyConnection, error) {
@@ -205,28 +213,149 @@ func (d *DoQ) createConnection(ctx context.Context) (quic.EarlyConnection, error
 	return quic.DialEarly(ctx, conn, addr, tlsCfg, nil)
 }
 
+func (d *DoQ) getConnection() (quic.Connection, error) {
+	d.mu.RLock()
+	if d.conn != nil && d.conn.Context().Err() == nil {
+		defer d.mu.RUnlock()
+		return d.conn, nil
+	}
+	d.mu.RUnlock()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.conn != nil && d.conn.Context().Err() == nil {
+		return d.conn, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), consts.DefaultDialTimeout)
+	defer cancel()
+
+	conn, err := d.createConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	d.conn = conn
+	return d.conn, nil
+}
+
+func (d *DoQ) ForwardDNS(msg *dnsmessage.Msg) error {
+	data, err := msg.Pack()
+	if err != nil {
+		return err
+	}
+	var conn quic.Connection
+	var stream quic.Stream
+	conn, err = d.getConnection()
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if err != nil {
+			d.Close()
+		}
+	}()
+
+	stream, err = conn.OpenStreamSync(context.Background())
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	resp, err := netutils.ResolveStream(stream, data, true)
+	if err != nil {
+		return err
+	}
+	return msg.Unpack(resp)
+}
+
+func (d *DoQ) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.conn != nil {
+		d.conn.CloseWithError(0x101, "")
+		d.conn = nil
+	}
+	return nil
+}
+
 type DoTLS struct {
 	dns.Upstream
 	dialArgument dialArgument
+
+	pool chan *tls.Conn
 }
 
-func (d *DoTLS) ForwardDNS(msg *dnsmessage.Msg) error {
+func NewDoTLS(upstream *dns.Upstream, dialArgument dialArgument) *DoTLS {
+	return &DoTLS{
+		Upstream:     *upstream,
+		dialArgument: dialArgument,
+		pool:         make(chan *tls.Conn, TcpPoolSize),
+	}
+}
+
+func (d *DoTLS) createNewConn() (*tls.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	conn, err := d.dialArgument.Dialer.DialContext(ctx, "tcp", d.dialArgument.Target.String())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tlsConn := tls.Client(conn, &tls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         d.Upstream.Hostname,
 	})
-	if err = tlsConn.Handshake(); err != nil {
+
+	if err = tlsConn.HandshakeContext(ctx); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+func (d *DoTLS) getConn() (*tls.Conn, error) {
+	select {
+	case conn := <-d.pool:
+		return conn, nil
+	default:
+		return d.createNewConn()
+	}
+}
+
+func (d *DoTLS) putConn(conn *tls.Conn) {
+	select {
+	case d.pool <- conn:
+	default:
+		conn.Close()
+	}
+}
+
+func (d *DoTLS) ForwardDNS(msg *dnsmessage.Msg) error {
+	data, err := msg.Pack()
+	if err != nil {
 		return err
 	}
 
-	defer tlsConn.Close()
-	return netutils.ResolveStream(conn, msg, false)
+	conn, err := d.getConn()
+	if err != nil {
+		return err
+	}
+
+	resp, err := netutils.ResolveStream(conn, data, false)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	d.putConn(conn)
+	return msg.Unpack(resp)
+}
+
+func (d *DoTLS) Close() {
+	close(d.pool)
+	for conn := range d.pool {
+		conn.Close()
+	}
 }
 
 type DoTcpOrUdp struct {

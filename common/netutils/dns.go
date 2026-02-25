@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -31,14 +32,10 @@ var (
 	ErrNoIpRecord = fmt.Errorf("no ip record found")
 )
 
-func ResolveHttp(client *http.Client, url *url.URL, msg *dnsmessage.Msg) error {
+func ResolveHttp(client *http.Client, url *url.URL, data []byte) ([]byte, error) {
 	// disable redirect https://github.com/daeuniverse/dae/pull/649#issuecomment-2379577896
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("do not use a server that will redirect, url: %v", url.String())
-	}
-	data, err := msg.Pack()
-	if err != nil {
-		return oops.Wrapf(err, "pack DNS packet")
 	}
 
 	// According https://datatracker.ietf.org/doc/html/rfc8484#section-4
@@ -51,118 +48,102 @@ func ResolveHttp(client *http.Client, url *url.URL, msg *dnsmessage.Msg) error {
 
 	req, err := http.NewRequest(http.MethodGet, url.String(), nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/dns-message")
 	req.Host = url.Host
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	buf, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err = msg.Unpack(buf); err != nil {
-		return err
-	}
-	return nil
+	return buf, nil
 }
 
-func ResolveStream(stream io.ReadWriter, msg *dnsmessage.Msg, quic bool) error {
+func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error) {
 	if d, ok := stream.(interface{ SetDeadline(time.Time) error }); ok {
 		d.SetDeadline(time.Now().Add(consts.DefaultDNSTimeout))
 	}
-	data, err := msg.Pack()
-	if err != nil {
-		return oops.Wrapf(err, "pack DNS packet")
-	}
 	buf := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(buf)
+	// We should write two byte length in the front of stream DNS request.
+	binary.Write(buf, binary.BigEndian, uint16(len(data)))
 	if quic {
 		// According https://datatracker.ietf.org/doc/html/rfc9250#section-4.2.1
 		// msg id should set to 0 when transport over QUIC.
 		// thanks https://github.com/natesales/q/blob/1cb2639caf69bd0a9b46494a3c689130df8fb24a/transport/quic.go#L97
-		binary.Write(buf, binary.BigEndian, uint16(0))
+		buf.Write([]byte{0, 0})
+		buf.Write(data[2:])
 	} else {
-		// We should write two byte length in the front of stream DNS request.
-		binary.Write(buf, binary.BigEndian, uint16(len(data)))
+		buf.Write(data)
 	}
-	buf.Write(data)
-	_, err = stream.Write(buf.Bytes())
+	_, err := stream.Write(buf.Bytes())
 	if err != nil {
-		return oops.Wrapf(err, "failed to write DNS req")
+		return nil, oops.Wrapf(err, "failed to write DNS req")
 	}
 
 	lenBuf := pool.GetBuffer(2)
 	defer pool.PutBuffer(lenBuf)
 	// Read two byte length.
 	if _, err = io.ReadFull(stream, lenBuf); err != nil {
-		return oops.Wrapf(err, "failed to read DNS resp payload length")
+		return nil, oops.Wrapf(err, "failed to read DNS resp payload length")
 	}
-	respBuf := pool.GetBuffer(int(binary.BigEndian.Uint16(lenBuf)))
-	defer pool.PutBuffer(respBuf)
+	respBuf := make([]byte, binary.BigEndian.Uint16(lenBuf))
 	if _, err = io.ReadFull(stream, respBuf); err != nil {
-		return oops.Wrapf(err, "failed to read DNS resp payload")
+		return nil, oops.Wrapf(err, "failed to read DNS resp payload")
 	}
-	if err = msg.Unpack(respBuf); err != nil {
-		return err
-	}
-	return nil
+	return respBuf, nil
 }
 
-func ResolveUDP(conn net.Conn, msg *dnsmessage.Msg) error {
-	data, err := msg.Pack()
-	if err != nil {
-		return oops.Wrapf(err, "pack DNS packet")
-	}
+func ResolveUDP(conn net.Conn, data []byte) (resp []byte, err error) {
+	deadline := time.Now().Add(consts.DefaultDNSTimeout)
+	conn.SetReadDeadline(deadline)
 
-	// TODO: SetReadDeadline 无法生效的情况下, 这里就会stuck
-	// TODO: SetDeadline 可能会不被支持, 特别是 SetWriteDeadline
-	conn.SetDeadline(time.Now().Add(consts.DefaultDNSTimeout))
-	ctx, cancel := context.WithCancel(context.TODO())
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
-	timer := time.NewTimer(consts.DefaultDNSRetryInterval)
-	defer timer.Stop()
-
-	sendCh := make(chan error, 1)
-	go func() {
-		for i := 0; i < consts.DefaultDNSRetryCount; i++ {
-			_, err := conn.Write(data)
-			if err != nil {
-				sendCh <- err
-				return
-			}
-			if i > 0 {
-				timer.Reset(consts.DefaultDNSRetryInterval)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-timer.C:
-			}
-		}
-	}()
-
-	recvCh := make(chan error, 1)
-	go func() {
-		respBuf := pool.GetBuffer(consts.EthernetMtu)
-		defer pool.PutBuffer(respBuf)
-		// Wait for response.
-		if n, err := conn.Read(respBuf); err == nil {
-			msg.Unpack(respBuf[:n])
-		}
-		recvCh <- err
-	}()
-
-	select {
-	case err := <-sendCh:
-		return err
-	case err := <-recvCh:
-		return err
+	type result struct {
+		data []byte
+		err  error
 	}
+
+	recvCh := make(chan result, 1)
+
+	go func() {
+		// Wait for response.
+		buf := make([]byte, consts.EthernetMtu)
+		n, rErr := conn.Read(buf)
+		select {
+		case recvCh <- result{data: buf[:n], err: rErr}:
+		case <-ctx.Done():
+			return
+		}
+	}()
+
+	ticker := time.NewTicker(consts.DefaultDNSRetryInterval)
+	defer ticker.Stop()
+
+	for i := 0; i < consts.DefaultDNSRetryCount; i++ {
+		_, err = conn.Write(data)
+		if err != nil {
+			return nil, oops.Wrapf(err, "udp write error")
+		}
+
+		select {
+		case res := <-recvCh:
+			return res.data, res.err
+		case <-ticker.C:
+			continue
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return nil, errors.New("dns lookup timeout")
 }
 
 func ResolveNetip(d netproxy.Dialer, dns netip.AddrPort, host string, typ uint16, network string) (addrs []netip.Addr, err error) {
@@ -273,10 +254,17 @@ func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uin
 	}
 	defer conn.Close()
 
-	if network == "tcp" {
-		err = ResolveStream(conn, &msg, false)
-	} else {
-		err = ResolveUDP(conn, &msg)
+	var data []byte
+	if data, err = msg.Pack(); err == nil {
+		var resp []byte
+		if network == "tcp" {
+			resp, err = ResolveStream(conn, data, false)
+		} else {
+			resp, err = ResolveUDP(conn, data)
+		}
+		if err == nil {
+			err = msg.Unpack(resp)
+		}
 	}
 	if err != nil {
 		return nil, err
