@@ -182,10 +182,6 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	activeConnectionsCounter.Inc()
 	defer activeConnectionsCounter.Dec()
 
-	counterForTraffic := common.TrafficBytes.With(prometheus.Labels{
-		"outbound": dialOption.Outbound.Name,
-		"subtag":   dialOption.Dialer.Property.SubscriptionTag,
-	})
 	var onTraffic func(dir string, n int64)
 	if c.trafficLogger != nil {
 		srcStr := src.Addr().String()
@@ -194,7 +190,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 			c.trafficLogger.Log(srcStr, dstStr, dir, n)
 		}
 	}
-	rLogConn := NewTrafficLogConn(rConn, counterForTraffic, onTraffic)
+	rLogConn := NewTrafficLogConn(rConn, common.TrafficBytes.With(labels), onTraffic)
 	defer rLogConn.Close()
 
 	// Relay

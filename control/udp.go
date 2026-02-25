@@ -26,9 +26,7 @@ var (
 )
 
 const (
-	DnsNatTimeout  = 17 * time.Second // RFC 5452
-	AnyfromTimeout = 5 * time.Second  // Do not cache too long.
-	MaxRetry       = 2
+	AnyfromTimeout = 5 * time.Second // Do not cache too long.
 )
 
 // sendPkt uses bind first, and fallback to send hdr if addr is in use.
@@ -41,7 +39,7 @@ func sendPkt(data []byte, from, to netip.AddrPort) (err error) {
 	return err
 }
 
-func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip.AddrPort, skipSniffing bool) (err error) {
+func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort, skipSniffing bool) (err error) {
 	var domain string
 
 	/// Sniff
@@ -83,7 +81,7 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 				defer func() {
 					if err == nil {
 						for _, d := range toRehandle {
-							err := c.handlePkt(lConn, d, src, dst, true)
+							err := c.handlePkt(d, src, dst, true)
 							if err != nil {
 								log.Warnf("%+v", oops.Wrapf(err, "rehandlePkt"))
 							}
@@ -138,12 +136,6 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 			return err
 		}
 
-		// Do not overwrite target.
-		// This fixes a problem that quic connection to google servers.
-		// Reproduce:
-		// docker run --rm --name curl-http3 ymuski/curl-http3 curl --http3 -o /dev/null -v -L https://i.ytimg.com
-		dialOption.DialTarget = dst.String()
-
 		labels := prometheus.Labels{
 			"outbound": dialOption.Outbound.Name,
 			"subtag":   dialOption.Dialer.Property.SubscriptionTag,
@@ -152,11 +144,13 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 		}
 
 		// Dial
-		// Only print routing for new connection to avoid the log exploded (Quic and BT).
-		LogDial(src, dst, domain, dialOption, networkType, &routingResult)
 		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 		defer cancel()
-		udpConn, err := dialOption.Dialer.ListenPacket(ctx, dialOption.DialTarget)
+		// Do not overwrite target.
+		// This fixes a problem that quic connection to google servers.
+		// Reproduce:
+		// docker run --rm --name curl-http3 ymuski/curl-http3 curl --http3 -o /dev/null -v -L https://i.ytimg.com
+		udpConn, err := dialOption.Dialer.ListenPacket(ctx, dst.String())
 		if err != nil {
 			netErr, ok := IsNetError(err)
 			err = oops.
@@ -181,9 +175,19 @@ func (c *ControlPlane) handlePkt(lConn *net.UDPConn, data []byte, src, dst netip
 			}
 			return nil
 		}
+		createTime := time.Now()
 		ue = DefaultUdpEndpointPool.Create(src, &UdpEndpointOptions{
 			PacketConn: udpConn,
 			Handler: func(data []byte, from netip.AddrPort) (err error) {
+				if !createTime.IsZero() {
+					// Only print routing for new connection to avoid the log exploded (Quic and BT).
+					// Note: Log dialOption.dialTarget but dial dst.string().
+					LogDial(src, dst, domain, dialOption, networkType, &routingResult)
+					if log.IsLevelEnabled(log.InfoLevel) {
+						log.Infof("UDP first response latency: %vms", time.Since(createTime).Milliseconds())
+					}
+					createTime = time.Time{} // Set createTime to zero to indicate that the log has been printed.
+				}
 				return sendPkt(data, from, src)
 			},
 			NatTimeout: DefaultNatTimeoutUDP,
