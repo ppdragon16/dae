@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/daeuniverse/dae/common"
-	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,14 +32,15 @@ type UdpEndpoint struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	dialer *dialer.Dialer
-	labels prometheus.Labels
+	dialer         *dialer.Dialer
+	labels         prometheus.Labels
+	counterTraffic prometheus.Counter
 }
 
 func (ue *UdpEndpoint) run() error {
 	common.ActiveConnections.With(ue.labels).Inc()
 	defer common.ActiveConnections.With(ue.labels).Dec()
-	buf := pool.GetBuffer(consts.EthernetMtu)
+	buf := pool.GetBuffer(2048)
 	defer pool.PutBuffer(buf)
 	for {
 		n, from, err := ue.conn.ReadFrom(buf)
@@ -53,6 +53,7 @@ func (ue *UdpEndpoint) run() error {
 		ue.mu.Lock()
 		ue.deadlineTimer.Reset(ue.NatTimeout)
 		ue.mu.Unlock()
+		ue.counterTraffic.Add(float64(n))
 		if err = ue.handler(buf[:n], netip.MustParseAddrPort(from.String())); err != nil {
 			break
 		}
@@ -65,7 +66,9 @@ func (ue *UdpEndpoint) IsClosed() bool {
 }
 
 func (ue *UdpEndpoint) WriteTo(b []byte, addr net.Addr) (int, error) {
-	return ue.conn.WriteTo(b, addr)
+	n, err := ue.conn.WriteTo(b, addr)
+	ue.counterTraffic.Add(float64(n))
+	return n, err
 }
 
 // Close should only called by UdpEndpointPool.Remove
@@ -118,13 +121,14 @@ func (p *UdpEndpointPool) Get(key netip.AddrPort) (udpEndpoint *UdpEndpoint, ok 
 func (p *UdpEndpointPool) Create(key netip.AddrPort, createOption *UdpEndpointOptions) (udpEndpoint *UdpEndpoint) {
 	ctx, cancel := context.WithCancel(context.Background())
 	udpEndpoint = &UdpEndpoint{
-		conn:       createOption.PacketConn,
-		handler:    createOption.Handler,
-		NatTimeout: createOption.NatTimeout,
-		ctx:        ctx,
-		cancel:     cancel,
-		dialer:     createOption.Dialer,
-		labels:     createOption.labels,
+		conn:           createOption.PacketConn,
+		handler:        createOption.Handler,
+		NatTimeout:     createOption.NatTimeout,
+		ctx:            ctx,
+		cancel:         cancel,
+		dialer:         createOption.Dialer,
+		labels:         createOption.labels,
+		counterTraffic: common.TrafficBytes.With(createOption.labels),
 	}
 	udpEndpoint.deadlineTimer = time.AfterFunc(createOption.NatTimeout, func() {
 		p.Remove(key)

@@ -17,7 +17,6 @@ import (
 	"strings"
 	"structs"
 	"syscall"
-	"time"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
@@ -117,12 +116,8 @@ func (c *ControlPlane) RouteDialOption(
 
 type TrafficLogConn struct {
 	net.Conn
-	onTraffic    func(dir string, n int64)
-	readBytes    int64
-	writtenBytes int64
-	counter      prometheus.Counter
-	flushTimer   *time.Timer
-	interval     time.Duration
+	onTraffic func(dir string, n int64)
+	counter   prometheus.Counter
 }
 
 func NewTrafficLogConn(conn net.Conn, counter prometheus.Counter, onTraffic func(dir string, n int64)) *TrafficLogConn {
@@ -130,28 +125,12 @@ func NewTrafficLogConn(conn net.Conn, counter prometheus.Counter, onTraffic func
 		onTraffic: onTraffic,
 		Conn:      conn,
 		counter:   counter,
-		interval:  15 * time.Second,
 	}
-}
-
-func (tc *TrafficLogConn) flush() {
-	if tc.readBytes > 0 {
-		tc.counter.Add(float64(tc.readBytes))
-		tc.readBytes = 0
-	}
-	if tc.writtenBytes > 0 {
-		tc.counter.Add(float64(tc.writtenBytes))
-		tc.writtenBytes = 0
-	}
-	tc.flushTimer = nil
 }
 
 func (tc *TrafficLogConn) Read(p []byte) (int, error) {
 	n, err := tc.Conn.Read(p)
-	tc.readBytes += int64(n)
-	if tc.flushTimer == nil {
-		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
-	}
+	tc.counter.Add(float64(n))
 	if tc.onTraffic != nil {
 		tc.onTraffic("down", int64(n))
 	}
@@ -160,22 +139,11 @@ func (tc *TrafficLogConn) Read(p []byte) (int, error) {
 
 func (tc *TrafficLogConn) Write(p []byte) (int, error) {
 	n, err := tc.Conn.Write(p)
-	tc.writtenBytes += int64(n)
-	if tc.flushTimer == nil {
-		tc.flushTimer = time.AfterFunc(tc.interval, tc.flush)
-	}
+	tc.counter.Add(float64(n))
 	if tc.onTraffic != nil {
 		tc.onTraffic("up", int64(n))
 	}
 	return n, err
-}
-
-func (tc *TrafficLogConn) Close() error {
-	if tc.flushTimer != nil {
-		tc.flushTimer.Stop()
-		tc.flush()
-	}
-	return tc.Conn.Close()
 }
 
 func LogDial(src, dst netip.AddrPort, domain string, dialOption *DialOption, networkType *common.NetworkType, routingResult *bpfRoutingResult) {

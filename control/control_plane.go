@@ -1034,7 +1034,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 
 				DefaultUdpTaskPool.EmitTask(src, func() {
 					defer pool.PutBuffer(data)
-					if e := c.handlePkt(udpConn, data, src, dst, dst.Port() == 53); e != nil && c.ctx.Err() == nil {
+					if e := c.handlePkt(data, src, dst, dst.Port() == 53); e != nil && c.ctx.Err() == nil {
 						log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
 					}
 				})

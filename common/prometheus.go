@@ -88,7 +88,7 @@ func InitPrometheus(registry *prometheus.Registry) {
 		prometheus.CounterOpts{
 			Name: "dae_traffic_bytes",
 		},
-		[]string{"outbound", "subtag"}, //, "network", "dst", "direction", "src"},
+		labels,
 	)
 	VmRssKb = prometheus.NewGauge(
 		prometheus.GaugeOpts{
