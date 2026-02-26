@@ -244,27 +244,5 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort, skipSniff
 		}
 	}
 
-	// // Print log.
-	// // Only print routing for new connection to avoid the log exploded (Quic and BT).
-	// if (isNew && c.log.IsLevelEnabled(logrus.InfoLevel)) || c.log.IsLevelEnabled(logrus.DebugLevel) {
-	// 	fields := logrus.Fields{
-	// 		"network":  networkType.StringWithoutDns(),
-	// 		"outbound": ue.Outbound.Name,
-	// 		"policy":   ue.Outbound.GetSelectionPolicy(),
-	// 		"dialer":   ue.Dialer.Property().Name,
-	// 		"sniffed":  domain,
-	// 		"ip":       RefineAddrPortToShow(realDst),
-	// 		"pid":      routingResult.Pid,
-	// 		"ifindex":  routingResult.Ifindex,
-	// 		"dscp":     routingResult.Dscp,
-	// 		"pname":    ProcessName2String(routingResult.Pname[:]),
-	// 		"mac":      Mac2String(routingResult.Mac[:]),
-	// 	}
-	// 	logger := c.log.WithFields(fields).Infof
-	// 	if !isNew && c.log.IsLevelEnabled(logrus.DebugLevel) {
-	// 		logger = c.log.WithFields(fields).Debugf
-	// 	}
-	// 	logger("[%v] %v <-> %v", strings.ToUpper(networkType.String()), RefineSourceToShow(realSrc, realDst.Addr()), dialTarget)
-	// }
 	return nil
 }

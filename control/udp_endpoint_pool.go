@@ -54,7 +54,7 @@ func (ue *UdpEndpoint) run() error {
 		ue.deadlineTimer.Reset(ue.NatTimeout)
 		ue.mu.Unlock()
 		ue.counterTraffic.Add(float64(n))
-		if err = ue.handler(buf[:n], netip.MustParseAddrPort(from.String())); err != nil {
+		if err = ue.handler(buf[:n], ToAddrPort(from)); err != nil {
 			break
 		}
 	}

@@ -23,3 +23,14 @@ func RefineSourceToShow(src netip.AddrPort, dst netip.Addr) (srcToShow string) {
 func RefineAddrPortToShow(addrPort netip.AddrPort) (srcToShow string) {
 	return net.JoinHostPort(net.IP(addrPort.Addr().AsSlice()).String(), strconv.Itoa(int(addrPort.Port())))
 }
+
+func ToAddrPort(addr net.Addr) netip.AddrPort {
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		return a.AddrPort()
+	case *net.TCPAddr:
+		return a.AddrPort()
+	default:
+		return netip.MustParseAddrPort(addr.String())
+	}
+}
