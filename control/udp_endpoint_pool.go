@@ -54,7 +54,7 @@ func (ue *UdpEndpoint) run() error {
 		ue.deadlineTimer.Reset(ue.NatTimeout)
 		ue.mu.Unlock()
 		ue.counterTraffic.Add(float64(n))
-		if err = ue.handler(buf[:n], netip.MustParseAddrPort(from.String())); err != nil {
+		if err = ue.handler(buf[:n], ToAddrPort(from)); err != nil {
 			break
 		}
 	}
@@ -65,8 +65,8 @@ func (ue *UdpEndpoint) IsClosed() bool {
 	return ue.ctx.Err() != nil
 }
 
-func (ue *UdpEndpoint) WriteTo(b []byte, addr net.Addr) (int, error) {
-	n, err := ue.conn.WriteTo(b, addr)
+func (ue *UdpEndpoint) WriteTo(b []byte, addr netip.AddrPort) (int, error) {
+	n, err := ue.conn.WriteTo(b, net.UDPAddrFromAddrPort(addr))
 	ue.counterTraffic.Add(float64(n))
 	return n, err
 }
@@ -90,7 +90,6 @@ type UdpEndpointOptions struct {
 	PacketConn net.PacketConn
 	Handler    UdpHandler
 	NatTimeout time.Duration
-	Src        netip.AddrPort
 
 	Dialer *dialer.Dialer
 	labels prometheus.Labels
@@ -136,83 +135,3 @@ func (p *UdpEndpointPool) Create(key netip.AddrPort, createOption *UdpEndpointOp
 	p.pool.Store(key, udpEndpoint)
 	return
 }
-
-// func (p *UdpEndpointPool) GetOrCreate(lAddr netip.AddrPort, createOption *UdpEndpointOptions) (udpEndpoint *UdpEndpoint, reportUnavailable func(err error), isNew bool, err error) {
-// 	_ue, ok := p.pool.Load(lAddr)
-// begin:
-// 	if !ok {
-// 		l := p.udpEndpointKeyLocker.Lock(lAddr)
-// 		defer p.udpEndpointKeyLocker.Unlock(lAddr, l)
-
-// 		_ue, ok = p.pool.Load(lAddr)
-// 		if ok {
-// 			goto begin
-// 		}
-// 		// Create an UdpEndpoint.
-// 		if createOption == nil {
-// 			createOption = &UdpEndpointOptions{}
-// 		}
-// 		if createOption.NatTimeout == 0 {
-// 			createOption.NatTimeout = DefaultNatTimeoutUDP
-// 		}
-// 		if createOption.Handler == nil {
-// 			return nil, nil, true, oops.Errorf("createOption.Handler cannot be nil")
-// 		}
-
-// 		dialOption, err := createOption.GetDialOption()
-// 		if err != nil {
-// 			return nil, nil, false, err
-// 		}
-
-// 		reportUnavailable = func(err error) {
-// 			dialOption.Dialer.ReportUnavailable(dialOption.NetworkType, err)
-// 		}
-
-// 		ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
-// 		defer cancel()
-// 		udpConn, err := dialOption.Dialer.DialContext(ctx, dialOption.Network, dialOption.Target)
-// 		if err != nil {
-// 			return nil, reportUnavailable, true, oops.
-// 				WithContext(ctx).
-// 				With("Target", dialOption.Target).
-// 				With("Dialer", dialOption.Dialer.Property().Name).
-// 				With("Outbound", dialOption.Outbound.Name).
-// 				With("Network", dialOption.Network).With("Target", dialOption.Target).
-// 				Wrapf(err, "Failed to DialContext")
-// 		}
-// 		if _, ok = udpConn.(netproxy.PacketConn); !ok {
-// 			return nil, reportUnavailable, true, oops.Errorf("protocol does not support udp")
-// 		}
-// 		ue := &UdpEndpoint{
-// 			conn:          udpConn.(netproxy.PacketConn),
-// 			deadlineTimer: nil,
-// 			handler:       createOption.Handler,
-// 			NatTimeout:    createOption.NatTimeout,
-// 			Dialer:        dialOption.Dialer,
-// 			Outbound:      dialOption.Outbound,
-// 			SniffedDomain: dialOption.SniffedDomain,
-// 			DialTarget:    dialOption.Target,
-// 		}
-// 		ue.deadlineTimer = time.AfterFunc(createOption.NatTimeout, func() {
-// 			if _ue, ok := p.pool.LoadAndDelete(lAddr); ok {
-// 				if _ue == ue {
-// 					ue.Close()
-// 				} else {
-// 					// FIXME: ?
-// 				}
-// 			}
-// 		})
-// 		_ue = ue
-// 		p.pool.Store(lAddr, ue)
-// 		// Receive UDP messages.
-// 		go ue.start()
-// 		isNew = true
-// 	} else {
-// 		ue := _ue.(*UdpEndpoint)
-// 		// Postpone the deadline.
-// 		ue.mu.Lock()
-// 		ue.deadlineTimer.Reset(ue.NatTimeout)
-// 		ue.mu.Unlock()
-// 	}
-// 	return _ue.(*UdpEndpoint), reportUnavailable, isNew, nil
-// }
