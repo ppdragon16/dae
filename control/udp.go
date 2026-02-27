@@ -7,7 +7,6 @@ package control
 
 import (
 	"context"
-	"net"
 	"net/netip"
 
 	"time"
@@ -222,7 +221,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort, skipSniff
 
 	// TODO: What is realSrc/Dst?
 	// Try to write data
-	_, err = ue.WriteTo(data, net.UDPAddrFromAddrPort(dst))
+	_, err = ue.WriteTo(data, dst)
 	if err != nil {
 		DefaultUdpEndpointPool.Remove(src)
 		netErr, ok := IsNetError(err)
