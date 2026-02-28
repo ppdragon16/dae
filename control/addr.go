@@ -25,13 +25,14 @@ func RefineAddrPortToShow(addrPort netip.AddrPort) (srcToShow string) {
 }
 
 func ToAddrPort(addr net.Addr) netip.AddrPort {
+	var ap netip.AddrPort
 	switch a := addr.(type) {
 	case *net.UDPAddr:
-		return a.AddrPort()
+		ap = a.AddrPort()
 	case *net.TCPAddr:
-		return a.AddrPort()
+		ap = a.AddrPort()
 	default:
-		ap, _ := netip.ParseAddrPort(addr.String())
-		return ap
+		ap, _ = netip.ParseAddrPort(addr.String())
 	}
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }

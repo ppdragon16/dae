@@ -68,7 +68,10 @@ func (s *Sniffer) SniffQuic() (d string, err error) {
 	s.quicNextRead = s.buf.Len()
 	sni, err := extractSniFromTls(quicutils.NewLinearLocator(s.quicCryptos))
 	if err != nil {
-		s.needMore = true
+		// If read a full MTU, but still cannot find SNI, it's likely that there is no SNI.
+		if s.quicNextRead < 1500 {
+			s.needMore = true
+		}
 		return "", ErrNotFound
 	}
 	return sni, nil

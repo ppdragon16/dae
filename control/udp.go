@@ -8,6 +8,8 @@ package control
 import (
 	"context"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 
 	"time"
 
@@ -38,59 +40,72 @@ func sendPkt(data []byte, from, to netip.AddrPort) (err error) {
 	return err
 }
 
-func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort, skipSniffing bool) (err error) {
+type sniffedSessionValue struct {
+	sniffedDomain string
+	dealineTimer  *time.Timer
+	replied       int32     // Just for logging
+	createdAt     time.Time // Just for logging
+}
+
+var (
+	sniffedSessionPool = sync.Map{}
+)
+
+const (
+	sniffedSessionTtl = 60 * time.Second
+)
+
+func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err error) {
 	var domain string
 
 	/// Sniff
-	if !skipSniffing {
+	if dst.Port() == 443 {
 		// Sniff Quic, ...
 		key := PacketSnifferKey{
 			LAddr: src,
 			RAddr: dst,
 		}
-		_sniffer, _ := DefaultPacketSnifferSessionMgr.GetOrCreate(key, nil)
-		_sniffer.Mu.Lock()
-		// Re-get sniffer from pool to confirm the transaction is not done.
-		sniffer := DefaultPacketSnifferSessionMgr.Get(key)
-		if _sniffer == sniffer {
-			sniffer.AppendData(data)
-			domain, err = sniffer.SniffUdp()
-			if err != nil && !sniffing.IsSniffingError(err) {
-				sniffer.Mu.Unlock()
-				return oops.
-					With("from", src).
-					With("to", dst).
-					Wrapf(err, "sniffUDP non sniffing error")
-			}
-			if sniffer.NeedMore() {
-				sniffer.Mu.Unlock()
-				return nil
-			}
-			if err != nil && log.IsLevelEnabled(log.TraceLevel) {
-				log.Tracef("%+v", oops.
-					With("from", src).
-					With("to", dst).
-					Wrapf(err, "sniffUDP"))
-			}
-			defer DefaultPacketSnifferSessionMgr.Remove(key, sniffer)
-			// Re-handlePkt after self func.
-			toRehandle := sniffer.Data()[1 : len(sniffer.Data())-1] // Skip the first empty and the last (self).
-			sniffer.Mu.Unlock()
-			if len(toRehandle) > 0 {
-				defer func() {
-					if err == nil {
-						for _, d := range toRehandle {
-							err := c.handlePkt(d, src, dst, true)
-							if err != nil {
-								log.Warnf("%+v", oops.Wrapf(err, "rehandlePkt"))
-							}
-						}
-					}
-				}()
-			}
+		if v, ok := sniffedSessionPool.Load(key); ok {
+			sniffedValue := v.(*sniffedSessionValue)
+			domain = sniffedValue.sniffedDomain
+			sniffedValue.dealineTimer.Reset(sniffedSessionTtl)
 		} else {
+			_sniffer, _ := DefaultPacketSnifferSessionMgr.GetOrCreate(key, nil)
+			_sniffer.Mu.Lock()
+			// Re-get sniffer from pool to confirm the transaction is not done.
+			sniffer := DefaultPacketSnifferSessionMgr.Get(key)
+			if _sniffer == sniffer {
+				sniffer.AppendData(data)
+				domain, err = sniffer.SniffUdp()
+				if err != nil && !sniffing.IsSniffingError(err) {
+					sniffer.Mu.Unlock()
+					return oops.
+						With("from", src).
+						With("to", dst).
+						Wrapf(err, "sniffUDP non sniffing error")
+				}
+				if err != nil && log.IsLevelEnabled(log.TraceLevel) {
+					log.Tracef("%+v", oops.
+						With("from", src).
+						With("to", dst).
+						Wrapf(err, "sniffUDP"))
+				}
+				// 1) In most cases, the first packet should be enough for SNI.
+				// 2) Some clients, e.g. curl, may send 2 packets without SNI, but the sniffer still needs more.
+				// We should NEVER hold packets and rehandle them after sniffing, because when sniffer needs more, the following packets may never come.
+				// The first packet routing may be wrong (rely on correct kernel routing), but it's better than timeout.
+				if !sniffer.NeedMore() {
+					sniffedSessionPool.Store(key, &sniffedSessionValue{
+						sniffedDomain: domain,
+						createdAt:     time.Now(),
+						dealineTimer: time.AfterFunc(sniffedSessionTtl, func() {
+							sniffedSessionPool.Delete(key)
+						}),
+					})
+					DefaultPacketSnifferSessionMgr.Remove(key, sniffer)
+				}
+			}
 			_sniffer.Mu.Unlock()
-			// sniffer may be nil.
 		}
 	}
 
@@ -174,18 +189,27 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort, skipSniff
 			}
 			return nil
 		}
-		createTime := time.Now()
 		ue = DefaultUdpEndpointPool.Create(src, &UdpEndpointOptions{
 			PacketConn: udpConn,
 			Handler: func(data []byte, from netip.AddrPort) (err error) {
-				if !createTime.IsZero() {
-					// Only print routing for new connection to avoid the log exploded (Quic and BT).
-					// Note: Log dialOption.dialTarget but dial dst.string().
-					LogDial(src, dst, domain, dialOption, networkType, &routingResult)
-					if log.IsLevelEnabled(log.InfoLevel) {
-						log.Infof("UDP first response latency: %vms", time.Since(createTime).Milliseconds())
+				// Only print routing for new connection to avoid the log exploded (Quic and BT).
+				// Note: Log dialOption.dialTarget but dial dst.string().
+				shouldLog := false
+				logDomain := ""
+				if v, ok := sniffedSessionPool.Load(PacketSnifferKey{LAddr: src, RAddr: from}); ok {
+					value := v.(*sniffedSessionValue)
+					if atomic.CompareAndSwapInt32(&value.replied, 0, 1) {
+						shouldLog = true
+						logDomain = value.sniffedDomain
+						if log.IsLevelEnabled(log.InfoLevel) {
+							log.Infof("UDP first response latency: %vms", time.Since(value.createdAt).Milliseconds())
+						}
 					}
-					createTime = time.Time{} // Set createTime to zero to indicate that the log has been printed.
+				} else {
+					shouldLog = true
+				}
+				if shouldLog {
+					LogDial(src, dst, logDomain, dialOption, networkType, &routingResult)
 				}
 				return sendPkt(data, from, src)
 			},
@@ -242,28 +266,5 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort, skipSniff
 			}
 		}
 	}
-
-	// // Print log.
-	// // Only print routing for new connection to avoid the log exploded (Quic and BT).
-	// if (isNew && c.log.IsLevelEnabled(logrus.InfoLevel)) || c.log.IsLevelEnabled(logrus.DebugLevel) {
-	// 	fields := logrus.Fields{
-	// 		"network":  networkType.StringWithoutDns(),
-	// 		"outbound": ue.Outbound.Name,
-	// 		"policy":   ue.Outbound.GetSelectionPolicy(),
-	// 		"dialer":   ue.Dialer.Property().Name,
-	// 		"sniffed":  domain,
-	// 		"ip":       RefineAddrPortToShow(realDst),
-	// 		"pid":      routingResult.Pid,
-	// 		"ifindex":  routingResult.Ifindex,
-	// 		"dscp":     routingResult.Dscp,
-	// 		"pname":    ProcessName2String(routingResult.Pname[:]),
-	// 		"mac":      Mac2String(routingResult.Mac[:]),
-	// 	}
-	// 	logger := c.log.WithFields(fields).Infof
-	// 	if !isNew && c.log.IsLevelEnabled(logrus.DebugLevel) {
-	// 		logger = c.log.WithFields(fields).Debugf
-	// 	}
-	// 	logger("[%v] %v <-> %v", strings.ToUpper(networkType.String()), RefineSourceToShow(realSrc, realDst.Addr()), dialTarget)
-	// }
 	return nil
 }
