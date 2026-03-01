@@ -118,11 +118,12 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 		IpVersion: consts.IpVersionStrFromAddr(dst.Addr()),
 	}
 
-	l, _ := DefaultUdpEndpointPool.UdpEndpointKeyLocker.Lock(src)
-	defer DefaultUdpEndpointPool.UdpEndpointKeyLocker.Unlock(src, l)
+	ueKey := UdpEndpointKey{Src: src, Dst: dst}
+	l, _ := DefaultUdpEndpointPool.UdpEndpointKeyLocker.Lock(ueKey)
+	defer DefaultUdpEndpointPool.UdpEndpointKeyLocker.Unlock(ueKey, l)
 
 	// Get udp endpoint.
-	ue, ok := DefaultUdpEndpointPool.Get(src)
+	ue, ok := DefaultUdpEndpointPool.Get(ueKey)
 	// If the udp endpoint has been not alive, remove it from pool and retry
 	// UDP 不是面向连接的, 在 tcp 中, 一个连接失败, 我们会重置中继它, 等待一个新的连接
 	// 在 UDP 中, l -> r继续中继到新的节点, 并在新的节点上进行 r -> l 中继
@@ -134,7 +135,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 				"dialer":  ue.dialer.Name,
 			}).Debugln("Old udp endpoint was not alive and removed.")
 		}
-		_ = DefaultUdpEndpointPool.Remove(src)
+		_ = DefaultUdpEndpointPool.Remove(ueKey)
 		ok = false
 	}
 	if !ok {
@@ -189,7 +190,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 			}
 			return nil
 		}
-		ue = DefaultUdpEndpointPool.Create(src, &UdpEndpointOptions{
+		ue = DefaultUdpEndpointPool.Create(ueKey, &UdpEndpointOptions{
 			PacketConn: udpConn,
 			Handler: func(data []byte, from netip.AddrPort) (err error) {
 				// Only print routing for new connection to avoid the log exploded (Quic and BT).
@@ -220,7 +221,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 		// Receive UDP messages.
 		go func() {
 			err = ue.run()
-			DefaultUdpEndpointPool.Remove(src)
+			DefaultUdpEndpointPool.Remove(ueKey)
 			if err != nil {
 				netErr, ok := IsNetError(err)
 				err = oops.
@@ -247,7 +248,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 	// Try to write data
 	_, err = ue.WriteTo(data, dst)
 	if err != nil {
-		DefaultUdpEndpointPool.Remove(src)
+		DefaultUdpEndpointPool.Remove(ueKey)
 		netErr, ok := IsNetError(err)
 		err = oops.
 			In("UdpEndpoint l -> r relay").
