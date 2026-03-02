@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
@@ -27,7 +28,11 @@ type UdpEndpoint struct {
 	mu            sync.Mutex
 	deadlineTimer *time.Timer
 	handler       UdpHandler
-	NatTimeout    time.Duration
+
+	natTimeout            time.Duration
+	bonusNatTimeout       time.Duration
+	bonusTraffic          int64
+	trafficSinceLastCheck int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -42,6 +47,7 @@ func (ue *UdpEndpoint) run() error {
 	defer common.ActiveConnections.With(ue.labels).Dec()
 	buf := pool.GetBuffer(2048)
 	defer pool.PutBuffer(buf)
+
 	for {
 		n, from, err := ue.conn.ReadFrom(buf)
 		if err != nil {
@@ -50,15 +56,31 @@ func (ue *UdpEndpoint) run() error {
 			}
 			return oops.Wrapf(err, "failed to ReadFrom")
 		}
-		ue.mu.Lock()
-		ue.deadlineTimer.Reset(ue.NatTimeout)
-		ue.mu.Unlock()
 		ue.counterTraffic.Add(float64(n))
+		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
 		if err = ue.handler(buf[:n], ToAddrPort(from)); err != nil {
-			break
+			return err
 		}
 	}
 	return nil
+}
+
+func (ue *UdpEndpoint) checkTraffic() bool {
+	if ue.IsClosed() {
+		return false
+	}
+	traffic := atomic.SwapInt64(&ue.trafficSinceLastCheck, 0)
+	if traffic <= 0 {
+		return false
+	}
+	ue.mu.Lock()
+	defer ue.mu.Unlock()
+	newTimeout := ue.natTimeout
+	if traffic > ue.bonusTraffic {
+		newTimeout = ue.bonusNatTimeout
+	}
+	ue.deadlineTimer.Reset(newTimeout)
+	return true
 }
 
 func (ue *UdpEndpoint) IsClosed() bool {
@@ -93,9 +115,11 @@ type UdpEndpointPool struct {
 }
 
 type UdpEndpointOptions struct {
-	PacketConn net.PacketConn
-	Handler    UdpHandler
-	NatTimeout time.Duration
+	PacketConn      net.PacketConn
+	Handler         UdpHandler
+	InitNatTimeout  time.Duration
+	BonusNatTimeout time.Duration
+	BonusTraffic    int64
 
 	Dialer *dialer.Dialer
 	labels prometheus.Labels
@@ -115,28 +139,27 @@ func (p *UdpEndpointPool) Get(key UdpEndpointKey) (udpEndpoint *UdpEndpoint, ok 
 	if !ok {
 		return nil, ok
 	}
-	ue := _ue.(*UdpEndpoint)
-	// Postpone the deadline.
-	ue.mu.Lock()
-	ue.deadlineTimer.Reset(ue.NatTimeout)
-	ue.mu.Unlock()
 	return _ue.(*UdpEndpoint), ok
 }
 
 func (p *UdpEndpointPool) Create(key UdpEndpointKey, createOption *UdpEndpointOptions) (udpEndpoint *UdpEndpoint) {
 	ctx, cancel := context.WithCancel(context.Background())
 	udpEndpoint = &UdpEndpoint{
-		conn:           createOption.PacketConn,
-		handler:        createOption.Handler,
-		NatTimeout:     createOption.NatTimeout,
-		ctx:            ctx,
-		cancel:         cancel,
-		dialer:         createOption.Dialer,
-		labels:         createOption.labels,
-		counterTraffic: common.TrafficBytes.With(createOption.labels),
+		conn:            createOption.PacketConn,
+		handler:         createOption.Handler,
+		natTimeout:      createOption.InitNatTimeout,
+		bonusNatTimeout: createOption.BonusNatTimeout,
+		bonusTraffic:    createOption.BonusTraffic,
+		ctx:             ctx,
+		cancel:          cancel,
+		dialer:          createOption.Dialer,
+		labels:          createOption.labels,
+		counterTraffic:  common.TrafficBytes.With(createOption.labels),
 	}
-	udpEndpoint.deadlineTimer = time.AfterFunc(createOption.NatTimeout, func() {
-		p.Remove(key)
+	udpEndpoint.deadlineTimer = time.AfterFunc(createOption.InitNatTimeout, func() {
+		if !udpEndpoint.checkTraffic() {
+			p.Remove(key)
+		}
 	})
 	p.pool.Store(key, udpEndpoint)
 	return

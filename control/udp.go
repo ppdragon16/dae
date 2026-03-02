@@ -43,8 +43,7 @@ func sendPkt(data []byte, from, to netip.AddrPort) (err error) {
 type sniffedSessionValue struct {
 	sniffedDomain string
 	dealineTimer  *time.Timer
-	replied       int32     // Just for logging
-	createdAt     time.Time // Just for logging
+	replied       int32 // Just for logging
 }
 
 var (
@@ -97,7 +96,6 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 				if !sniffer.NeedMore() {
 					sniffedSessionPool.Store(key, &sniffedSessionValue{
 						sniffedDomain: domain,
-						createdAt:     time.Now(),
 						dealineTimer: time.AfterFunc(sniffedSessionTtl, func() {
 							sniffedSessionPool.Delete(key)
 						}),
@@ -202,9 +200,6 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 					if atomic.CompareAndSwapInt32(&value.replied, 0, 1) {
 						shouldLog = true
 						logDomain = value.sniffedDomain
-						if log.IsLevelEnabled(log.InfoLevel) {
-							log.Infof("UDP first response latency: %vms", time.Since(value.createdAt).Milliseconds())
-						}
 					}
 				} else {
 					shouldLog = true
@@ -214,9 +209,11 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 				}
 				return sendPkt(data, from, src)
 			},
-			NatTimeout: DefaultNatTimeoutUDP,
-			Dialer:     dialOption.Dialer,
-			labels:     labels,
+			InitNatTimeout:  30 * time.Second,
+			BonusNatTimeout: DefaultNatTimeoutUDP,
+			BonusTraffic:    1024 * 1024, // 1MB traffic will extend BonusNatTimeout
+			Dialer:          dialOption.Dialer,
+			labels:          labels,
 		})
 		// Receive UDP messages.
 		go func() {
