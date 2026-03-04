@@ -40,6 +40,8 @@ type UdpEndpoint struct {
 	dialer         *dialer.Dialer
 	labels         prometheus.Labels
 	counterTraffic prometheus.Counter
+	sniffedDomain  string
+	receivedReply  bool
 }
 
 func (ue *UdpEndpoint) run() error {
@@ -61,6 +63,7 @@ func (ue *UdpEndpoint) run() error {
 		if err = ue.handler(buf[:n], ToAddrPort(from)); err != nil {
 			return err
 		}
+		ue.receivedReply = true
 	}
 	return nil
 }
@@ -123,6 +126,8 @@ type UdpEndpointOptions struct {
 
 	Dialer *dialer.Dialer
 	labels prometheus.Labels
+
+	SniffedDomain string
 }
 
 var DefaultUdpEndpointPool = UdpEndpointPool{}
@@ -155,6 +160,7 @@ func (p *UdpEndpointPool) Create(key UdpEndpointKey, createOption *UdpEndpointOp
 		dialer:          createOption.Dialer,
 		labels:          createOption.labels,
 		counterTraffic:  common.TrafficBytes.With(createOption.labels),
+		sniffedDomain:   createOption.SniffedDomain,
 	}
 	udpEndpoint.deadlineTimer = time.AfterFunc(createOption.InitNatTimeout, func() {
 		if !udpEndpoint.checkTraffic() {

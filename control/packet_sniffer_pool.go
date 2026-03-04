@@ -6,7 +6,6 @@
 package control
 
 import (
-	"fmt"
 	"net/netip"
 	"sync"
 	"time"
@@ -45,12 +44,11 @@ func NewPacketSnifferPool() *PacketSnifferPool {
 	return &PacketSnifferPool{}
 }
 
-func (p *PacketSnifferPool) Remove(key PacketSnifferKey, sniffer *PacketSniffer) (err error) {
+func (p *PacketSnifferPool) Remove(key PacketSnifferKey) (err error) {
 	if ue, ok := p.pool.LoadAndDelete(key); ok {
+		sniffer := ue.(*PacketSniffer)
+		sniffer.deadlineTimer.Stop()
 		sniffer.Close()
-		if ue != sniffer {
-			return fmt.Errorf("target udp endpoint is not in the pool")
-		}
 	}
 	return nil
 }
@@ -66,14 +64,13 @@ func (p *PacketSnifferPool) Get(key PacketSnifferKey) *PacketSniffer {
 // TODO: 工作原理
 func (p *PacketSnifferPool) GetOrCreate(key PacketSnifferKey, createOption *PacketSnifferOptions) (qs *PacketSniffer, isNew bool) {
 	_qs, ok := p.pool.Load(key)
-begin:
 	if !ok {
 		l, _ := p.snifferKeyLocker.Lock(key)
 		defer p.snifferKeyLocker.Unlock(key, l)
 
 		_qs, ok = p.pool.Load(key)
 		if ok {
-			goto begin
+			return _qs.(*PacketSniffer), false
 		}
 		// Create an PacketSniffer.
 		if createOption == nil {
