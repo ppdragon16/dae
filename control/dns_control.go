@@ -241,9 +241,19 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	dnsMessage.Compress = true
 	buf := pool.GetBuffer(512)
 	defer pool.PutBuffer(buf)
-	if data, err := dnsMessage.PackBuffer(buf); err != nil {
+	data, err := dnsMessage.PackBuffer(buf)
+	if err != nil {
 		log.Errorf("%+v", oops.Wrapf(err, "failed to pack dns message"))
-	} else if err = sendPkt(data, req.dst, req.src); err != nil {
+		return
+	}
+
+	// Send back the dns response.
+	af, err := DefaultAnyfromPool.Obtain(req.dst, AnyfromTimeoutDefault)
+	if err == nil {
+		_, err = af.WriteToUDPAddrPort(data, req.src)
+		DefaultAnyfromPool.Recycle(req.dst, af)
+	}
+	if err != nil {
 		log.Warningf("%+v", oops.Wrapf(err, "failed to send dns message back"))
 	}
 }
