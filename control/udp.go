@@ -25,18 +25,8 @@ var (
 )
 
 const (
-	AnyfromTimeout = 5 * time.Second // Do not cache too long.
+	AnyfromTimeoutDefault = 5 * time.Second // Do not cache too long.
 )
-
-// sendPkt uses bind first, and fallback to send hdr if addr is in use.
-func sendPkt(data []byte, from, to netip.AddrPort) (err error) {
-	uConn, _, err := DefaultAnyfromPool.GetOrCreate(from, AnyfromTimeout)
-	if err != nil {
-		return
-	}
-	_, err = uConn.WriteToUDPAddrPort(data, to)
-	return err
-}
 
 type sniffingResult struct {
 	domain  string
@@ -141,15 +131,20 @@ func (c *ControlPlane) createUdpEndpoint(
 		}
 		return nil, nil
 	}
+	af, err := DefaultAnyfromPool.Obtain(dst, AnyfromTimeoutDefault)
+	if err != nil {
+		return nil, err
+	}
 	ue = DefaultUdpEndpointPool.Create(ueKey, &UdpEndpointOptions{
 		PacketConn: udpConn,
 		Handler: func(data []byte, from netip.AddrPort) (err error) {
 			// Only print routing for new connection to avoid the log exploded (Quic and BT).
 			// Note: Log dialOption.dialTarget but dial dst.string().
 			if !ue.receivedReply {
-				LogDial(src, dst, ue.sniffedDomain, dialOption, networkType, &routingResult)
+				LogDial(src, from, ue.sniffedDomain, dialOption, networkType, &routingResult)
 			}
-			return sendPkt(data, from, src)
+			_, err = af.WriteToUDPAddrPort(data, src)
+			return err
 		},
 		InitNatTimeout:  30 * time.Second,
 		BonusNatTimeout: DefaultNatTimeoutUDP,
@@ -161,6 +156,7 @@ func (c *ControlPlane) createUdpEndpoint(
 	// Receive UDP messages.
 	go func() {
 		err = ue.run()
+		DefaultAnyfromPool.Recycle(dst, af)
 		DefaultUdpEndpointPool.Remove(ueKey)
 		if err != nil {
 			netErr, ok := IsNetError(err)

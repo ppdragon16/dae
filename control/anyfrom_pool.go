@@ -28,22 +28,12 @@ type Anyfrom struct {
 	// GSO support is modified from quic-go with many thanks.
 	gso         bool
 	gotGSOError bool
-	lastRefresh int64
+	refCount    int32
 }
 
 func (a *Anyfrom) afterWrite(err error) {
 	if a.gso && !a.gotGSOError && isGSOError(err) {
 		a.gotGSOError = true
-	}
-	a.RefreshTtl()
-}
-func (a *Anyfrom) RefreshTtl() {
-	now := time.Now().UnixNano()
-	last := atomic.LoadInt64(&a.lastRefresh)
-	if now-last > int64(time.Second) {
-		if atomic.CompareAndSwapInt64(&a.lastRefresh, last, now) {
-			a.deadlineTimer.Reset(a.ttl)
-		}
 	}
 }
 func (a *Anyfrom) SupportGso(size int) bool {
@@ -56,27 +46,21 @@ func (a *Anyfrom) SupportGso(size int) bool {
 	// return a.gso && !a.gotGSOError
 }
 func (a *Anyfrom) ReadFrom(b []byte) (int, net.Addr, error) {
-	defer a.RefreshTtl()
 	return a.UDPConn.ReadFrom(b)
 }
 func (a *Anyfrom) ReadFromUDP(b []byte) (n int, addr *net.UDPAddr, err error) {
-	defer a.RefreshTtl()
 	return a.UDPConn.ReadFromUDP(b)
 }
 func (a *Anyfrom) ReadFromUDPAddrPort(b []byte) (n int, addr netip.AddrPort, err error) {
-	defer a.RefreshTtl()
 	return a.UDPConn.ReadFromUDPAddrPort(b)
 }
 func (a *Anyfrom) ReadMsgUDP(b []byte, oob []byte) (n int, oobn int, flags int, addr *net.UDPAddr, err error) {
-	defer a.RefreshTtl()
 	return a.UDPConn.ReadMsgUDP(b, oob)
 }
 func (a *Anyfrom) ReadMsgUDPAddrPort(b []byte, oob []byte) (n int, oobn int, flags int, addr netip.AddrPort, err error) {
-	defer a.RefreshTtl()
 	return a.UDPConn.ReadMsgUDPAddrPort(b, oob)
 }
 func (a *Anyfrom) SyscallConn() (syscall.RawConn, error) {
-	defer a.RefreshTtl()
 	return a.UDPConn.SyscallConn()
 }
 func (a *Anyfrom) WriteMsgUDP(b []byte, oob []byte, addr *net.UDPAddr) (n int, oobn int, err error) {
@@ -180,14 +164,13 @@ func NewAnyfromPool() *AnyfromPool {
 	}
 }
 
-func (p *AnyfromPool) GetOrCreate(lAddr netip.AddrPort, ttl time.Duration) (conn *Anyfrom, isNew bool, err error) {
+func (p *AnyfromPool) Obtain(lAddr netip.AddrPort, ttl time.Duration) (conn *Anyfrom, err error) {
 	p.mu.RLock()
-
 	af, ok := p.pool[lAddr]
 	if ok {
-		af.RefreshTtl()
+		atomic.AddInt32(&af.refCount, 1)
 		p.mu.RUnlock()
-		return af, false, nil
+		return af, nil
 	}
 	p.mu.RUnlock()
 
@@ -195,8 +178,8 @@ func (p *AnyfromPool) GetOrCreate(lAddr netip.AddrPort, ttl time.Duration) (conn
 	defer p.mu.Unlock()
 
 	if af, ok = p.pool[lAddr]; ok {
-		af.RefreshTtl()
-		return af, false, nil
+		atomic.AddInt32(&af.refCount, 1)
+		return af, nil
 	}
 
 	lc := net.ListenConfig{
@@ -213,31 +196,48 @@ func (p *AnyfromPool) GetOrCreate(lAddr netip.AddrPort, ttl time.Duration) (conn
 	})
 
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
 
+	initialRefCount := int32(1)
+	if ttl == 0 {
+		// zero-ttl means "immortal".
+		initialRefCount = 2
+	}
 	uConn := pc.(*net.UDPConn)
 	af = &Anyfrom{
-		UDPConn:       uConn,
-		deadlineTimer: nil,
-		ttl:           ttl,
-		gotGSOError:   false,
-		gso:           isGSOSupported(uConn),
-		lastRefresh:   time.Now().UnixNano(),
+		UDPConn:     uConn,
+		ttl:         ttl,
+		gotGSOError: false,
+		gso:         isGSOSupported(uConn),
+		refCount:    initialRefCount,
 	}
 
-	if ttl > 0 {
-		af.deadlineTimer = time.AfterFunc(ttl, func() {
+	p.pool[lAddr] = af
+	return af, nil
+}
+
+func (p *AnyfromPool) Recycle(lAddr netip.AddrPort, af *Anyfrom) {
+	if atomic.AddInt32(&af.refCount, -1) > 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if af.deadlineTimer != nil {
+		af.deadlineTimer.Reset(af.ttl)
+	} else {
+		af.deadlineTimer = time.AfterFunc(af.ttl, func() {
+			if atomic.LoadInt32(&af.refCount) > 0 {
+				return
+			}
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			_af := p.pool[lAddr]
-			if _af == af {
-				delete(p.pool, lAddr)
+			if atomic.LoadInt32(&af.refCount) <= 0 {
+				if p.pool[lAddr] == af {
+					delete(p.pool, lAddr)
+				}
 				af.Close()
 			}
 		})
-		p.pool[lAddr] = af
 	}
-
-	return af, true, nil
 }

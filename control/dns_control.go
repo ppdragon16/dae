@@ -159,6 +159,8 @@ type dnsResponseData struct {
 	respData []byte
 	fromPool bool
 	isNew    bool
+
+	upstreamFrom *dns.Upstream
 }
 
 type dnsCacheKey struct {
@@ -269,7 +271,20 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	}
 	// Keep the id the same with request.
 	dnsIdSet(dataToWrite, id)
-	if err = sendPkt(dataToWrite, req.dst, req.src); err != nil {
+
+	// Send back the dns response.
+	// Never recycle anyfrom for Non-ASIS upstreams because they are limited.
+	// Note: zero-ttl means "immortal".
+	var ttl time.Duration
+	if dnsResp.upstreamFrom != nil && dnsResp.upstreamFrom.IsAsIs {
+		ttl = AnyfromTimeoutDefault
+	}
+	af, err := DefaultAnyfromPool.Obtain(req.dst, ttl)
+	if err == nil {
+		_, err = af.WriteToUDPAddrPort(dataToWrite, req.src)
+		DefaultAnyfromPool.Recycle(req.dst, af)
+	}
+	if err != nil {
 		log.Warningf("%+v", oops.Wrapf(err, "failed to send dns message back"))
 	}
 	return true
@@ -559,12 +574,12 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 					"answer": FormatDnsRsc(respData),
 				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 			}
-			return dnsResponseData{respData: respData, fromPool: true, isNew: cache.IsNew}, nil
+			return dnsResponseData{respData: respData, fromPool: true, isNew: cache.IsNew, upstreamFrom: upstream}, nil
 		}
 	}
 	// Pending for the same lookup.
 	respData, leader, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
-	dnsResp := dnsResponseData{isNew: leader}
+	dnsResp := dnsResponseData{isNew: leader, upstreamFrom: upstream}
 	if respData != nil {
 		if !shared {
 			dnsResp.respData = respData
