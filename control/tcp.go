@@ -115,26 +115,35 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	// No need sniffer for tcp://8.8.8.8:53.
 	sniffedDomain := ""
 	lConnRelay := lConn
-	if dstTcpAddr.Port == 443 || dstTcpAddr.Port == 80 {
+	if dstTcpAddr.Port != 53 && c.sniffingTimeout > 0 {
+		sniffingTimeout := c.sniffingTimeout
+		if dstTcpAddr.Port == 80 || dstTcpAddr.Port == 443 {
+			sniffingTimeout = 2 * sniffingTimeout
+		}
 		// Sniff target domain.
-		sniffer := sniffing.NewConnSniffer(lConn, c.sniffingTimeout)
+		sniffer := sniffing.NewConnSniffer(lConn, sniffingTimeout)
 		// ConnSniffer should be used later, so we cannot close it now.
 		defer sniffer.Close()
 
-		lConn.SetReadDeadline(time.Now().Add(c.sniffingTimeout))
+		lConn.SetReadDeadline(time.Now().Add(sniffingTimeout))
 		domain, err := sniffer.SniffTcp()
 		lConn.SetReadDeadline(time.Time{})
-		if err != nil && !sniffing.IsSniffingError(err) {
-			// We ignore lConn errors or temporary network errors
-			if _, ok := IsNetError(err); ok {
-				return nil
-			}
+		if err != nil {
 			// Avoid massive EOF logs. A common case: clients (e.g. browser) tend to establish both
 			// ipv4 and ipv6 connections, and then close one of them.
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			return oops.Wrapf(err, "Sniff Failed")
+			// In case of lConn timeout, we continue relaying for remote-first tcp conversation (e.g. ftp, smtp, etc.).
+			// For other network errors, we stop relaying without logging the errors.
+			if netErr, ok := IsNetError(err); ok {
+				if !netErr.Timeout() {
+					return nil
+				}
+				if log.IsLevelEnabled(log.InfoLevel) {
+					log.Infof("Sniffing timeout!")
+				}
+			}
 		}
 		sniffedDomain = domain
 		lConnRelay = sniffer
