@@ -109,21 +109,21 @@ func (c *ControlPlane) createUdpEndpoint(
 	udpConn, err := dialOption.Dialer.ListenPacket(ctx, dst.String())
 	if err != nil {
 		netErr, ok := IsNetError(err)
-		err = oops.
-			In("ListenPacket").
-			With("Is NetError", ok).
-			With("Is Temporary", ok && netErr.Temporary()).
-			With("Is Timeout", ok && netErr.Timeout()).
-			With("Outbound", dialOption.Outbound.Name).
-			With("Dialer", dialOption.Dialer.Name).
-			With("src", src.String()).
-			With("dst", dst.String()).
-			With("domain", sniffingResult.domain).
-			Wrapf(err, "failed to ListenPacket")
-		if !ok {
-			return nil, err
-		} else if !netErr.Timeout() {
-			if dialOption.Dialer.NeedAliveState() {
+		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
+			err = oops.
+				In("ListenPacket").
+				With("Is NetError", ok).
+				With("Is Temporary", ok && netErr.Temporary()).
+				With("Is Timeout", ok && netErr.Timeout()).
+				With("Outbound", dialOption.Outbound.Name).
+				With("Dialer", dialOption.Dialer.Name).
+				With("src", src.String()).
+				With("dst", dst.String()).
+				With("domain", sniffingResult.domain).
+				Wrapf(err, "failed to ListenPacket")
+			if !ok {
+				return nil, err
+			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
 				common.ErrorCount.With(labels).Inc()
 				dialOption.Dialer.ReportUnavailable()
 				return nil, err
@@ -160,17 +160,17 @@ func (c *ControlPlane) createUdpEndpoint(
 		DefaultUdpEndpointPool.Remove(ueKey)
 		if err != nil {
 			netErr, ok := IsNetError(err)
-			err = oops.
-				In("UdpEndpoint r -> l relay").
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
-				With("Dialer", ue.dialer.Name).
-				Wrap(err)
-			if !ok {
-				log.Warnf("%+v", err)
-			} else if !netErr.Timeout() {
-				if ue.dialer.NeedAliveState() {
+			if !ok || (!netErr.Timeout() && ue.dialer.NeedAliveState()) {
+				err = oops.
+					In("UdpEndpoint r -> l relay").
+					With("Is NetError", ok).
+					With("Is Temporary", ok && netErr.Temporary()).
+					With("Is Timeout", ok && netErr.Timeout()).
+					With("Dialer", ue.dialer.Name).
+					Wrap(err)
+				if !ok {
+					log.Warnf("%+v", err)
+				} else if !netErr.Timeout() && ue.dialer.NeedAliveState() {
 					common.ErrorCount.With(labels).Inc()
 					ue.dialer.ReportUnavailable()
 					log.Warnf("%+v", err)
@@ -221,17 +221,17 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 	if err != nil {
 		DefaultUdpEndpointPool.Remove(ueKey)
 		netErr, ok := IsNetError(err)
-		err = oops.
-			In("UdpEndpoint l -> r relay").
-			With("Is NetError", ok).
-			With("Is Temporary", ok && netErr.Temporary()).
-			With("Is Timeout", ok && netErr.Timeout()).
-			With("Dialer", ue.dialer.Name).
-			Wrapf(err, "failed to write UDP packet")
-		if !ok {
-			return err
-		} else if !netErr.Timeout() {
-			if ue.dialer.NeedAliveState() {
+		if !ok || (!netErr.Timeout() && ue.dialer.NeedAliveState()) {
+			err = oops.
+				In("UdpEndpoint l -> r relay").
+				With("Is NetError", ok).
+				With("Is Temporary", ok && netErr.Temporary()).
+				With("Is Timeout", ok && netErr.Timeout()).
+				With("Dialer", ue.dialer.Name).
+				Wrapf(err, "failed to write UDP packet")
+			if !ok {
+				return err
+			} else if !netErr.Timeout() && ue.dialer.NeedAliveState() {
 				common.ErrorCount.With(ue.labels).Inc()
 				ue.dialer.ReportUnavailable()
 				return err

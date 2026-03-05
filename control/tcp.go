@@ -169,21 +169,21 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		// TODO: 哪些错误说明节点不工作或GFW在工作?
 		// TCP: Connection Reset / Connection Refused
 		netErr, ok := IsNetError(err)
-		err = oops.
-			In("DialContext").
-			With("Is NetError", ok).
-			With("Is Temporary", ok && netErr.Temporary()).
-			With("Is Timeout", ok && netErr.Timeout()).
-			With("Outbound", dialOption.Outbound.Name).
-			With("Dialer", dialOption.Dialer.Name).
-			With("src", src.String()).
-			With("dst", dst.String()).
-			With("domain", sniffedDomain).
-			Wrapf(err, "failed to DialContext")
-		if !ok {
-			return err
-		} else if !netErr.Timeout() {
-			if dialOption.Dialer.NeedAliveState() {
+		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
+			err = oops.
+				In("DialContext").
+				With("Is NetError", ok).
+				With("Is Temporary", ok && netErr.Temporary()).
+				With("Is Timeout", ok && netErr.Timeout()).
+				With("Outbound", dialOption.Outbound.Name).
+				With("Dialer", dialOption.Dialer.Name).
+				With("src", src.String()).
+				With("dst", dst.String()).
+				With("domain", sniffedDomain).
+				Wrapf(err, "failed to DialContext")
+			if !ok {
+				return err
+			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
 				common.ErrorCount.With(labels).Inc()
 				dialOption.Dialer.ReportUnavailable()
 				return err
@@ -212,23 +212,25 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	// Relay
 	if err := RelayTCP(lConnRelay, rLogConn); err != nil {
 		netErr, ok := IsNetError(err)
-		err = oops.
-			In("RelayTCP").
-			With("Is NetError", ok).
-			With("Is Temporary", ok && netErr.Temporary()).
-			With("Is Timeout", ok && netErr.Timeout()).
-			With("Outbound", dialOption.Outbound.Name).
-			With("Dialer", dialOption.Dialer.Name).
-			With("src", src.String()).
-			With("dst", dst.String()).
-			With("domain", sniffedDomain).
-			Wrapf(err, "failed to RelayTCP")
-		if !ok {
-			return err
-		} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
-			common.ErrorCount.With(labels).Inc()
-			dialOption.Dialer.ReportUnavailable()
-			return err
+		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
+			err = oops.
+				In("RelayTCP").
+				With("Is NetError", ok).
+				With("Is Temporary", ok && netErr.Temporary()).
+				With("Is Timeout", ok && netErr.Timeout()).
+				With("Outbound", dialOption.Outbound.Name).
+				With("Dialer", dialOption.Dialer.Name).
+				With("src", src.String()).
+				With("dst", dst.String()).
+				With("domain", sniffedDomain).
+				Wrapf(err, "failed to RelayTCP")
+			if !ok {
+				return err
+			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
+				common.ErrorCount.With(labels).Inc()
+				dialOption.Dialer.ReportUnavailable()
+				return err
+			}
 		}
 	}
 	// case strings.HasSuffix(err.Error(), "write: broken pipe"),
