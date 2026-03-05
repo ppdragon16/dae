@@ -115,7 +115,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	// No need sniffer for tcp://8.8.8.8:53.
 	sniffedDomain := ""
 	lConnRelay := lConn
-	if dstTcpAddr.Port != 53 {
+	if dstTcpAddr.Port == 443 || dstTcpAddr.Port == 80 {
 		// Sniff target domain.
 		sniffer := sniffing.NewConnSniffer(lConn, c.sniffingTimeout)
 		// ConnSniffer should be used later, so we cannot close it now.
