@@ -258,13 +258,12 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	dataToWrite := dnsResp.respData
 	if err != nil {
 		netErr, ok := IsNetError(err)
-		err = oops.
-			With("Is NetError", ok).
-			With("Is Temporary", ok && netErr.Temporary()).
-			With("Is Timeout", ok && netErr.Timeout()).
-			Wrapf(err, "failed to make dns request")
 		if !ok || !netErr.Temporary() {
-			log.Warningf("%+v", err)
+			log.Warningf("%+v", oops.
+				With("Is NetError", ok).
+				With("Is Temporary", ok && netErr.Temporary()).
+				With("Is Timeout", ok && netErr.Timeout()).
+				Wrapf(err, "failed to make dns request"))
 		}
 		dataToWrite = data
 		dnsRcodeSet(dataToWrite, dnsmessage.RcodeServerFailure)
@@ -348,20 +347,20 @@ Dial:
 		dnsResp, err = c.dialSend(data, upstream, &dialArgument, queryInfo)
 		if err != nil {
 			netErr, ok := IsNetError(err)
-			err = oops.
-				In("DialContext").
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
-				With("qname", queryInfo.qname).
-				With("qtype", queryInfo.qtype).
-				With("Outbound", dialArgument.Outbound.Name).
-				With("Dialer", dialArgument.Dialer.Name).
-				Wrapf(err, "DNS dialSend error")
-			if !ok || !dnsResponse(dnsResp.respData) {
-				return dnsResp, err
-			} else if !netErr.Timeout() {
-				if dialArgument.Dialer.NeedAliveState() {
+			if !ok || !dnsResponse(dnsResp.respData) || (!netErr.Timeout() && dialArgument.Dialer.NeedAliveState()) {
+				err = oops.
+					In("DialContext").
+					With("Is NetError", ok).
+					With("Is Temporary", ok && netErr.Temporary()).
+					With("Is Timeout", ok && netErr.Timeout()).
+					With("qname", queryInfo.qname).
+					With("qtype", queryInfo.qtype).
+					With("Outbound", dialArgument.Outbound.Name).
+					With("Dialer", dialArgument.Dialer.Name).
+					Wrapf(err, "DNS dialSend error")
+				if !ok || !dnsResponse(dnsResp.respData) {
+					return dnsResp, err
+				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
 					labels := prometheus.Labels{
 						"outbound": dialArgument.Outbound.Name,
 						"subtag":   dialArgument.Dialer.Property.SubscriptionTag,
