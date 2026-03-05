@@ -225,13 +225,12 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	}
 	if err != nil {
 		netErr, ok := IsNetError(err)
-		err = oops.
-			With("Is NetError", ok).
-			With("Is Temporary", ok && netErr.Temporary()).
-			With("Is Timeout", ok && netErr.Timeout()).
-			Wrapf(err, "failed to make dns request")
 		if !ok || !netErr.Temporary() {
-			log.Warningf("%+v", err)
+			log.Warningf("%+v", oops.
+				With("Is NetError", ok).
+				With("Is Temporary", ok && netErr.Temporary()).
+				With("Is Timeout", ok && netErr.Timeout()).
+				Wrapf(err, "failed to make dns request"))
 		}
 		dnsMessage.Rcode = dnsmessage.RcodeServerFailure
 		dnsMessage.Response = true
@@ -322,20 +321,20 @@ Dial:
 		isNew, err = c.dialSend(dnsMessage, upstream, &dialArgument, queryInfo)
 		if err != nil {
 			netErr, ok := IsNetError(err)
-			err = oops.
-				In("DialContext").
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
-				With("qname", queryInfo.qname).
-				With("qtype", queryInfo.qtype).
-				With("Outbound", dialArgument.Outbound.Name).
-				With("Dialer", dialArgument.Dialer.Name).
-				Wrapf(err, "DNS dialSend error")
-			if !ok || !dnsMessage.Response {
-				return err
-			} else if !netErr.Timeout() {
-				if dialArgument.Dialer.NeedAliveState() {
+			if !ok || !dnsMessage.Response || (!netErr.Timeout() && dialArgument.Dialer.NeedAliveState()) {
+				err = oops.
+					In("DialContext").
+					With("Is NetError", ok).
+					With("Is Temporary", ok && netErr.Temporary()).
+					With("Is Timeout", ok && netErr.Timeout()).
+					With("qname", queryInfo.qname).
+					With("qtype", queryInfo.qtype).
+					With("Outbound", dialArgument.Outbound.Name).
+					With("Dialer", dialArgument.Dialer.Name).
+					Wrapf(err, "DNS dialSend error")
+				if !ok || !dnsMessage.Response {
+					return err
+				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
 					labels := prometheus.Labels{
 						"outbound": dialArgument.Outbound.Name,
 						"subtag":   dialArgument.Dialer.Property.SubscriptionTag,
