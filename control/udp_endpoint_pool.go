@@ -49,9 +49,15 @@ func (ue *UdpEndpoint) run() error {
 	defer common.ActiveConnections.With(ue.labels).Dec()
 	buf := pool.GetBuffer(2048)
 	defer pool.PutBuffer(buf)
+	if pc, ok := ue.conn.(PacketConnAddrPort); ok {
+		return ue.runWithAddrPort(pc, buf)
+	}
+	return ue.runWithAddr(ue.conn, buf)
+}
 
+func (ue *UdpEndpoint) runWithAddr(pc net.PacketConn, buf []byte) error {
 	for {
-		n, from, err := ue.conn.ReadFrom(buf)
+		n, from, err := pc.ReadFrom(buf)
 		if err != nil {
 			if ue.IsClosed() {
 				break
@@ -61,6 +67,25 @@ func (ue *UdpEndpoint) run() error {
 		ue.counterTraffic.Add(float64(n))
 		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
 		if err = ue.handler(buf[:n], ToAddrPort(from)); err != nil {
+			return err
+		}
+		ue.receivedReply = true
+	}
+	return nil
+}
+
+func (ue *UdpEndpoint) runWithAddrPort(pc PacketConnAddrPort, buf []byte) error {
+	for {
+		n, from, err := pc.ReadFromAddrPort(buf)
+		if err != nil {
+			if ue.IsClosed() {
+				break
+			}
+			return oops.Wrapf(err, "failed to ReadFromAddrPort")
+		}
+		ue.counterTraffic.Add(float64(n))
+		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
+		if err = ue.handler(buf[:n], from); err != nil {
 			return err
 		}
 		ue.receivedReply = true
@@ -90,8 +115,12 @@ func (ue *UdpEndpoint) IsClosed() bool {
 	return ue.ctx.Err() != nil
 }
 
-func (ue *UdpEndpoint) WriteTo(b []byte, addr netip.AddrPort) (int, error) {
-	n, err := ue.conn.WriteTo(b, net.UDPAddrFromAddrPort(addr))
+func (ue *UdpEndpoint) WriteTo(b []byte, addr netip.AddrPort) (n int, err error) {
+	if pc, ok := ue.conn.(PacketConnAddrPort); ok {
+		n, err = pc.WriteToAddrPort(b, addr)
+	} else {
+		n, err = ue.conn.WriteTo(b, net.UDPAddrFromAddrPort(addr))
+	}
 	ue.counterTraffic.Add(float64(n))
 	return n, err
 }
