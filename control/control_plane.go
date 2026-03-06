@@ -986,8 +986,16 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 		}
 	}()
 
+	DefaultAnyfromPool = NewAnyfromPool()
+	go DefaultAnyfromPool.Start(c.ctx)
+
 	go func() {
 		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			default:
+			}
 			buf := pool.GetBuffer(consts.EthernetMtu)
 			oobBuf := pool.GetBuffer(120)
 			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(buf, oobBuf)

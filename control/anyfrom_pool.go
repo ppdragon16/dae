@@ -152,15 +152,81 @@ func appendUDPSegmentSizeMsg(b []byte, size uint16) []byte {
 
 // AnyfromPool is a full-cone udp listener pool
 type AnyfromPool struct {
-	pool map[netip.AddrPort]*Anyfrom
-	mu   sync.RWMutex
+	pool    map[netip.AddrPort]*Anyfrom
+	mu      sync.RWMutex
+	afReqCh chan *afRequest
 }
 
-var DefaultAnyfromPool = NewAnyfromPool()
+var DefaultAnyfromPool *AnyfromPool = nil
 
 func NewAnyfromPool() *AnyfromPool {
 	return &AnyfromPool{
-		pool: make(map[netip.AddrPort]*Anyfrom, 64),
+		pool:    make(map[netip.AddrPort]*Anyfrom, 64),
+		afReqCh: make(chan *afRequest, 128),
+	}
+}
+
+type afResponse struct {
+	conn *net.UDPConn
+	err  error
+}
+
+type afRequest struct {
+	lAddr   string
+	afResCh chan *afResponse
+}
+
+func (p *AnyfromPool) Start(ctx context.Context) {
+	lc := net.ListenConfig{
+		Control: func(network string, address string, c syscall.RawConn) error {
+			return dialer.TransparentControl(c)
+		},
+		KeepAlive: 0,
+	}
+	GetDaeNetns().With(func() error {
+		for req := range p.afReqCh {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+			}
+			pc, err := lc.ListenPacket(ctx, "udp", req.lAddr)
+			if err != nil {
+				req.afResCh <- &afResponse{conn: nil, err: err}
+			} else {
+				req.afResCh <- &afResponse{conn: pc.(*net.UDPConn), err: nil}
+			}
+		}
+		return nil
+	})
+}
+
+func (p *AnyfromPool) createAnyfrom(lAddr netip.AddrPort, ttl time.Duration) (*Anyfrom, error) {
+	afResCh := make(chan *afResponse, 1)
+	p.afReqCh <- &afRequest{lAddr: lAddr.String(), afResCh: afResCh}
+	select {
+	case afRes := <-afResCh:
+		if afRes.err != nil {
+			return nil, afRes.err
+		}
+
+		initialRefCount := int32(1)
+		if ttl == 0 {
+			// zero-ttl means "immortal".
+			initialRefCount = 2
+		}
+		af := &Anyfrom{
+			UDPConn:     afRes.conn,
+			ttl:         ttl,
+			gotGSOError: false,
+			gso:         isGSOSupported(afRes.conn),
+			refCount:    initialRefCount,
+		}
+
+		p.pool[lAddr] = af
+		return af, nil
+	case <-time.After(1 * time.Second):
+		return nil, errors.New("timeout to create UDP conn for Anyfrom")
 	}
 }
 
@@ -182,39 +248,7 @@ func (p *AnyfromPool) Obtain(lAddr netip.AddrPort, ttl time.Duration) (conn *Any
 		return af, nil
 	}
 
-	lc := net.ListenConfig{
-		Control: func(network string, address string, c syscall.RawConn) error {
-			return dialer.TransparentControl(c)
-		},
-		KeepAlive: 0,
-	}
-
-	var pc net.PacketConn
-	GetDaeNetns().With(func() error {
-		pc, err = lc.ListenPacket(context.Background(), "udp", lAddr.String())
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	initialRefCount := int32(1)
-	if ttl == 0 {
-		// zero-ttl means "immortal".
-		initialRefCount = 2
-	}
-	uConn := pc.(*net.UDPConn)
-	af = &Anyfrom{
-		UDPConn:     uConn,
-		ttl:         ttl,
-		gotGSOError: false,
-		gso:         isGSOSupported(uConn),
-		refCount:    initialRefCount,
-	}
-
-	p.pool[lAddr] = af
-	return af, nil
+	return p.createAnyfrom(lAddr, ttl)
 }
 
 func (p *AnyfromPool) Recycle(lAddr netip.AddrPort, af *Anyfrom) {
