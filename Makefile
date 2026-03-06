@@ -45,6 +45,7 @@ BUILD_ARGS := -trimpath -ldflags "-s -w -X github.com/daeuniverse/dae/cmd.Versio
 
 ## Begin Dae Build
 dae: export GOOS=linux
+dae: export GOEXPERIMENT=newinliner,runtimefreegc,simd,arenas,loopvar
 ifndef CGO_ENABLED
 dae: export CGO_ENABLED=0
 endif
