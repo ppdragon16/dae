@@ -49,31 +49,26 @@ func (s *LatencyBasedSelector) getSortingLatency(d *dialer.Dialer) time.Duration
 }
 
 func (s *LatencyBasedSelector) getSortedAliveDialers(networkType *common.NetworkType) (aliveDialers []*dialer.Dialer) {
-	var alive []*struct {
-		dialer         *dialer.Dialer
-		sortingLatency time.Duration
-		priority       int
-	}
-	for _, d := range s.dialerGroup.Dialers {
+	allDialers := s.dialerGroup.Dialers
+	indices := make([]int, 0, len(allDialers))
+	for i, d := range allDialers {
 		if isDialerAlive(d, networkType) {
-			sortingLatency := s.getSortingLatency(d)
-			alive = append(alive, &struct {
-				dialer         *dialer.Dialer
-				sortingLatency time.Duration
-				priority       int
-			}{d, sortingLatency, s.dialerGroup.GetPriority(d, sortingLatency)})
+			indices = append(indices, i)
 		}
 	}
-	sort.SliceStable(alive, func(i, j int) bool {
-		// First sort by priority (higher priority first)
-		if alive[i].priority != alive[j].priority {
-			return alive[i].priority > alive[j].priority
+	sort.SliceStable(indices, func(i, j int) bool {
+		dI, dJ := allDialers[indices[i]], allDialers[indices[j]]
+		latencyI, latencyJ := s.getSortingLatency(dI), s.getSortingLatency(dJ)
+		piorityI, piorityJ := s.dialerGroup.GetPriority(dI, latencyI), s.dialerGroup.GetPriority(dJ, latencyJ)
+		if piorityI == piorityJ {
+			return latencyI < latencyJ
 		}
-		// Then sort by latency (lower latency first)
-		return alive[i].sortingLatency < alive[j].sortingLatency
+		return piorityI > piorityJ
 	})
-	for _, d := range alive {
-		aliveDialers = append(aliveDialers, d.dialer)
+
+	aliveDialers = make([]*dialer.Dialer, len(indices))
+	for i, idx := range indices {
+		aliveDialers[i] = allDialers[idx]
 	}
 	return aliveDialers
 }
