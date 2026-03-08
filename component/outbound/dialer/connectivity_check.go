@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -25,6 +26,7 @@ import (
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
+	dnsmessage "github.com/miekg/dns"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
@@ -181,7 +183,7 @@ func (c *CheckDnsOptionRaw) Option() (opt *CheckDnsOption, err error) {
 
 type CheckOption struct {
 	networkType *common.NetworkType
-	CheckFunc   func(typ *common.NetworkType) (ok bool, err error)
+	CheckFunc   func() (ok bool, err error)
 }
 
 // // createTcpCheckFunc 创建TCP检查函数
@@ -213,38 +215,35 @@ type CheckOption struct {
 // 	}
 // }
 
-// createDnsCheckFunc 创建DNS检查函数
+// checkFunc 创建DNS检查函数
 // TODO: Context 应该随情况生成, 而非传入
 // TODO: 为什么不直接编写一个 CheckFUnc
-func (d *Dialer) createDnsCheckFunc(ipVersion consts.IpVersionStr, network string) func(typ *common.NetworkType) (ok bool, err error) {
-	return func(typ *common.NetworkType) (ok bool, err error) {
-		opt, err := d.CheckDnsOptionRaw.Option()
-		if err != nil {
-			return false, err
-		}
-
-		var ip netip.Addr
-		switch ipVersion {
-		case consts.IpVersionStr_4:
-			ip = opt.Ip4
-		case consts.IpVersionStr_6:
-			ip = opt.Ip6
-		}
-
-		if !ip.IsValid() {
-			log.WithFields(log.Fields{
-				"link":    d.CheckDnsOptionRaw.Raw,
-				"dialer":  d.Name,
-				"network": typ.String(),
-			}).Debugln("Skip check due to no DNS record.")
-			return false, nil
-		}
-
-		return netutils.DnsCheck(d.Dialer, netip.AddrPortFrom(ip, opt.DnsPort), network)
+func checkFunc(d *Dialer, server string, network string, data []byte) func() (ok bool, err error) {
+	return func() (ok bool, err error) {
+		return netutils.DnsCheck(d, server, network, data)
 	}
 }
 
 func (d *Dialer) createCheckOptions() []*CheckOption {
+	msg := dnsmessage.Msg{MsgHdr: dnsmessage.MsgHdr{RecursionDesired: true}}
+	msg.SetQuestion(dnsmessage.CanonicalName(consts.UdpCheckLookupHost), dnsmessage.TypeA)
+	var newMsgData = func() []byte {
+		msg.Id = uint16(fastrand.Intn(math.MaxUint16 + 1))
+		d, _ := msg.Pack()
+		return d
+	}
+	server4 := ""
+	server6 := ""
+	opt, err := d.CheckDnsOptionRaw.Option()
+	if err == nil {
+		if opt.Ip4.IsValid() {
+			server4 = netip.AddrPortFrom(opt.Ip4, opt.DnsPort).String()
+		}
+		if opt.Ip6.IsValid() {
+			server6 = netip.AddrPortFrom(opt.Ip6, opt.DnsPort).String()
+		}
+	}
+
 	return []*CheckOption{
 		// 优先 TCP, 因为 TCP 可以避免长时间占用 NAT 端口
 		// TODO: UDP?
@@ -253,28 +252,28 @@ func (d *Dialer) createCheckOptions() []*CheckOption {
 				L4Proto:   consts.L4ProtoStr_TCP,
 				IpVersion: consts.IpVersionStr_6,
 			},
-			CheckFunc: d.createDnsCheckFunc(consts.IpVersionStr_6, "tcp"),
+			CheckFunc: checkFunc(d, server6, "tcp", newMsgData()),
 		},
 		{
 			networkType: &common.NetworkType{
 				L4Proto:   consts.L4ProtoStr_TCP,
 				IpVersion: consts.IpVersionStr_4,
 			},
-			CheckFunc: d.createDnsCheckFunc(consts.IpVersionStr_4, "tcp"),
+			CheckFunc: checkFunc(d, server4, "tcp", newMsgData()),
 		},
 		{
 			networkType: &common.NetworkType{
 				L4Proto:   consts.L4ProtoStr_UDP,
 				IpVersion: consts.IpVersionStr_6,
 			},
-			CheckFunc: d.createDnsCheckFunc(consts.IpVersionStr_6, "udp"),
+			CheckFunc: checkFunc(d, server6, "udp", newMsgData()),
 		},
 		{
 			networkType: &common.NetworkType{
 				L4Proto:   consts.L4ProtoStr_UDP,
 				IpVersion: consts.IpVersionStr_4,
 			},
-			CheckFunc: d.createDnsCheckFunc(consts.IpVersionStr_4, "udp"),
+			CheckFunc: checkFunc(d, server4, "udp", newMsgData()),
 		},
 	}
 }
@@ -494,7 +493,7 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 
 func (d *Dialer) Check(opts *CheckOption) (ok bool, latency time.Duration, err error) {
 	start := time.Now()
-	if ok, err = opts.CheckFunc(opts.networkType); ok {
+	if ok, err = opts.CheckFunc(); ok {
 		// Calc latency.
 		latency = time.Since(start)
 	} else {

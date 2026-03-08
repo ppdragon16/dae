@@ -68,31 +68,30 @@ func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error)
 	if d, ok := stream.(interface{ SetDeadline(time.Time) error }); ok {
 		d.SetDeadline(time.Now().Add(consts.DefaultDNSTimeout))
 	}
-	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
+	buf := pool.GetBuffer(len(data) + 2)
+	defer pool.PutBuffer(buf)
 	// We should write two byte length in the front of stream DNS request.
-	binary.Write(buf, binary.BigEndian, uint16(len(data)))
+	binary.BigEndian.PutUint16(buf, uint16(len(data)))
 	if quic {
 		// According https://datatracker.ietf.org/doc/html/rfc9250#section-4.2.1
 		// msg id should set to 0 when transport over QUIC.
 		// thanks https://github.com/natesales/q/blob/1cb2639caf69bd0a9b46494a3c689130df8fb24a/transport/quic.go#L97
-		buf.Write([]byte{0, 0})
-		buf.Write(data[2:])
+		buf[2] = 0
+		buf[3] = 0
+		copy(buf[4:], data[2:])
 	} else {
-		buf.Write(data)
+		copy(buf[2:], data)
 	}
-	_, err := stream.Write(buf.Bytes())
+	_, err := stream.Write(buf)
 	if err != nil {
 		return nil, oops.Wrapf(err, "failed to write DNS req")
 	}
 
-	lenBuf := pool.GetBuffer(2)
-	defer pool.PutBuffer(lenBuf)
 	// Read two byte length.
-	if _, err = io.ReadFull(stream, lenBuf); err != nil {
+	if _, err = io.ReadFull(stream, buf[:2]); err != nil {
 		return nil, oops.Wrapf(err, "failed to read DNS resp payload length")
 	}
-	respBuf := make([]byte, binary.BigEndian.Uint16(lenBuf))
+	respBuf := make([]byte, binary.BigEndian.Uint16(buf[:2]))
 	if _, err = io.ReadFull(stream, respBuf); err != nil {
 		return nil, oops.Wrapf(err, "failed to read DNS resp payload")
 	}
@@ -219,8 +218,8 @@ func ResolveSOA(d netproxy.Dialer, dns netip.AddrPort, host string, network stri
 	return records, nil
 }
 
-func DnsCheck(dialer netproxy.Dialer, dns netip.AddrPort, network string) (ok bool, err error) {
-	resources, err := resolve(dialer, dns, consts.UdpCheckLookupHost, dnsmessage.TypeA, network)
+func DnsCheck(dialer netproxy.Dialer, server string, network string, data []byte) (ok bool, err error) {
+	resources, err := resolveMsg(dialer, server, network, data)
 	if err != nil {
 		return false, err
 	}
@@ -230,6 +229,32 @@ func DnsCheck(dialer netproxy.Dialer, dns netip.AddrPort, network string) (ok bo
 		}
 	}
 	return false, ErrNoIpRecord
+}
+
+func resolveMsg(dialer netproxy.Dialer, server string, network string, data []byte) (ans []dnsmessage.RR, err error) {
+	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, network, server)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	var resp []byte
+	if network == "tcp" {
+		resp, err = ResolveStream(conn, data, false)
+	} else {
+		resp, err = ResolveUDP(conn, data)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	msg := dnsmessage.Msg{}
+	if err = msg.Unpack(resp); err != nil {
+		return nil, err
+	}
+	return msg.Answer, nil
 }
 
 func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uint16, network string) (ans []dnsmessage.RR, err error) {
@@ -246,28 +271,10 @@ func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uin
 	}
 	msg.SetQuestion(dnsmessage.CanonicalName(host), typ)
 
-	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
-	defer cancel()
-	conn, err := dialer.DialContext(ctx, network, server.String())
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
 	var data []byte
-	if data, err = msg.Pack(); err == nil {
-		var resp []byte
-		if network == "tcp" {
-			resp, err = ResolveStream(conn, data, false)
-		} else {
-			resp, err = ResolveUDP(conn, data)
-		}
-		if err == nil {
-			err = msg.Unpack(resp)
-		}
-	}
-	if err != nil {
+	if data, err = msg.Pack(); err != nil {
 		return nil, err
 	}
-	return msg.Answer, nil
+
+	return resolveMsg(dialer, server.String(), network, data)
 }
