@@ -106,6 +106,16 @@ func ParseOutbound(rawOutbound *config_parser.Function) (outbound *Outbound, err
 		Mark: 0,
 		Must: false,
 	}
+	// Handle special function as outbound: static(entry_name)
+	// When the outbound is a function like "static(acme)", extract the first param as the name.
+	// Skip the first param for static function.
+	if rawOutbound.Name == consts.Function_Static {
+		if len(rawOutbound.Params) != 1 {
+			return nil, fmt.Errorf("'static' upstream takes only one parameter")
+		}
+		outbound.Name = rawOutbound.Params[0].Val
+		return outbound, nil
+	}
 	for _, p := range rawOutbound.Params {
 		switch p.Key {
 		case consts.OutboundParam_Mark:

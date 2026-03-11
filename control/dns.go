@@ -22,6 +22,7 @@ import (
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/daeuniverse/dae/component/dns"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
+	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	dnsmessage "github.com/miekg/dns"
@@ -45,6 +46,15 @@ var (
 // TODO: Connection reuse
 type DnsForwarder interface {
 	ForwardDNS(msg *dnsmessage.Msg) error
+}
+
+func newStaticDnsForwarder(upstream *dns.Upstream, staticEntries map[string]*config.DnsStaticEntry) (DnsForwarder, error) {
+	entryName := upstream.Hostname
+	entry, ok := staticEntries[entryName]
+	if !ok {
+		return nil, fmt.Errorf("static entry %v not found", entryName)
+	}
+	return &StaticForwarderWithEntry{entry: entry}, nil
 }
 
 func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForwarder, error) {
@@ -571,4 +581,87 @@ func (d *DoTcpAndUdp) Close() (err error) {
 	err = d.doTcp.Close()
 	err = d.doUdp.Close()
 	return
+}
+
+type StaticForwarderWithEntry struct {
+	entry *config.DnsStaticEntry
+}
+
+func (s *StaticForwarderWithEntry) ForwardDNS(msg *dnsmessage.Msg) error {
+	if len(msg.Question) == 0 {
+		return nil // Return empty response for invalid requests
+	}
+
+	q := msg.Question[0]
+	qname := q.Name
+	qtype := q.Qtype
+
+	var answers []dnsmessage.RR
+
+	// Add A records
+	if qtype == dnsmessage.TypeA || qtype == dnsmessage.TypeANY {
+		for _, ip := range s.entry.A {
+			addr, err := netip.ParseAddr(ip)
+			if err != nil {
+				continue
+			}
+			if !addr.Is4() {
+				continue
+			}
+			answers = append(answers, &dnsmessage.A{
+				Hdr: dnsmessage.RR_Header{
+					Name:   qname,
+					Rrtype: dnsmessage.TypeA,
+					Class:  dnsmessage.ClassINET,
+					Ttl:    300,
+				},
+				A: addr.AsSlice(),
+			})
+		}
+	}
+
+	// Add AAAA records
+	if qtype == dnsmessage.TypeAAAA || qtype == dnsmessage.TypeANY {
+		for _, ip := range s.entry.AAAA {
+			addr, err := netip.ParseAddr(ip)
+			if err != nil {
+				continue
+			}
+			if !addr.Is6() {
+				continue
+			}
+			answers = append(answers, &dnsmessage.AAAA{
+				Hdr: dnsmessage.RR_Header{
+					Name:   qname,
+					Rrtype: dnsmessage.TypeAAAA,
+					Class:  dnsmessage.ClassINET,
+					Ttl:    300,
+				},
+				AAAA: addr.AsSlice(),
+			})
+		}
+	}
+
+	// Add TXT records
+	if qtype == dnsmessage.TypeTXT || qtype == dnsmessage.TypeANY {
+		for _, txt := range s.entry.TXT {
+			answers = append(answers, &dnsmessage.TXT{
+				Hdr: dnsmessage.RR_Header{
+					Name:   qname,
+					Rrtype: dnsmessage.TypeTXT,
+					Class:  dnsmessage.ClassINET,
+					Ttl:    300,
+				},
+				Txt: []string{txt},
+			})
+		}
+	}
+
+	msg.Answer = answers
+	msg.Rcode = dnsmessage.RcodeSuccess
+	msg.Response = true
+	msg.RecursionAvailable = true
+	msg.Truncated = false
+
+	return nil
 }

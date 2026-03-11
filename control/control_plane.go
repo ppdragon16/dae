@@ -1101,6 +1101,13 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	dnsUpstream *dns.Upstream,
 	outArg *dialArgument,
 ) error {
+	if dnsUpstream.Scheme == dns.UpstreamScheme_Static {
+		// Makes dummy dial argument to avoid panic (e.g. when priting logs).
+		outArg.networkType = allNetworkTypes[0]
+		outArg.Outbound = c.outbounds[0]
+		outArg.Dialer = c.outbounds[0].Dialers[0]
+		return nil
+	}
 	/// Choose the best l4proto+ipversion dialer, and change taregt DNS to the best ipversion DNS upstream for DNS request.
 	// Get available ipversions and l4protos for DNS upstream.
 	var (
