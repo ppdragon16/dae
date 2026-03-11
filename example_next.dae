@@ -84,14 +84,16 @@ dns {
   # Static DNS entries (defined here, referenced in routing)
   # Each entry maps a name to DNS records (A, AAAA, TXT)
   static {
-    # TXT record for ACME DNS-01 challenge
+    # TXT record for ACME DNS-01 challenge (short TTL for dynamic updates)
     acme {
       txt: '=====1234567890abcdef====='
+      ttl: 60
     }
-    # Records for local NAS
+    # Records for local NAS (longer TTL)
     local_nas {
       a: 192.168.16.42
       aaaa: 'fdfe::be24:11ff:fe64:3598'
+      ttl: 600
     }
   }
   upstream {
@@ -210,6 +212,12 @@ routing {
 
 ### Update a static entry (only existing entries can be updated)
 #  curl -X PUT http://localhost:1111/static/acme -H "Content-Type: text/plain" -d 'txt: =====newvalue====='
+#  output:
+#  OK
+#
+#  Update with TTL:
+#  curl -X PUT http://localhost:1111/static/acme -H "Content-Type: text/plain" -d 'txt: =====newvalue=====
+#  ttl: 120'
 #  output:
 #  OK
 #

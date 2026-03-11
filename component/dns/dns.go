@@ -184,7 +184,11 @@ func (s *Dns) HasResponseRules() bool {
 func (s *Dns) UpdateStaticEntry(name string, entry *config.DnsStaticEntry) error {
 	s.staticEntriesMu.Lock()
 	defer s.staticEntriesMu.Unlock()
-	if _, ok := s.staticEntries[name]; ok {
+	if oldEntry, ok := s.staticEntries[name]; ok {
+		// If new TTL is 0, keep the old TTL
+		if entry.TTL == 0 {
+			entry.TTL = oldEntry.TTL
+		}
 		s.staticEntries[name] = entry
 		return nil
 	}

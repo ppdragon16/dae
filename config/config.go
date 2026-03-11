@@ -132,6 +132,7 @@ type DnsStaticEntry struct {
 	A   []string `mapstructure:"a"`
 	AAAA []string `mapstructure:"aaaa"`
 	TXT []string `mapstructure:"txt"`
+	TTL uint32 `mapstructure:"ttl"`
 }
 
 type Dns struct {

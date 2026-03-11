@@ -589,6 +589,12 @@ func (s *StaticForwarder) ForwardDNS(data []byte) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("failed to get static entry")
 	}
+	// Use configured TTL or default (300)
+	ttl := entry.TTL
+	if ttl == 0 {
+		ttl = 300
+	}
+
 	// Add A records
 	if qtype == dnsmessage.TypeA || qtype == dnsmessage.TypeANY {
 		for _, ip := range entry.A {
@@ -604,7 +610,7 @@ func (s *StaticForwarder) ForwardDNS(data []byte) ([]byte, error) {
 					Name:   qname,
 					Rrtype: dnsmessage.TypeA,
 					Class:  dnsmessage.ClassINET,
-					Ttl:    300,
+					Ttl:    ttl,
 				},
 				A: addr.AsSlice(),
 			})
@@ -626,7 +632,7 @@ func (s *StaticForwarder) ForwardDNS(data []byte) ([]byte, error) {
 					Name:   qname,
 					Rrtype: dnsmessage.TypeAAAA,
 					Class:  dnsmessage.ClassINET,
-					Ttl:    300,
+					Ttl:    ttl,
 				},
 				AAAA: addr.AsSlice(),
 			})
@@ -641,7 +647,7 @@ func (s *StaticForwarder) ForwardDNS(data []byte) ([]byte, error) {
 					Name:   qname,
 					Rrtype: dnsmessage.TypeTXT,
 					Class:  dnsmessage.ClassINET,
-					Ttl:    300,
+					Ttl:    ttl,
 				},
 				Txt: []string{txt},
 			})
