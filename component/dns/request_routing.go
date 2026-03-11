@@ -28,6 +28,7 @@ func NewRequestMatcherBuilder(rules []*config_parser.RoutingRule, upstreamName2I
 	rulesBuilder := routing.NewRulesBuilder()
 	rulesBuilder.RegisterFunctionParser(consts.Function_QName, routing.PlainParserFactory(b.addQName))
 	rulesBuilder.RegisterFunctionParser(consts.Function_QType, TypeParserFactory(b.addQType))
+	rulesBuilder.RegisterFunctionParser(consts.Function_Static, routing.PlainParserFactory(b.addStatic))
 	if err = rulesBuilder.Apply(rules); err != nil {
 		return nil, err
 	}
@@ -45,6 +46,8 @@ func (b *RequestMatcherBuilder) upstreamToId(upstream string) (upstreamId consts
 		upstreamId = consts.DnsRequestOutboundIndex_Reject
 	case consts.DnsRequestOutboundIndex_AsIs.String():
 		upstreamId = consts.DnsRequestOutboundIndex_AsIs
+	case consts.DnsRequestOutboundIndex_Static.String():
+		upstreamId = consts.DnsRequestOutboundIndex_Static
 	case consts.DnsRequestOutboundIndex_LogicalAnd.String():
 		upstreamId = consts.DnsRequestOutboundIndex_LogicalAnd
 	case consts.DnsRequestOutboundIndex_LogicalOr.String():
@@ -105,6 +108,32 @@ func (b *RequestMatcherBuilder) addQType(f *config_parser.Function, values []uin
 	return nil
 }
 
+func (b *RequestMatcherBuilder) addStatic(f *config_parser.Function, key string, values []string, upstream *routing.Outbound) (err error) {
+	if len(values) != 1 {
+		return fmt.Errorf("static function requires exactly one argument (static entry name)")
+	}
+	staticName := values[0]
+
+	// Validate that the static entry name is provided
+	if staticName == "" {
+		return fmt.Errorf("static function requires a static entry name")
+	}
+
+	// Use static entry name as upstream name to find the upstream ID.
+	// In dns.go New(), we create virtual upstreams for each static entry.
+	upstreamId, err := b.upstreamToId(staticName)
+	if err != nil {
+		return err
+	}
+	b.rules = append(b.rules, requestMatchSet{
+		Type:       consts.MatchType_Static,
+		StaticName: staticName,
+		Not:        f.Not,
+		Upstream:   uint8(upstreamId),
+	})
+	return nil
+}
+
 func (b *RequestMatcherBuilder) addFallback(fallbackOutbound config.FunctionOrString) (err error) {
 	upstream, err := routing.ParseOutbound(config.FunctionOrStringToFunction(fallbackOutbound))
 	if err != nil {
@@ -155,10 +184,11 @@ type RequestMatcher struct {
 }
 
 type requestMatchSet struct {
-	Value    uint16
-	Not      bool
-	Type     consts.MatchType
-	Upstream uint8
+	Value      uint16
+	Not        bool
+	Type       consts.MatchType
+	Upstream   uint8
+	StaticName string
 }
 
 func (m *RequestMatcher) Match(
@@ -186,6 +216,9 @@ func (m *RequestMatcher) Match(
 				goodSubrule = true
 			}
 		case consts.MatchType_Fallback:
+			goodSubrule = true
+		case consts.MatchType_Static:
+			// Static match always hits; the static entry name is stored in match.StaticName
 			goodSubrule = true
 		default:
 			return 0, fmt.Errorf("unknown match type: %v", match.Type)

@@ -128,17 +128,24 @@ type DnsRouting struct {
 	Response DnsResponseRouting `mapstructure:"response"`
 }
 type KeyableString string
+type DnsStaticEntry struct {
+	A   []string `mapstructure:"a"`
+	AAAA []string `mapstructure:"aaaa"`
+	TXT []string `mapstructure:"txt"`
+}
+
 type Dns struct {
-	IpVersionPrefer int             `mapstructure:"ipversion_prefer"`
-	FixedDomainTtl  []KeyableString `mapstructure:"fixed_domain_ttl"`
-	Upstream        []KeyableString `mapstructure:"upstream"`
-	Routing         DnsRouting      `mapstructure:"routing"`
-	MinSniffingTtl  time.Duration   `mapstructure:"min_sniffing_ttl" default:"24h"`
-	EnableCache     bool            `mapstructure:"enable_cache" default:"true"`
-	UdpPoolSize     int             `mapstructure:"udp_pool_size" default:"10"`
-	UdpPoolTtl      time.Duration   `mapstructure:"udp_pool_ttl" default:"10m"`
-	TcpPoolSize     int             `mapstructure:"tcp_pool_size" default:"3"`
-	TcpPoolTtl      time.Duration   `mapstructure:"tcp_pool_ttl" default:"60s"`
+	IpVersionPrefer int                       `mapstructure:"ipversion_prefer"`
+	FixedDomainTtl  []KeyableString           `mapstructure:"fixed_domain_ttl"`
+	Upstream        []KeyableString           `mapstructure:"upstream"`
+	Static          map[string]DnsStaticEntry `mapstructure:"static"`
+	Routing         DnsRouting                `mapstructure:"routing"`
+	MinSniffingTtl  time.Duration             `mapstructure:"min_sniffing_ttl" default:"24h"`
+	EnableCache     bool                      `mapstructure:"enable_cache" default:"true"`
+	UdpPoolSize     int                       `mapstructure:"udp_pool_size" default:"10"`
+	UdpPoolTtl      time.Duration             `mapstructure:"udp_pool_ttl" default:"10m"`
+	TcpPoolSize     int                       `mapstructure:"tcp_pool_size" default:"3"`
+	TcpPoolTtl      time.Duration             `mapstructure:"tcp_pool_ttl" default:"60s"`
 }
 
 type Routing struct {

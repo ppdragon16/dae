@@ -29,6 +29,7 @@ const (
 	Function_QName    = "qname"
 	Function_QType    = "qtype"
 	Function_Upstream = "upstream"
+	Function_Static   = "static"
 
 	OutboundParam_Mark = "mark"
 )

@@ -16,6 +16,7 @@ type DnsRequestOutboundIndex int16
 const (
 	DnsRequestOutboundIndex_Reject      DnsRequestOutboundIndex = 0xFC
 	DnsRequestOutboundIndex_AsIs        DnsRequestOutboundIndex = 0xFD
+	DnsRequestOutboundIndex_Static      DnsRequestOutboundIndex = 0xFB
 	DnsRequestOutboundIndex_LogicalOr   DnsRequestOutboundIndex = 0xFE
 	DnsRequestOutboundIndex_LogicalAnd  DnsRequestOutboundIndex = 0xFF
 	DnsRequestOutboundIndex_LogicalMask DnsRequestOutboundIndex = 0xFE
@@ -33,6 +34,8 @@ func (i DnsRequestOutboundIndex) String() string {
 		return "reject"
 	case DnsRequestOutboundIndex_AsIs:
 		return "asis"
+	case DnsRequestOutboundIndex_Static:
+		return "static"
 	case DnsRequestOutboundIndex_LogicalOr:
 		return "<OR>"
 	case DnsRequestOutboundIndex_LogicalAnd:

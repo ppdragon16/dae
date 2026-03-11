@@ -607,7 +607,11 @@ func (c *DnsController) singleFlightForwardDNS(
 			forwarder = value.(DnsForwarder)
 		} else {
 			var err error
-			forwarder, err = newDnsForwarder(upstream, *dialArgument)
+			if upstream.Scheme == dns.UpstreamScheme_Static {
+				forwarder, err = newStaticDnsForwarder(upstream, c.routing.GetStaticEntries())
+			} else {
+				forwarder, err = newDnsForwarder(upstream, *dialArgument)
+			}
 			if err != nil {
 				return nil, err
 			}

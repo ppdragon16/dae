@@ -31,6 +31,7 @@ type Dns struct {
 	upstream         []*UpstreamResolver
 	upstream2IndexMu sync.Mutex
 	upstream2Index   map[*Upstream]int
+	staticEntries    map[string]*config.DnsStaticEntry
 	reqMatcher       *RequestMatcher
 	respMatcher      *ResponseMatcher
 	hasResponseRules bool
@@ -58,9 +59,40 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 		},
 		routeCache: common.NewShardedLru[routeCacheKey, consts.DnsRequestOutboundIndex](
 			4096, 16, 6*time.Hour, RouteCacheKeyHash),
+		staticEntries: make(map[string]*config.DnsStaticEntry, len(dns.Static)),
+	}
+	// Convert static entries to pointer map
+	for k, v := range dns.Static {
+		entry := v
+		s.staticEntries[k] = &entry
+	}
+	// Initialize upstream name to id map.
+	upstreamName2Id := map[string]uint8{}
+	// Add static entries as virtual upstreams.
+	// Each static entry becomes an upstream with scheme "static".
+	for name := range dns.Static {
+		staticUrl, err := url.Parse("static://" + name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse static URL: %w", err)
+		}
+		r := &UpstreamResolver{
+			Raw:     staticUrl,
+			Network: opt.UpstreamResolverNetwork,
+			FinishInitCallback: func(i int) func(raw *url.URL, upstream *Upstream) {
+				return func(raw *url.URL, upstream *Upstream) {
+					opt.UpstreamReadyCallback(upstream)
+					s.upstream2IndexMu.Lock()
+					s.upstream2Index[upstream] = i
+					s.upstream2IndexMu.Unlock()
+				}
+			}(len(s.upstream)),
+			mu:       sync.Mutex{},
+			upstream: nil,
+		}
+		upstreamName2Id[name] = uint8(len(s.upstream))
+		s.upstream = append(s.upstream, r)
 	}
 	// Parse upstream.
-	upstreamName2Id := map[string]uint8{}
 	for i, upstreamRaw := range dns.Upstream {
 		if i >= int(consts.DnsRequestOutboundIndex_UserDefinedMax) ||
 			i >= int(consts.DnsResponseOutboundIndex_UserDefinedMax) {
@@ -146,6 +178,10 @@ func (s *Dns) GetUpstream(upstreamIndex consts.DnsRequestOutboundIndex) (upstrea
 
 func (s *Dns) HasResponseRules() bool {
 	return s.hasResponseRules
+}
+
+func (s *Dns) GetStaticEntries() map[string]*config.DnsStaticEntry {
+	return s.staticEntries
 }
 
 func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {

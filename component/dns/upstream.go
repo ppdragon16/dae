@@ -37,6 +37,7 @@ const (
 	UpstreamScheme_HTTPS         UpstreamScheme = "https"
 	upstreamScheme_H3_Alias      UpstreamScheme = "http3"
 	UpstreamScheme_H3            UpstreamScheme = "h3"
+	UpstreamScheme_Static        UpstreamScheme = "static"
 )
 
 func (s UpstreamScheme) ContainsTcp() bool {
@@ -78,6 +79,9 @@ func ParseRawUpstream(raw *url.URL) (scheme UpstreamScheme, hostname string, por
 		if __port == "" {
 			__port = "853"
 		}
+	case UpstreamScheme_Static:
+		// static://entry_name - hostname is the entry name
+		return scheme, raw.Hostname(), 0, "", nil
 	default:
 		return "", "", 0, "", fmt.Errorf("unexpected scheme: %v", raw.Scheme)
 	}
@@ -104,6 +108,16 @@ func NewUpstream(ctx context.Context, upstream *url.URL, resolverNetwork string)
 	scheme, hostname, port, path, err := ParseRawUpstream(upstream)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFormat, err)
+	}
+
+	// Static scheme does not require DNS resolution
+	if scheme == UpstreamScheme_Static {
+		return &Upstream{
+			Scheme:   scheme,
+			Hostname: hostname,
+			Port:     port,
+			Path:     path,
+		}, nil
 	}
 
 	ip46, err := netutils.ParseOrResolveIp46(hostname)

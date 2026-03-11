@@ -256,6 +256,27 @@ func SectionParser(to reflect.Value, section *config_parser.Section) error {
 	case reflect.Struct:
 		// Section.
 		return ParamParser(to.Addr(), section, nil)
+	case reflect.Map:
+		// Map section (e.g., map[string]DnsStaticEntry).
+		elemType := to.Type().Elem()
+		// Initialize the map if nil
+		if to.IsNil() {
+			to.Set(reflect.MakeMap(to.Type()))
+		}
+		// Scan sections.
+		for _, item := range section.Items {
+			switch itemVal := item.Value.(type) {
+			case *config_parser.Section:
+				elem := reflect.New(elemType).Elem()
+				if err := SectionParser(elem.Addr(), itemVal); err != nil {
+					return fmt.Errorf("error when parse \"%v\": %w", itemVal.Name, err)
+				}
+				to.SetMapIndex(reflect.ValueOf(itemVal.Name), elem)
+			default:
+				return fmt.Errorf("unmatched type for map section: %v -> %v", item.Type.String(), to.Type())
+			}
+		}
+		return nil
 	default:
 		goto unsupported
 	}
