@@ -682,9 +682,101 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(writer, "Outbound '%s' not found\n", outbound)
 		}
+	case "static":
+		if len(params) == 0 {
+			// GET /static - list all static entries
+			if r.Method == "GET" {
+				entries := c.dnsController.GetStaticEntries()
+				for name, entry := range entries {
+					fmt.Fprintf(writer, "%s:\n", name)
+					if len(entry.A) > 0 {
+						fmt.Fprintf(writer, "  a: %v\n", entry.A)
+					}
+					if len(entry.AAAA) > 0 {
+						fmt.Fprintf(writer, "  aaaa: %v\n", entry.AAAA)
+					}
+					if len(entry.TXT) > 0 {
+						fmt.Fprintf(writer, "  txt: %v\n", entry.TXT)
+					}
+				}
+				return
+			}
+			http.Error(w, "GET or DELETE method required", http.StatusMethodNotAllowed)
+			return
+		}
+		staticName := params[0]
+		switch r.Method {
+		case "GET":
+			// GET /static/{name} - get specific entry
+			entry, ok := c.dnsController.GetStaticEntry(staticName)
+			if !ok {
+				http.Error(w, fmt.Sprintf("static entry %q not found", staticName), http.StatusNotFound)
+				return
+			}
+			if len(entry.A) > 0 {
+				fmt.Fprintf(writer, "a: %v\n", entry.A)
+			}
+			if len(entry.AAAA) > 0 {
+				fmt.Fprintf(writer, "aaaa: %v\n", entry.AAAA)
+			}
+			if len(entry.TXT) > 0 {
+				fmt.Fprintf(writer, "txt: %v\n", entry.TXT)
+			}
+			return
+		case "PUT":
+			// PUT /static/{name} - add/update entry
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusBadRequest)
+				return
+			}
+			defer r.Body.Close()
+			// Parse body as config.DnsStaticEntry
+			// Format: a: 1.2.3.4\naaaa: ::1\ntxt: hello
+			entry, err := parseStaticEntry(string(body))
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to parse static entry: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := c.dnsController.UpdateStaticEntry(staticName, entry); err != nil {
+				http.Error(w, fmt.Sprintf("failed to add static entry: %v", err), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(writer, "OK\n")
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// parseStaticEntry parses body content into config.DnsStaticEntry.
+// Format: a: 1.2.3.4
+//
+//	aaaa: ::1
+//	txt: hello
+func parseStaticEntry(body string) (*config.DnsStaticEntry, error) {
+	entry := &config.DnsStaticEntry{}
+	lines := strings.Split(body, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, _ := strings.Cut(line, ":")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		switch key {
+		case "a":
+			entry.A = append(entry.A, value)
+		case "aaaa":
+			entry.AAAA = append(entry.AAAA, value)
+		case "txt":
+			entry.TXT = append(entry.TXT, value)
+		}
+	}
+	return entry, nil
 }
 
 func ParseFixedDomainTtl(ks []config.KeyableString) (map[string]int, error) {
