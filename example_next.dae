@@ -80,6 +80,20 @@ dns {
   udp_pool_ttl: 10m # TTL to recycle UDP connnections in pool
   tcp_pool_size: 2 # TCP connnection pool for each dns forwarder (key'ed by upstream+dialer+target)
   tcp_pool_ttl: 30s  # TTL to recycle TCP connnections in pool
+  
+  # Static DNS entries (defined here, referenced in routing)
+  # Each entry maps a name to DNS records (A, AAAA, TXT)
+  static {
+    # TXT record for ACME DNS-01 challenge
+    acme {
+      txt: '=====1234567890abcdef====='
+    }
+    # Records for local NAS
+    local_nas {
+      a: 192.168.16.42
+      aaaa: 'fdfe::be24:11ff:fe64:3598'
+    }
+  }
   upstream {
     dnsmasq_dns: 'udp://127.0.0.1:53'
     cn_dns: 'udp://223.5.5.5:53'
@@ -88,7 +102,8 @@ dns {
   routing {
     request {
       qtype(ptr) && qname(geosite:private) -> dnsmasq_dns
-      qname(suffix:ppdn.us) -> dnsmasq_dns
+      qname(regex:'^_acme') -> static(acme)
+      qname(suffix:mydomain.xyz) -> static(local_nas)
       qtype(ptr, https) -> reject
       qname(suffix:.lan, suffix:telemetry.coder.com, regex:'mcdn\.bilivideo\.(com|cn)$', suffix:szbdyd.com) -> reject
       qname(regex:'^(ssl|www)\.gstatic\.com', regex:'(fonts|update)\.googleapis\.com$') -> cn_dns
@@ -175,3 +190,27 @@ routing {
 
 ## Changes a specific dialer's priority
 #  curl -X PUT http://localhost:1111/priority/outbound:hk/subtag:sub3/dialer:香港 -H "Content-Type: text/plain" -d '0,3(,300ms)'
+
+## Static DNS Entries (dynamic, no restart required)
+## Note: Static entries must be defined in config first, then can be updated via API
+
+### List all static entries
+#  curl http://localhost:1111/static
+#  output:
+#  acme:
+#    txt: [=====1234567890abcdef=====]
+#  local_nas:
+#    a: [192.168.16.42]
+#    aaaa: [fdfe::be24:11ff:fe64:3598]
+
+### Get a specific static entry
+#  curl http://localhost:1111/static/acme
+#  output:
+#  txt: [=====1234567890abcdef=====]
+
+### Update a static entry (only existing entries can be updated)
+#  curl -X PUT http://localhost:1111/static/acme -H "Content-Type: text/plain" -d 'txt: =====newvalue====='
+#  output:
+#  OK
+#
+#  Note: Static DNS responses are NOT cached, so updates take effect immediately.
