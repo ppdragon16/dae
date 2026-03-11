@@ -32,6 +32,7 @@ type Dns struct {
 	upstream2IndexMu sync.Mutex
 	upstream2Index   map[*Upstream]int
 	staticEntries    map[string]*config.DnsStaticEntry
+	staticEntriesMu  sync.RWMutex
 	reqMatcher       *RequestMatcher
 	respMatcher      *ResponseMatcher
 	hasResponseRules bool
@@ -180,8 +181,32 @@ func (s *Dns) HasResponseRules() bool {
 	return s.hasResponseRules
 }
 
+func (s *Dns) UpdateStaticEntry(name string, entry *config.DnsStaticEntry) error {
+	s.staticEntriesMu.Lock()
+	defer s.staticEntriesMu.Unlock()
+	if _, ok := s.staticEntries[name]; ok {
+		s.staticEntries[name] = entry
+		return nil
+	}
+	return fmt.Errorf("The entry '%s' doesn't exist", name)
+}
+
 func (s *Dns) GetStaticEntries() map[string]*config.DnsStaticEntry {
-	return s.staticEntries
+	s.staticEntriesMu.RLock()
+	defer s.staticEntriesMu.RUnlock()
+	// Return a copy to avoid race conditions
+	result := make(map[string]*config.DnsStaticEntry, len(s.staticEntries))
+	for k, v := range s.staticEntries {
+		result[k] = v
+	}
+	return result
+}
+
+func (s *Dns) GetStaticEntry(name string) (*config.DnsStaticEntry, bool) {
+	s.staticEntriesMu.RLock()
+	defer s.staticEntriesMu.RUnlock()
+	entry, ok := s.staticEntries[name]
+	return entry, ok
 }
 
 func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {

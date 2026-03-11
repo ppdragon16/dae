@@ -49,15 +49,6 @@ type DnsForwarder interface {
 	ForwardDNS(data []byte) ([]byte, error)
 }
 
-func newStaticDnsForwarder(upstream *dns.Upstream, staticEntries map[string]*config.DnsStaticEntry) (DnsForwarder, error) {
-	entryName := upstream.Hostname
-	entry, ok := staticEntries[entryName]
-	if !ok {
-		return nil, fmt.Errorf("static entry %v not found", entryName)
-	}
-	return &StaticForwarderWithEntry{entry: entry}, nil
-}
-
 func newDnsForwarder(upstream *dns.Upstream, dialArgument dialArgument) (DnsForwarder, error) {
 	forwarder, err := func() (DnsForwarder, error) {
 		if upstream.Scheme == dns.UpstreamScheme_TCP_UDP {
@@ -574,11 +565,11 @@ func (d *DoTcpAndUdp) Close() (err error) {
 	return
 }
 
-type StaticForwarderWithEntry struct {
-	entry *config.DnsStaticEntry
+type StaticForwarder struct {
+	getEntryFn func() (*config.DnsStaticEntry, bool)
 }
 
-func (s *StaticForwarderWithEntry) ForwardDNS(data []byte) ([]byte, error) {
+func (s *StaticForwarder) ForwardDNS(data []byte) ([]byte, error) {
 	// Parse the DNS request
 	var msg dnsmessage.Msg
 	if err := msg.Unpack(data); err != nil {
@@ -594,10 +585,13 @@ func (s *StaticForwarderWithEntry) ForwardDNS(data []byte) ([]byte, error) {
 	qtype := q.Qtype
 
 	var answers []dnsmessage.RR
-
+	entry, ok := s.getEntryFn()
+	if !ok {
+		return nil, fmt.Errorf("failed to get static entry")
+	}
 	// Add A records
 	if qtype == dnsmessage.TypeA || qtype == dnsmessage.TypeANY {
-		for _, ip := range s.entry.A {
+		for _, ip := range entry.A {
 			addr, err := netip.ParseAddr(ip)
 			if err != nil {
 				continue
@@ -619,7 +613,7 @@ func (s *StaticForwarderWithEntry) ForwardDNS(data []byte) ([]byte, error) {
 
 	// Add AAAA records
 	if qtype == dnsmessage.TypeAAAA || qtype == dnsmessage.TypeANY {
-		for _, ip := range s.entry.AAAA {
+		for _, ip := range entry.AAAA {
 			addr, err := netip.ParseAddr(ip)
 			if err != nil {
 				continue
@@ -641,7 +635,7 @@ func (s *StaticForwarderWithEntry) ForwardDNS(data []byte) ([]byte, error) {
 
 	// Add TXT records
 	if qtype == dnsmessage.TypeTXT || qtype == dnsmessage.TypeANY {
-		for _, txt := range s.entry.TXT {
+		for _, txt := range entry.TXT {
 			answers = append(answers, &dnsmessage.TXT{
 				Hdr: dnsmessage.RR_Header{
 					Name:   qname,

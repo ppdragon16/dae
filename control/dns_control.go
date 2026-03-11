@@ -23,6 +23,7 @@ import (
 	"github.com/daeuniverse/dae/component/dns"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
+	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
@@ -608,7 +609,10 @@ func (c *DnsController) singleFlightForwardDNS(
 		} else {
 			var err error
 			if upstream.Scheme == dns.UpstreamScheme_Static {
-				forwarder, err = newStaticDnsForwarder(upstream, c.routing.GetStaticEntries())
+				forwarder = &StaticForwarder{
+					getEntryFn: func() (*config.DnsStaticEntry, bool) {
+						return c.routing.GetStaticEntry(upstream.Hostname)
+					}}
 			} else {
 				forwarder, err = newDnsForwarder(upstream, *dialArgument)
 			}
@@ -650,7 +654,8 @@ func (c *DnsController) singleFlightForwardDNS(
 			return r, nil
 		}
 
-		if c.enableCache {
+		// Skip cache for static entries to allow dynamic updates
+		if c.enableCache && upstream.Scheme != dns.UpstreamScheme_Static {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
 					"qname":    cacheKey.qname,
@@ -670,6 +675,18 @@ func (c *DnsController) singleFlightForwardDNS(
 		return _v.([]byte), leader, shared, err
 	}
 	return nil, false, false, err
+}
+
+func (c *DnsController) GetStaticEntries() map[string]*config.DnsStaticEntry {
+	return c.routing.GetStaticEntries()
+}
+
+func (c *DnsController) GetStaticEntry(name string) (*config.DnsStaticEntry, bool) {
+	return c.routing.GetStaticEntry(name)
+}
+
+func (c *DnsController) UpdateStaticEntry(name string, entry *config.DnsStaticEntry) error {
+	return c.routing.UpdateStaticEntry(name, entry)
 }
 
 func (c *DnsController) Close() error {
