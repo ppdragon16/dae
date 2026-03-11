@@ -698,6 +698,7 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if len(entry.TXT) > 0 {
 						fmt.Fprintf(writer, "  txt: %v\n", entry.TXT)
 					}
+					fmt.Fprintf(writer, "  ttl: %v\n", entry.TTL)
 				}
 				return
 			}
@@ -722,6 +723,7 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if len(entry.TXT) > 0 {
 				fmt.Fprintf(writer, "txt: %v\n", entry.TXT)
 			}
+			fmt.Fprintf(writer, "ttl: %v\n", entry.TTL)
 			return
 		case "PUT":
 			// PUT /static/{name} - add/update entry
@@ -756,6 +758,7 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //
 //	aaaa: ::1
 //	txt: hello
+//	ttl: 60
 func parseStaticEntry(body string) (*config.DnsStaticEntry, error) {
 	entry := &config.DnsStaticEntry{}
 	lines := strings.Split(body, "\n")
@@ -774,6 +777,12 @@ func parseStaticEntry(body string) (*config.DnsStaticEntry, error) {
 			entry.AAAA = append(entry.AAAA, value)
 		case "txt":
 			entry.TXT = append(entry.TXT, value)
+		case "ttl":
+			ttl, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ttl: %v", err)
+			}
+			entry.TTL = uint32(ttl)
 		}
 	}
 	return entry, nil
