@@ -65,9 +65,17 @@ func ResolveHttp(client *http.Client, url *url.URL, data []byte) ([]byte, error)
 }
 
 func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error) {
-	if d, ok := stream.(interface{ SetDeadline(time.Time) error }); ok {
-		d.SetDeadline(time.Now().Add(consts.DefaultDNSTimeout))
+	deadline := time.Now().Add(consts.DefaultDNSTimeout)
+	if d, ok := stream.(interface{ SetReadDeadline(time.Time) error }); ok {
+		d.SetReadDeadline(deadline)
 	}
+	if d, ok := stream.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		d.SetWriteDeadline(deadline)
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
 	buf := pool.GetBuffer(len(data) + 2)
 	defer pool.PutBuffer(buf)
 	// We should write two byte length in the front of stream DNS request.
@@ -87,15 +95,35 @@ func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error)
 		return nil, oops.Wrapf(err, "failed to write DNS req")
 	}
 
-	// Read two byte length.
-	if _, err = io.ReadFull(stream, buf[:2]); err != nil {
-		return nil, oops.Wrapf(err, "failed to read DNS resp payload length")
+	type result struct {
+		data []byte
+		err  error
 	}
-	respBuf := make([]byte, binary.BigEndian.Uint16(buf[:2]))
-	if _, err = io.ReadFull(stream, respBuf); err != nil {
-		return nil, oops.Wrapf(err, "failed to read DNS resp payload")
+	recvCh := make(chan result, 1)
+	go func() {
+		var resp []byte
+		var err error
+		// Read two byte length.
+		if _, err = io.ReadFull(stream, buf[:2]); err != nil {
+			err = oops.Wrapf(err, "failed to read DNS resp payload length")
+		}
+		if err == nil {
+			resp = make([]byte, binary.BigEndian.Uint16(buf[:2]))
+			if _, err = io.ReadFull(stream, resp); err != nil {
+				err = oops.Wrapf(err, "failed to read DNS resp payload")
+			}
+		}
+		select {
+		case recvCh <- result{data: resp, err: err}:
+		case <-ctx.Done():
+		}
+	}()
+	select {
+	case res := <-recvCh:
+		return res.data, res.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return respBuf, nil
 }
 
 func ResolveUDP(conn net.Conn, data []byte) (resp []byte, err error) {
@@ -119,7 +147,6 @@ func ResolveUDP(conn net.Conn, data []byte) (resp []byte, err error) {
 		select {
 		case recvCh <- result{data: buf[:n], err: rErr}:
 		case <-ctx.Done():
-			return
 		}
 	}()
 
