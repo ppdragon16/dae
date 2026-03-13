@@ -86,6 +86,8 @@ func (p *PacketSnifferPool) GetOrCreate(key PacketSnifferKey, createOption *Pack
 			deadlineTimer: nil,
 		}
 		qs.deadlineTimer = time.AfterFunc(createOption.Ttl, func() {
+			l, _ := p.snifferKeyLocker.Lock(key)
+			defer p.snifferKeyLocker.Unlock(key, l)
 			if _qs, ok := p.pool.LoadAndDelete(key); ok {
 				if _qs.(*PacketSniffer) == qs {
 					qs.Close()
