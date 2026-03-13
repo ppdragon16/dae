@@ -121,6 +121,9 @@ func (s *Sniffer) SniffTcp() (d string, err error) {
 }
 
 func (s *Sniffer) SniffUdp() (d string, err error) {
+	if s.buf == nil {
+		return "", ErrNotApplicable
+	}
 	if s.sniffed != "" {
 		return s.sniffed, nil
 	}
@@ -140,6 +143,9 @@ func (s *Sniffer) SniffUdp() (d string, err error) {
 }
 
 func (s *Sniffer) AppendData(data []byte) {
+	if s.buf == nil {
+		return
+	}
 	s.needMore = false
 	ori := s.buf.Len()
 	s.buf.Write(data)
