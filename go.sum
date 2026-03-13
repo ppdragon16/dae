@@ -190,8 +190,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 h1:o4JXh1EVt9k/+g42oCprj/FisM4qX9L3sZB3upGN2ZU=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55/go.mod h1:OmDBASR4679mdNQnz2pUhc2G8CO2JrUAVFDRBDP/hJE=
-github.com/ppdragon16/outbound v0.0.0-20260307165408-42b00032754c h1:yaVezxsX0qjGhxi3nDNCII1JM48MJodpo8JwQDdyAGM=
-github.com/ppdragon16/outbound v0.0.0-20260307165408-42b00032754c/go.mod h1:Ws/OYVcjHRGvV2ni5Qzbt3TVMa8xCXKqoYgnA66kiig=
+github.com/ppdragon16/outbound v0.0.0-20260313141248-ab144507b949 h1:bRBc0UWi73ZSylsYT0HI4/Pneto+g3afN/gqSva1ddQ=
+github.com/ppdragon16/outbound v0.0.0-20260313141248-ab144507b949/go.mod h1:Ws/OYVcjHRGvV2ni5Qzbt3TVMa8xCXKqoYgnA66kiig=
 github.com/prometheus/client_golang v1.23.2 h1:Je96obch5RDVy3FDMndoUsjAhG5Edi49h0RJWRi/o0o=
 github.com/prometheus/client_golang v1.23.2/go.mod h1:Tb1a6LWHB3/SPIzCoaDXI4I8UHKeFTEQ1YCr+0Gyqmg=
 github.com/prometheus/client_model v0.6.2 h1:oBsgwpGs7iVziMvrGhE53c/GrLUsZdHnqNwqPLxwZyk=
