@@ -196,6 +196,13 @@ func ParamParser(to reflect.Value, section *config_parser.Section, ignoreType []
 		t := to.Type().Field(field.Index)
 		_, required := t.Tag.Lookup("required")
 		if required {
+			// If Redirect is set, Policy is not required.
+			if key == "policy" {
+				redirectField, ok := keyToField["redirect"]
+				if ok && redirectField.Set {
+					continue
+				}
+			}
 			return fmt.Errorf(`section "%v" requires param "%v" but not found`, section.Name, key)
 		}
 	}
