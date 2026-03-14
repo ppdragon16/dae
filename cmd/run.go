@@ -338,7 +338,11 @@ func startPrometheusServer(port uint16, prometheusRegistry *prometheus.Registry)
 		return
 	}
 
-	prometheusServer = &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: promhttp.HandlerFor(prometheusRegistry, promhttp.HandlerOpts{})}
+	prometheusServer = &http.Server{
+		Addr: fmt.Sprintf(":%d", port),
+		Handler: promhttp.HandlerFor(prometheusRegistry, promhttp.HandlerOpts{
+			DisableCompression: true,
+		})}
 	go prometheusServer.ListenAndServe()
 }
 

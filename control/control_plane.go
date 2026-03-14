@@ -411,6 +411,10 @@ func NewControlPlane(
 	if err != nil {
 		return nil, oops.Errorf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
+
+	// Release temporary allocations from rule processing to avoid memory spike.
+	runtime.GC()
+
 	var trafficLogger *TrafficLogger
 	if global.EnableTrafficLog {
 		trafficLogger, err = NewTrafficLogger(filepath.Join(LogFileDir, "traffic.log"), 5*time.Minute)
