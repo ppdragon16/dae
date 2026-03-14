@@ -28,30 +28,22 @@ subscription {
 }
 
 group {
+  # Redirect groups: no filter/policy required.
+  # Traffic will be forwarded to the target group via direct dialer.
   macbook {
     redirect: tw
-    filter: subtag(sub1)
-    policy: fixed(0)
   }
   wg {
     redirect: hk
-    filter: subtag(sub1)
-    policy: fixed(0)
   }
   ai {
     redirect: sg
-    filter: subtag(sub1)
-    policy: fixed(0)
   }
   yt {
     redirect: hk
-    filter: subtag(sub1)
-    policy: fixed(0)
   }
   fb {
     redirect: hk
-    filter: subtag(sub1)
-    policy: fixed(0)
   }
   hk {
     filter: subtag(sub1) && name(regex:'香港') [priority: '0,2(,300ms)']

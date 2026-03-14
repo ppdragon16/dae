@@ -290,6 +290,21 @@ func NewControlPlane(
 	dialerSet := outbound.NewDialerSetFromLinks(option, prometheusRegistry, tagToNodeList)
 	groupNameRedirects := make(map[string]string)
 	for _, group := range groups {
+		// Handle redirect: if group has redirect config, ignore filter/policy and use direct dialer with fixed(0).
+		if len(group.Redirect) > 0 && group.Name != group.Redirect {
+			groupNameRedirects[group.Name] = group.Redirect
+			id := uint8(len(outbounds))
+			dialerGroup := outbound.NewDialerGroup(
+				option,
+				group.Name,
+				[]*dialer.Dialer{direct},
+				[]*dialer.Annotation{{}},
+				dialer.DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_Fixed},
+				core.outboundAliveChangeCallback(id, group.Name, global.NoConnectivityTrySniff, noConnectivityOutbound),
+			)
+			outbounds = append(outbounds, dialerGroup)
+			continue
+		}
 		// Parse policy.
 		policy, err := dialer.NewDialerSelectionPolicyFromGroupParam(&group)
 		if err != nil {
@@ -326,19 +341,16 @@ func NewControlPlane(
 		dialerGroup := outbound.NewDialerGroup(finalOption, group.Name, dialers, annos, *policy,
 			core.outboundAliveChangeCallback(id, group.Name, global.NoConnectivityTrySniff, noConnectivityOutbound))
 		outbounds = append(outbounds, dialerGroup)
-		if len(group.Redirect) > 0 && group.Name != group.Redirect {
-			groupNameRedirects[group.Name] = group.Redirect
-		}
 	}
 	outboundRedirects := make(map[consts.OutboundIndex]consts.OutboundIndex)
 	for fromName, toName := range groupNameRedirects {
-		from, err1 := OutboundIndexByName(outbounds, fromName)
-		to, err2 := OutboundIndexByName(outbounds, toName)
+		fromIdx, err1 := OutboundIndexByName(outbounds, fromName)
+		toIdx, err2 := OutboundIndexByName(outbounds, toName)
 		if err1 != nil || err2 != nil {
 			return nil, oops.Errorf("redirect outbound not found: %v->%v", fromName, toName)
 		}
-		outboundRedirects[from] = to
-		log.Infof("Outbound redirect: %v (%v) -> %v (%v)", fromName, from, toName, to)
+		outboundRedirects[fromIdx] = toIdx
+		log.Infof("Outbound redirect: %v (%v) -> %v (%v)", fromName, fromIdx, toName, toIdx)
 	}
 
 	// Generate outboundName2Id from outbounds.
@@ -356,6 +368,10 @@ func NewControlPlane(
 	/// Node Connectivity Check.
 	for _, g := range outbounds {
 		deferFuncs = append(deferFuncs, g.Close)
+		// Skip connectivity check for redirect groups (they use direct dialer as forwarding).
+		if _, isRedirect := groupNameRedirects[g.Name]; isRedirect {
+			continue
+		}
 		for _, d := range g.Dialers {
 			// We only activate check of nodes that have a group.
 			d.ActivateCheck(wg)
