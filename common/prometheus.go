@@ -13,7 +13,6 @@ var (
 	CheckMovingLatency *prometheus.GaugeVec
 	CheckSelectLatency *prometheus.GaugeVec
 	DialerSelectIndex  *prometheus.GaugeVec
-	DialLatency        *prometheus.HistogramVec
 	ErrorCount         *prometheus.CounterVec
 	TrafficBytes       *prometheus.CounterVec
 	VmRssKb            prometheus.Gauge
@@ -70,14 +69,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 		},
 		labels,
 	)
-	DialLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "dae_dial_latency",
-			Help:    "Dial latency in seconds",
-			Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // 1ms ~ ~16s
-		},
-		labels,
-	)
 	ErrorCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dae_error_count",
@@ -123,7 +114,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 	registry.MustRegister(CheckMovingLatency)
 	registry.MustRegister(CheckSelectLatency)
 	registry.MustRegister(DialerSelectIndex)
-	registry.MustRegister(DialLatency)
 	registry.MustRegister(ErrorCount)
 	registry.MustRegister(TrafficBytes)
 	registry.MustRegister(VmRssKb)
