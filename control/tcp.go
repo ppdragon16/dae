@@ -154,7 +154,6 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	LogDial(src, dst, sniffedDomain, dialOption, networkType, &routingResult)
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
-	start := time.Now()
 	rConn, err := dialOption.Dialer.DialContext(ctx, "tcp", dialOption.DialTarget)
 	if err != nil {
 		// TODO: UDP 是不是也有Direct Outbound出问题的情况?
@@ -185,8 +184,6 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		return nil
 	}
 
-	elapsed := time.Since(start).Seconds()
-	common.DialLatency.With(labels).Observe(elapsed)
 	activeConnectionsCounter := common.ActiveConnections.With(labels)
 	activeConnectionsCounter.Inc()
 	defer activeConnectionsCounter.Dec()
