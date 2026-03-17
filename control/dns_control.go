@@ -27,7 +27,6 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -213,7 +212,7 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 				err = c.handleDNSRequest(dnsMessage2, req, queryInfo)
 				errCh <- err
 			}()
-			err = oops.Join(c.handleDNSRequest(dnsMessage, req, queryInfo), <-errCh)
+			err = common.Join(c.handleDNSRequest(dnsMessage, req, queryInfo), <-errCh)
 			if err != nil {
 				break
 			}
@@ -227,11 +226,7 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	if err != nil {
 		netErr, ok := IsNetError(err)
 		if !ok || !netErr.Temporary() {
-			log.Warningf("%+v", oops.
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
-				Wrapf(err, "failed to make dns request"))
+			log.Warningf("%+v", err)
 		}
 		dnsMessage.Rcode = dnsmessage.RcodeServerFailure
 		dnsMessage.Response = true
@@ -243,7 +238,7 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	defer pool.PutBuffer(buf)
 	data, err := dnsMessage.PackBuffer(buf)
 	if err != nil {
-		log.Errorf("%+v", oops.Wrapf(err, "failed to pack dns message"))
+		log.Errorf("%+v", common.Wrap(err, "failed to pack dns message"))
 		return
 	}
 
@@ -254,7 +249,7 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 		DefaultAnyfromPool.Recycle(req.dst, af)
 	}
 	if err != nil {
-		log.Warningf("%+v", oops.Wrapf(err, "failed to send dns message back"))
+		log.Warningf("failed to send dns message back: %v", err)
 	}
 }
 
@@ -323,7 +318,7 @@ Dial:
 		if err != nil {
 			netErr, ok := IsNetError(err)
 			if !ok || !dnsMessage.Response || (!netErr.Timeout() && dialArgument.Dialer.NeedAliveState()) {
-				err = oops.
+				err = common.
 					In("DialContext").
 					With("Is NetError", ok).
 					With("Is Temporary", ok && netErr.Temporary()).
@@ -366,11 +361,11 @@ Dial:
 				// Accept.
 				break Dial
 			default:
-				return oops.Errorf("unknown upstream: %v", ResponseIndex.String())
+				return common.Errf("unknown upstream: %v", ResponseIndex.String())
 			}
 		}
 		if invokingDepth == MaxDnsLookupDepth {
-			return oops.Errorf("too deep DNS lookup invoking (depth: %v); there may be infinite loop in your DNS response routing", MaxDnsLookupDepth)
+			return common.Errf("too deep DNS lookup invoking (depth: %v); there may be infinite loop in your DNS response routing", MaxDnsLookupDepth)
 		}
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
@@ -607,7 +602,7 @@ func (c *DnsController) singleFlightForwardDNS(
 
 		// TODO: 细分日志
 		if !msg.Response {
-			return nil, oops.Errorf("DNS message response flag is unset")
+			return nil, common.Errf("DNS message response flag is unset")
 		}
 		switch {
 		case len(msg.Question) == 0, // Check healthy resp.
