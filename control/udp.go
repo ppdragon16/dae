@@ -35,7 +35,16 @@ type sniffingResult struct {
 
 func (c *ControlPlane) sniffPkt(
 	key PacketSnifferKey, data []byte, src, dst netip.AddrPort) (result *sniffingResult, err error) {
-	if dst.Port() != 443 {
+	// Check if the destination port is in the configured udp_sniff_ports list.
+	port := dst.Port()
+	shouldSniff := false
+	for _, p := range c.udpSniffPorts {
+		if p == port {
+			shouldSniff = true
+			break
+		}
+	}
+	if !shouldSniff {
 		return &sniffingResult{ignored: true}, nil
 	}
 	var domain string

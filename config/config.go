@@ -41,20 +41,21 @@ type Global struct {
 	EnableLocalTcpFastRedirect bool                   `mapstructure:"enable_local_tcp_fast_redirect" default:"false"`
 	AutoConfigKernelParameter  bool                   `mapstructure:"auto_config_kernel_parameter" default:"false"`
 	// DEPRECATED: not used as of https://github.com/daeuniverse/dae/pull/458
-	AutoConfigFirewallRule bool   `mapstructure:"auto_config_firewall_rule" default:"false"`
-	TlsImplementation      string `mapstructure:"tls_implementation" default:"tls"`
-	UtlsImitate            string `mapstructure:"utls_imitate" default:"chrome_auto"`
-	TlsFragment            bool   `mapstructure:"tls_fragment" default:"false"`
-	TlsFragmentLength      string `mapstructure:"tls_fragment_length" default:"50-100"`
-	TlsFragmentInterval    string `mapstructure:"tls_fragment_interval" default:"10-20"`
-	PprofPort              uint16 `mapstructure:"pprof_port" default:"0"`
-	MetricsPort            uint16 `mapstructure:"metrics_port" default:"0"`
-	CommandPort            uint16 `mapstructure:"command_port" default:"0"`
-	Mptcp                  bool   `mapstructure:"mptcp" default:"false"`
-	FallbackResolver       string `mapstructure:"fallback_resolver" default:"8.8.8.8:53"`
-	BandwidthMaxTx         string `mapstructure:"bandwidth_max_tx" default:"0"`
-	BandwidthMaxRx         string `mapstructure:"bandwidth_max_rx" default:"0"`
-	NoConnectivityTrySniff bool   `mapstructure:"no_connectivity_try_sniff" default:"true"`
+	AutoConfigFirewallRule bool     `mapstructure:"auto_config_firewall_rule" default:"false"`
+	TlsImplementation      string   `mapstructure:"tls_implementation" default:"tls"`
+	UtlsImitate            string   `mapstructure:"utls_imitate" default:"chrome_auto"`
+	TlsFragment            bool     `mapstructure:"tls_fragment" default:"false"`
+	TlsFragmentLength      string   `mapstructure:"tls_fragment_length" default:"50-100"`
+	TlsFragmentInterval    string   `mapstructure:"tls_fragment_interval" default:"10-20"`
+	PprofPort              uint16   `mapstructure:"pprof_port" default:"0"`
+	MetricsPort            uint16   `mapstructure:"metrics_port" default:"0"`
+	CommandPort            uint16   `mapstructure:"command_port" default:"0"`
+	Mptcp                  bool     `mapstructure:"mptcp" default:"false"`
+	FallbackResolver       string   `mapstructure:"fallback_resolver" default:"8.8.8.8:53"`
+	BandwidthMaxTx         string   `mapstructure:"bandwidth_max_tx" default:"0"`
+	BandwidthMaxRx         string   `mapstructure:"bandwidth_max_rx" default:"0"`
+	NoConnectivityTrySniff bool     `mapstructure:"no_connectivity_try_sniff" default:"true"`
+	UdpSniffPorts          []string `mapstructure:"udp_sniff_ports" default:"443"`
 	// TODO: skip?
 	NoConnectivityBehavior string        `mapstructure:"no_connectivity_behavior" default:"block"`
 	UDPHopInterval         time.Duration `mapstructure:"udphop_interval" default:"30s"`
@@ -129,10 +130,10 @@ type DnsRouting struct {
 }
 type KeyableString string
 type DnsStaticEntry struct {
-	A   []string `mapstructure:"a"`
+	A    []string `mapstructure:"a"`
 	AAAA []string `mapstructure:"aaaa"`
-	TXT []string `mapstructure:"txt"`
-	TTL uint32 `mapstructure:"ttl"`
+	TXT  []string `mapstructure:"txt"`
+	TTL  uint32   `mapstructure:"ttl"`
 }
 
 type Dns struct {
