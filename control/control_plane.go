@@ -91,6 +91,7 @@ type ControlPlane struct {
 	rerouteMode        consts.RerouteMode
 	sniffingTimeout    time.Duration
 	sniffVerifyMode    consts.SniffVerifyMode
+	udpSniffPorts      []uint16
 	tproxyPortProtect  bool
 	soMarkFromDae      uint32
 
@@ -443,6 +444,7 @@ func NewControlPlane(
 		rerouteMode:            global.RerouteMode,
 		sniffVerifyMode:        global.SniffVerifyMode,
 		sniffingTimeout:        sniffingTimeout,
+		udpSniffPorts:          convertUdpSniffPorts(global.UdpSniffPorts),
 		tproxyPortProtect:      global.TproxyPortProtect,
 		soMarkFromDae:          global.SoMarkFromDae,
 		trafficLogger:          trafficLogger,
@@ -820,6 +822,22 @@ func ParseFixedDomainTtl(ks []config.KeyableString) (map[string]int, error) {
 		m[key] = int(ttl)
 	}
 	return m, nil
+}
+
+func convertUdpSniffPorts(ports []string) []uint16 {
+	result := make([]uint16, 0, len(ports))
+	for _, p := range ports {
+		if p == "" {
+			continue
+		}
+		n, err := strconv.ParseUint(p, 10, 16)
+		if err != nil {
+			log.Warnf("invalid udp_sniff_ports value %q: %v", p, err)
+			continue
+		}
+		result = append(result, uint16(n))
+	}
+	return result
 }
 
 func ParseGroupOverrideOption(group config.Group, global config.Global) (*dialer.GlobalOption, error) {
