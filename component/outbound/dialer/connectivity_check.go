@@ -27,7 +27,6 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -48,7 +47,7 @@ func parseIp46FromList(ip []string) (ip46 netutils.Ip46, err error) {
 	for _, ip := range ip {
 		addr, err := netip.ParseAddr(ip)
 		if err != nil {
-			return ip46, oops.Errorf("invalid ip address: %w", err)
+			return ip46, common.Wrap(err, "invalid ip address: %w", err)
 		}
 		if addr.Is4() || addr.Is4In6() {
 			ip46.Ip4 = addr
@@ -73,7 +72,7 @@ func ParseTcpCheckOption(rawURL []string, method string) (opt *TcpCheckOption, e
 		method = http.MethodGet
 	}
 	if len(rawURL) == 0 {
-		return nil, oops.Errorf("ParseTcpCheckOption: bad format: empty")
+		return nil, common.Errf("ParseTcpCheckOption: bad format: empty")
 	}
 	u, err := url.Parse(rawURL[0])
 	if err != nil {
@@ -83,15 +82,15 @@ func ParseTcpCheckOption(rawURL []string, method string) (opt *TcpCheckOption, e
 	if len(rawURL) > 1 {
 		ip46, err = parseIp46FromList(rawURL[1:])
 		if err != nil {
-			return nil, oops.Wrapf(err, "ParseTcpCheckOption: failed to parse ip from list")
+			return nil, common.Wrap(err, "ParseTcpCheckOption: failed to parse ip from list")
 		}
 	} else {
 		ip46, err = netutils.ParseOrResolveIp46(u.Hostname())
 		if err != nil {
-			return nil, oops.Wrapf(err, "ParseTcpCheckOption: failed to resolve ip for %v", u.Hostname())
+			return nil, common.Wrap(err, "ParseTcpCheckOption: failed to resolve ip for %v", u.Hostname())
 		}
 		if !ip46.IsValid() {
-			return nil, oops.Errorf("ResolveIp46: no valid ip for %v", u.Hostname())
+			return nil, common.Errf("ResolveIp46: no valid ip for %v", u.Hostname())
 		}
 	}
 	return &TcpCheckOption{
@@ -109,30 +108,30 @@ type CheckDnsOption struct {
 
 func ParseCheckDnsOption(dnsHostPort []string) (opt *CheckDnsOption, err error) {
 	if len(dnsHostPort) == 0 {
-		return nil, oops.Errorf("ParseCheckDnsOption: bad format: empty")
+		return nil, common.Errf("ParseCheckDnsOption: bad format: empty")
 	}
 
 	host, _port, err := net.SplitHostPort(dnsHostPort[0])
 	if err != nil {
-		return nil, oops.Wrapf(err, "ParseCheckDnsOption: failed to split host and port")
+		return nil, common.Wrap(err, "ParseCheckDnsOption: failed to split host and port")
 	}
 	port, err := strconv.ParseUint(_port, 10, 16)
 	if err != nil {
-		return nil, oops.Errorf("bad port: %v", err)
+		return nil, common.Errf("bad port: %v", err)
 	}
 	var ip46 netutils.Ip46
 	if len(dnsHostPort) > 1 {
 		ip46, err = parseIp46FromList(dnsHostPort[1:])
 		if err != nil {
-			return nil, oops.Wrapf(err, "ParseCheckDnsOption: failed to parse ip from list")
+			return nil, common.Wrap(err, "ParseCheckDnsOption: failed to parse ip from list")
 		}
 	} else {
 		ip46, err = netutils.ParseOrResolveIp46(host)
 		if err != nil {
-			return nil, oops.Wrapf(err, "ParseCheckDnsOption: failed to resolve ip for %v", host)
+			return nil, common.Wrap(err, "ParseCheckDnsOption: failed to resolve ip for %v", host)
 		}
 		if !ip46.IsValid() {
-			return nil, oops.Errorf("ResolveIp46: no valid ip for %v", host)
+			return nil, common.Errf("ResolveIp46: no valid ip for %v", host)
 		}
 	}
 	return &CheckDnsOption{
@@ -365,7 +364,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	if err := d.Connect(); err != nil {
 		log.WithFields(log.Fields{
 			"node": d.Name,
-		}).Infoln(oops.Wrapf(err, "Failed to connect"))
+		}).Infof("Failed to connect: %v", err)
 		return nil
 	}
 	for _, opt := range checkOpts {
@@ -383,12 +382,12 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 					log.WithFields(log.Fields{
 						"network": opt.networkType.String(),
 						"node":    d.Name,
-					}).Infof("%+v\n", oops.Wrapf(err[i], "Inital Connectivity Check Failed"))
+					}).Infof("Inital Connectivity Check Failed: %v\n", err[i])
 				} else {
 					log.WithFields(log.Fields{
 						"network": opt.networkType.String(),
 						"node":    d.Name,
-					}).Infoln(oops.Wrapf(err[i], "Inital Connectivity Check Failed"))
+					}).Infof("Inital Connectivity Check Failed: %v", err[i])
 				}
 			}
 		})
@@ -479,9 +478,9 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 				fields["network"] = networkType.String()
 			}
 			if oldAlive {
-				log.WithFields(fields).Warnln(oops.Wrapf(err, "Connectivity Check Failed"))
+				log.WithFields(fields).Warnf("Connectivity Check Failed: %v", err)
 			} else {
-				log.WithFields(fields).Infoln(oops.Wrapf(err, "Connectivity Check Failed"))
+				log.WithFields(fields).Infof("Connectivity Check Failed: %v", err)
 			}
 		}
 	}
@@ -496,12 +495,12 @@ func (d *Dialer) Check(opts *CheckOption) (ok bool, latency time.Duration, err e
 		latency = time.Since(start)
 	} else {
 		if err == nil {
-			err = oops.Errorf("check func not working")
+			err = common.Errf("check func not working")
 		} else if strings.HasSuffix(err.Error(), "network is unreachable") { // Append timeout if there is any error or unexpected status code.
-			err = oops.Errorf("network is unreachable")
+			err = common.Errf("network is unreachable")
 		} else if strings.HasSuffix(err.Error(), "no suitable address found") ||
 			strings.HasSuffix(err.Error(), "non-IPv4 address") {
-			err = oops.Errorf("IPv%v is not supported", opts.networkType.IpVersion)
+			err = common.Errf("IPv%v is not supported", opts.networkType.IpVersion)
 		}
 	}
 	return

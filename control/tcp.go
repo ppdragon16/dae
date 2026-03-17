@@ -24,7 +24,6 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -87,7 +86,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	istcpdns := IsPrivateIP(dstTcpAddr.IP) && dstTcpAddr.Port == 53
 	var routingResult bpfRoutingResult
 	if err := c.core.RetrieveTCPRoutingResult(src, dst, &routingResult); err != nil {
-		return oops.Wrapf(err, "failed to retrieve target info %v", dst.String())
+		return common.Wrap(err, "failed to retrieve target info %v", dst.String())
 	}
 
 	src = common.ConvergeAddrPort(src)
@@ -162,7 +161,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		// TCP: Connection Reset / Connection Refused
 		netErr, ok := IsNetError(err)
 		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
-			err = oops.
+			err = common.
 				In("DialContext").
 				With("Is NetError", ok).
 				With("Is Temporary", ok && netErr.Temporary()).
@@ -203,7 +202,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	if err := RelayTCP(lConnRelay, rLogConn); err != nil {
 		netErr, ok := IsNetError(err)
 		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
-			err = oops.
+			err = common.
 				In("RelayTCP").
 				With("Is NetError", ok).
 				With("Is Temporary", ok && netErr.Temporary()).
@@ -305,14 +304,14 @@ func RelayTCP(lConn, rConn net.Conn) error {
 				strings.Contains(err.Error(), "read:"):                                 // lConn Read
 				err = nil
 			default:
-				err = oops.In("lConn -> rConn Relay").Wrap(err)
+				err = common.In("lConn -> rConn Relay").Wrap(err)
 			}
 		} else { // r -> l
 			switch {
 			case strings.Contains(err.Error(), "write:"): // lConn Write
 				err = nil
 			default:
-				err = oops.In("rConn -> lConn Relay").Wrap(err)
+				err = common.In("rConn -> lConn Relay").Wrap(err)
 			}
 		}
 	}

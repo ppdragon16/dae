@@ -15,7 +15,6 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/sniffing"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -47,16 +46,13 @@ func (c *ControlPlane) sniffPkt(
 	sniffer.AppendData(data)
 	domain, err = sniffer.SniffUdp()
 	if err != nil && !sniffing.IsSniffingError(err) {
-		return nil, oops.
+		return nil, common.In("sniffUDP").
 			With("from", src).
 			With("to", dst).
-			Wrapf(err, "sniffUDP non sniffing error")
+			Wrapf(err, "non sniffing error")
 	}
 	if err != nil && log.IsLevelEnabled(log.TraceLevel) {
-		log.Tracef("%+v", oops.
-			With("from", src).
-			With("to", dst).
-			Wrapf(err, "sniffUDP"))
+		log.Tracef("sniffUDP: %v (from=%v to=%v)", err, src, dst)
 	}
 	if !sniffer.NeedMore() {
 		result = &sniffingResult{
@@ -83,7 +79,7 @@ func (c *ControlPlane) createUdpEndpoint(
 	// Use an empty AddrPort for dst
 	var routingResult bpfRoutingResult
 	if err := c.core.RetrieveUDPRoutingResult(src, &routingResult); err != nil {
-		return nil, oops.Wrapf(err, "No AddrPort presented")
+		return nil, common.Wrap(err, "No AddrPort presented")
 	}
 
 	// Route
@@ -110,7 +106,7 @@ func (c *ControlPlane) createUdpEndpoint(
 	if err != nil {
 		netErr, ok := IsNetError(err)
 		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
-			err = oops.
+			err = common.
 				In("ListenPacket").
 				With("Is NetError", ok).
 				With("Is Temporary", ok && netErr.Temporary()).
@@ -161,7 +157,7 @@ func (c *ControlPlane) createUdpEndpoint(
 		if err != nil {
 			netErr, ok := IsNetError(err)
 			if !ok || (!netErr.Timeout() && ue.dialer.NeedAliveState()) {
-				err = oops.
+				err = common.
 					In("UdpEndpoint r -> l relay").
 					With("Is NetError", ok).
 					With("Is Temporary", ok && netErr.Temporary()).
@@ -181,7 +177,7 @@ func (c *ControlPlane) createUdpEndpoint(
 	if !sniffingResult.ignored {
 		for _, d := range sniffingResult.pending {
 			if _, err := ue.WriteTo(d, dst); err != nil {
-				log.Warnf("%+v", oops.Wrapf(err, "write pending data"))
+				log.Warnf("write pending data: %v", err)
 			}
 		}
 		DefaultPacketSnifferSessionMgr.Remove(sniffkey)
@@ -222,7 +218,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 		DefaultUdpEndpointPool.Remove(ueKey)
 		netErr, ok := IsNetError(err)
 		if !ok || (!netErr.Timeout() && ue.dialer.NeedAliveState()) {
-			err = oops.
+			err = common.
 				In("UdpEndpoint l -> r relay").
 				With("Is NetError", ok).
 				With("Is Temporary", ok && netErr.Temporary()).
