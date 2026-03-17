@@ -99,7 +99,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	src := lConn.RemoteAddr().(*net.TCPAddr).AddrPort()
 	dstTcpAddr := lConn.LocalAddr().(*net.TCPAddr)
 	dst := dstTcpAddr.AddrPort()
-	istcpdns := IsPrivateIP(dstTcpAddr.IP) && dstTcpAddr.Port == 53
+	istcpdns := dstTcpAddr.Port == 53
 	var routingResult bpfRoutingResult
 	if err := c.core.RetrieveTCPRoutingResult(src, dst, &routingResult); err != nil {
 		return common.Wrap(err, "failed to retrieve target info %v", dst.String())
