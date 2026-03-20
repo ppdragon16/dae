@@ -7,7 +7,6 @@ package control
 
 import (
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
@@ -15,7 +14,7 @@ import (
 )
 
 const (
-	extendCacheDur = time.Duration(6) * time.Hour
+	extendCacheDur = 1 * time.Hour
 	minClientTtl   = 5
 )
 
@@ -23,7 +22,6 @@ type DnsCache struct {
 	Answers   []dnsmessage.RR
 	FetchedAt time.Time
 	IsNew     bool
-	timer     *time.Timer
 }
 
 // Parse ips from DNS resp answers.
@@ -88,24 +86,28 @@ func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
 }
 
 type commonDnsCache[K comparable] struct {
-	cache sync.Map
+	cache *common.CacheWithTTL[K, *DnsCache]
 }
 
 func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
-	return &commonDnsCache[K]{}
+	return &commonDnsCache[K]{
+		cache: common.NewCacheWithTTL[K, *DnsCache](extendCacheDur, func(key K, value *DnsCache) {
+			common.DnsCacheSize.Dec()
+		}),
+	}
 }
 
 func (c *commonDnsCache[K]) Get(cacheKey K) *DnsCache {
-	val, ok := c.cache.Load(cacheKey)
+	cache, ok := c.cache.Get(cacheKey)
 	if !ok {
 		return nil
 	}
-	cache := val.(*DnsCache)
 	if cache.IsNew {
 		// Keep DnsCache instance as immutable, so make a copy and modify.
 		copied := *cache
 		copied.IsNew = false
-		c.cache.CompareAndSwap(cacheKey, cache, &copied)
+		c.cache.Save(cacheKey, &copied)
+		common.DnsCacheSize.Inc()
 	}
 	return cache
 }
@@ -136,19 +138,13 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedT
 		FetchedAt: time.Now(),
 		IsNew:     true,
 	}
-	newCache.timer =
-		time.AfterFunc(time.Duration(maxTTL)*time.Second+extendCacheDur, func() {
-			if _, ok := c.cache.LoadAndDelete(key); ok {
-				common.DnsCacheSize.Dec()
-			}
-		})
 
-	oldVal, loaded := c.cache.Swap(key, newCache)
-	if loaded {
-		oldVal.(*DnsCache).timer.Stop()
-	} else {
-		common.DnsCacheSize.Inc()
-	}
-
+	c.cache.Save(key, newCache)
+	common.DnsCacheSize.Inc()
 	return newCache
+}
+
+func (c *commonDnsCache[K]) Close() error {
+	c.cache.Close()
+	return nil
 }

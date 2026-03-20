@@ -72,11 +72,12 @@ type DnsController struct {
 	lookupCacheTimeout func(ip netip.Addr, domainBitmap *[32]uint32) error
 	bestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error
 
-	fixedDomainTtl    map[string]int
-	minSniffingTtl    time.Duration
-	enableCache       bool
-	dnsCache          *commonDnsCache[dnsCacheKey]
-	dnsForwarderCache sync.Map // map[dnsForwarderKey]DnsForwarder
+	fixedDomainTtl     map[string]int
+	minSniffingTtl     time.Duration
+	enableCache        bool
+	dnsCache           *commonDnsCache[dnsCacheKey]
+	dnsForwarderCache  sync.Map // map[dnsForwarderKey]DnsForwarder
+	requestSelectCache *common.CacheWithTTL[queryInfo, consts.DnsRequestOutboundIndex]
 	// mu protects deadlineTimers
 	mu              sync.Mutex
 	deadlineTimers  map[string]map[netip.Addr]*time.Timer
@@ -114,13 +115,14 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		lookupCacheTimeout: option.LookupCacheTimeout,
 		bestDialerChooser:  option.BestDialerChooser,
 
-		fixedDomainTtl:    option.FixedDomainTtl,
-		minSniffingTtl:    option.MinSniffingTtl,
-		enableCache:       option.EnableCache,
-		sniffVerifyMode:   option.SniffVerifyMode,
-		dnsForwarderCache: sync.Map{},
-		dnsCache:          newCommonDnsCache[dnsCacheKey](),
-		deadlineTimers:    make(map[string]map[netip.Addr]*time.Timer),
+		fixedDomainTtl:     option.FixedDomainTtl,
+		minSniffingTtl:     option.MinSniffingTtl,
+		enableCache:        option.EnableCache,
+		sniffVerifyMode:    option.SniffVerifyMode,
+		dnsForwarderCache:  sync.Map{},
+		dnsCache:           newCommonDnsCache[dnsCacheKey](),
+		requestSelectCache: common.NewCacheWithTTL[queryInfo, consts.DnsRequestOutboundIndex](6*time.Hour, nil),
+		deadlineTimers:     make(map[string]map[netip.Addr]*time.Timer),
 	}, nil
 }
 
@@ -261,10 +263,15 @@ func (c *DnsController) handleDNSRequest(
 	req *dnsRequest,
 	queryInfo queryInfo,
 ) error {
+	var err error
 	// Route Requset
-	RequestIndex, err := c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
-	if err != nil {
-		return err
+	RequestIndex, queryInfo, ok := c.requestSelectCache.GetWithKey(queryInfo)
+	if !ok {
+		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
+		if err != nil {
+			return err
+		}
+		c.requestSelectCache.Save(queryInfo, RequestIndex)
 	}
 
 	if RequestIndex == consts.DnsRequestOutboundIndex_Reject {
@@ -654,6 +661,9 @@ func (c *DnsController) UpdateStaticEntry(name string, entry *config.DnsStaticEn
 func (c *DnsController) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.requestSelectCache.Close()
+	c.dnsCache.Close()
 
 	// Clean up all deadline timers to prevent goroutine leaks
 	for _, ipTimers := range c.deadlineTimers {
