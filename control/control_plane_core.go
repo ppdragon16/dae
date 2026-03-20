@@ -112,6 +112,11 @@ func (c *controlPlaneCore) Close() (err error) {
 			}
 		}
 	}
+	// Clean up dae netns (veth pair and network namespace) after deferFuncs.
+	daens := GetDaeNetns()
+	if daens != nil {
+		daens.Close()
+	}
 	c.close()
 	return err
 }
@@ -167,6 +172,10 @@ func (c *controlPlaneCore) linkHdrLen(ifname string) (uint32, error) {
 }
 
 func (c *controlPlaneCore) addQdisc(ifname string) error {
+	return c.addQdiscInDaeNS(ifname, nil)
+}
+
+func (c *controlPlaneCore) addQdiscInDaeNS(ifname string, daens *DaeNetns) error {
 	link, err := netlink.LinkByName(ifname)
 	if err != nil {
 		return err
@@ -179,8 +188,24 @@ func (c *controlPlaneCore) addQdisc(ifname string) error {
 		},
 		QdiscType: "clsact",
 	}
-	if err := netlink.QdiscAdd(qdisc); err != nil {
-		return oops.Errorf("cannot add clsact qdisc: %w", err)
+	// Use QdiscReplace to atomically replace or create the qdisc.
+	if err := netlink.QdiscReplace(qdisc); err != nil {
+		log.Warnf("QdiscReplace failed, trying delete and re-add %s's Qdisc: %v", ifname, err)
+		_ = netlink.QdiscDel(qdisc)
+		if err = netlink.QdiscAdd(qdisc); err != nil {
+			return oops.Errorf("cannot add clsact qdisc: %w", err)
+		}
+	}
+	if daens == nil {
+		c.deferFuncs = append(c.deferFuncs, func() error {
+			return netlink.QdiscDel(qdisc)
+		})
+	} else {
+		c.deferFuncs = append(c.deferFuncs, func() error {
+			return daens.With(func() error {
+				return netlink.QdiscDel(qdisc)
+			})
+		})
 	}
 	return nil
 }
@@ -199,8 +224,8 @@ func (c *controlPlaneCore) delQdisc(ifname string) error {
 		QdiscType: "clsact",
 	}
 	if err := netlink.QdiscDel(qdisc); err != nil {
-		if !os.IsExist(err) {
-			return oops.Errorf("cannot add clsact qdisc: %w", err)
+		if !os.IsNotExist(err) && !os.IsExist(err) {
+			return oops.Errorf("cannot delete clsact qdisc: %w", err)
 		}
 	}
 	return nil
@@ -575,7 +600,7 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 	daens.With(func() error {
 		err := netlink.LinkSetTxQLen(daens.Dae0Peer(), 1000)
 		if err == nil {
-			err = c.addQdisc(daens.Dae0Peer().Attrs().Name)
+			err = c.addQdiscInDaeNS(daens.Dae0Peer().Attrs().Name, daens)
 		}
 		return err
 	})
@@ -600,7 +625,7 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 		filterIngressFlipped := deepcopy.Copy(filterDae0peerIngress).(*netlink.BpfFilter)
 		filterIngressFlipped.FilterAttrs.Handle ^= 1
 		daens.With(func() error {
-			return netlink.FilterDel(filterDae0peerIngress)
+			return netlink.FilterDel(filterIngressFlipped)
 		})
 	}
 	if err = daens.With(func() error {
