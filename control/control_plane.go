@@ -56,12 +56,7 @@ var (
 
 type dnsRouteCacheKey struct {
 	upstream *dns.Upstream
-	srcIP    [16]byte
-	mac      [6]uint8
-	pname    [16]uint8
-	ifindex  uint32
-	dscp     uint8
-	_        [1]uint8 // padding.
+	src      netip.Addr
 }
 
 type ControlPlane struct {
@@ -99,8 +94,8 @@ type ControlPlane struct {
 	PrometheusRegistry *prometheus.Registry
 
 	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
-	dnsRouteCache         *CacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex]
-	dnsRoutingResultCache *CacheWithTTL[netip.Addr, *bpfRoutingResult]
+	dnsRouteCache         *common.CacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex]
+	dnsRoutingResultCache *common.CacheWithTTL[netip.Addr, *bpfRoutingResult]
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -450,8 +445,8 @@ func NewControlPlane(
 		trafficLogger:          trafficLogger,
 		PrometheusRegistry:     prometheusRegistry,
 		outboundRedirects:      outboundRedirects,
-		dnsRouteCache:          NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
-		dnsRoutingResultCache:  NewCacheWithTTL[netip.Addr, *bpfRoutingResult](1*time.Hour, nil),
+		dnsRouteCache:          common.NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
+		dnsRoutingResultCache:  common.NewCacheWithTTL[netip.Addr, *bpfRoutingResult](1*time.Hour, nil),
 	}
 	defer func() {
 		if err != nil {
@@ -1261,14 +1256,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	var routeKey *dnsRouteCacheKey
 	if !dnsUpstream.IsAsIs {
 		// AsIs's upstream instance is dynamic, so it doesn't support route cache.
-		routeKey = &dnsRouteCacheKey{
-			upstream: dnsUpstream,
-			srcIP:    req.src.Addr().As16(),
-			mac:      req.routingResult.Mac,
-			pname:    req.routingResult.Pname,
-			ifindex:  req.routingResult.Ifindex,
-			dscp:     req.routingResult.Dscp,
-		}
+		routeKey = &dnsRouteCacheKey{upstream: dnsUpstream, src: req.src.Addr()}
 	}
 	// Get the min latency path.
 	var networkType *common.NetworkType
@@ -1288,11 +1276,11 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			return oops.Errorf("unexpected ipversion: %v", ver)
 		}
 		var outboundIndex consts.OutboundIndex
-		hasCache := false
+		var ok bool
 		if routeKey != nil {
-			outboundIndex, hasCache = c.dnsRouteCache.Get(*routeKey)
+			outboundIndex, ok = c.dnsRouteCache.Get(*routeKey)
 		}
-		if !hasCache {
+		if !ok {
 			var err error
 			// TODO: Mark
 			outboundIndex, _, _, err = c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
@@ -1361,6 +1349,8 @@ func (c *ControlPlane) AbortConnections() (err error) {
 	return errors.Join(errs...)
 }
 func (c *ControlPlane) Close() (err error) {
+	c.dnsRouteCache.Close()
+	c.dnsRoutingResultCache.Close()
 	// Invoke defer funcs in reverse order.
 	for i := len(c.deferFuncs) - 1; i >= 0; i-- {
 		if e := c.deferFuncs[i](); e != nil {
