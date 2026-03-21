@@ -184,20 +184,22 @@ func (p *AnyfromPool) Start(ctx context.Context) {
 		KeepAlive: 0,
 	}
 	GetDaeNetns().With(func() error {
-		for req := range p.afReqCh {
+		for {
 			select {
 			case <-ctx.Done():
 				return nil
-			default:
-			}
-			pc, err := lc.ListenPacket(ctx, "udp", req.lAddr)
-			if err != nil {
-				req.afResCh <- &afResponse{conn: nil, err: err}
-			} else {
-				req.afResCh <- &afResponse{conn: pc.(*net.UDPConn), err: nil}
+			case req, ok := <-p.afReqCh:
+				if !ok {
+					return nil
+				}
+				pc, err := lc.ListenPacket(ctx, "udp", req.lAddr)
+				if err != nil {
+					req.afResCh <- &afResponse{conn: nil, err: err}
+				} else {
+					req.afResCh <- &afResponse{conn: pc.(*net.UDPConn), err: nil}
+				}
 			}
 		}
-		return nil
 	})
 }
 
