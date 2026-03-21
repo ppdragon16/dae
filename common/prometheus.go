@@ -15,7 +15,6 @@ var (
 	DialerSelectIndex  *prometheus.GaugeVec
 	ErrorCount         *prometheus.CounterVec
 	TrafficBytes       *prometheus.CounterVec
-	VmRssKb            prometheus.Gauge
 	StackInuse         prometheus.Gauge
 	HeapInuse          prometheus.Gauge
 	HeapIdle           prometheus.Gauge
@@ -81,11 +80,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 		},
 		labels,
 	)
-	VmRssKb = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "dae_vm_rss_kb",
-		},
-	)
 	StackInuse = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dae_stack_inuse_kb",
@@ -116,7 +110,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 	registry.MustRegister(DialerSelectIndex)
 	registry.MustRegister(ErrorCount)
 	registry.MustRegister(TrafficBytes)
-	registry.MustRegister(VmRssKb)
 	registry.MustRegister(StackInuse)
 	registry.MustRegister(HeapInuse)
 	registry.MustRegister(HeapIdle)
