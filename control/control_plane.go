@@ -1007,38 +1007,6 @@ func (l *Listener) Close() error {
 	return err
 }
 
-func getVmRSS() (int64, error) {
-	file, err := os.Open("/proc/self/status")
-	if err != nil {
-		return 0, oops.Wrapf(err, "could not open /proc/self/status")
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		// The line looks like: "VmRSS:	   12345 kB"
-		if strings.HasPrefix(line, "VmRSS:") {
-			// Split the line by whitespace. Result: ["VmRSS:", "12345", "kB"]
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				return 0, oops.Errorf("malformed VmRSS line: %s", line)
-			}
-			rss, err := strconv.ParseInt(fields[1], 10, 64)
-			if err != nil {
-				return 0, oops.Errorf("failed to parse VmRSS value '%s': %w", fields[1], err)
-			}
-			return rss, nil
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return 0, oops.Wrapf(err, "error while scanning /proc/self/status")
-	}
-
-	return 0, oops.Errorf("VmRSS not found in /proc/self/status")
-}
-
 func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err error) {
 	sentReady := false
 	defer func() {
@@ -1075,18 +1043,13 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 
 	sentReady = true
 	readyChan <- true
-	tickerVmRSS := time.NewTicker(10 * time.Second)
+	// Reports memory usage every 10 seconds.
+	tickerMem := time.NewTicker(10 * time.Second)
 	go func() {
-		// Reports memory usage every 10 seconds.
-		defer tickerVmRSS.Stop()
+		defer tickerMem.Stop()
 		for {
 			select {
-			case <-tickerVmRSS.C:
-				rss, err := getVmRSS()
-				common.VmRssKb.Set(float64(rss))
-				if err != nil {
-					log.Warnf("getVmRSS error: %+v", err)
-				}
+			case <-tickerMem.C:
 				var ms runtime.MemStats
 				runtime.ReadMemStats(&ms)
 				common.StackInuse.Set(float64(ms.StackInuse) / 1024)
