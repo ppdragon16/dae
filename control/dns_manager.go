@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
@@ -104,20 +105,20 @@ func (m *DnsManager) read(buf []byte) (data []byte, err error) {
 		msgLenBuf := buf[:2]
 		// Read two byte length.
 		if _, err = io.ReadFull(m.conn, msgLenBuf); err != nil {
-			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload length"))
+			return data, AsDebug(common.Wrap(err, "failed to read tcp DNS resp payload length"))
 		}
 		msgLen := int(binary.BigEndian.Uint16(msgLenBuf))
 		if msgLen > len(buf) {
-			return data, AsWarn(oops.Wrapf(err, "tcp dns msg len too large: %d > %d", msgLen, len(buf)))
+			return data, AsWarn(common.Wrap(err, "tcp dns msg len too large: %d > %d", msgLen, len(buf)))
 		}
 		data = buf[:msgLen]
 		if _, err = io.ReadFull(m.conn, data); err != nil {
-			return data, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload"))
+			return data, AsDebug(common.Wrap(err, "failed to read tcp DNS resp payload"))
 		}
 	} else {
 		var n int
 		if n, err = m.conn.Read(buf); err != nil {
-			return data, AsDebug(oops.Wrapf(err, "failed to read udp DNS resp payload"))
+			return data, AsDebug(common.Wrap(err, "failed to read udp DNS resp payload"))
 		}
 		data = buf[:n]
 	}

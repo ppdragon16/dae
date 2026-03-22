@@ -6,7 +6,6 @@
 package control
 
 import (
-	"net/netip"
 	"sync"
 	"time"
 
@@ -27,21 +26,20 @@ type PacketSniffer struct {
 // PacketSnifferPool is a full-cone udp conn pool
 type PacketSnifferPool struct {
 	pool             sync.Map
-	snifferKeyLocker common.KeyLocker[PacketSnifferKey]
+	snifferKeyLocker *common.ShardedKeyLocker[PacketSnifferKey]
 }
 type PacketSnifferOptions struct {
 	Ttl time.Duration
 }
 
-type PacketSnifferKey struct {
-	LAddr netip.AddrPort
-	RAddr netip.AddrPort
-}
+type PacketSnifferKey = AddrPortPair
 
 var DefaultPacketSnifferSessionMgr = NewPacketSnifferPool()
 
 func NewPacketSnifferPool() *PacketSnifferPool {
-	return &PacketSnifferPool{}
+	return &PacketSnifferPool{
+		snifferKeyLocker: common.NewShardedKeyLocker(1024, AddrPortPairShard),
+	}
 }
 
 func (p *PacketSnifferPool) Remove(key PacketSnifferKey) (err error) {
@@ -65,8 +63,8 @@ func (p *PacketSnifferPool) Get(key PacketSnifferKey) *PacketSniffer {
 func (p *PacketSnifferPool) GetOrCreate(key PacketSnifferKey, createOption *PacketSnifferOptions) (qs *PacketSniffer, isNew bool) {
 	_qs, ok := p.pool.Load(key)
 	if !ok {
-		l, _ := p.snifferKeyLocker.Lock(key)
-		defer p.snifferKeyLocker.Unlock(key, l)
+		l := p.snifferKeyLocker.Lock(key)
+		defer l.Unlock()
 
 		_qs, ok = p.pool.Load(key)
 		if ok {
@@ -86,8 +84,8 @@ func (p *PacketSnifferPool) GetOrCreate(key PacketSnifferKey, createOption *Pack
 			deadlineTimer: nil,
 		}
 		qs.deadlineTimer = time.AfterFunc(createOption.Ttl, func() {
-			l, _ := p.snifferKeyLocker.Lock(key)
-			defer p.snifferKeyLocker.Unlock(key, l)
+			l := p.snifferKeyLocker.Lock(key)
+			defer l.Unlock()
 			if _qs, ok := p.pool.LoadAndDelete(key); ok {
 				if _qs.(*PacketSniffer) == qs {
 					qs.Close()

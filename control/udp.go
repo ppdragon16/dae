@@ -33,10 +33,9 @@ type sniffingResult struct {
 	ignored bool
 }
 
-func (c *ControlPlane) sniffPkt(
-	key PacketSnifferKey, data []byte, src, dst netip.AddrPort) (result *sniffingResult, err error) {
+func (c *ControlPlane) sniffPkt(key PacketSnifferKey, data []byte) (result *sniffingResult, err error) {
 	// Check if the destination port is in the configured udp_sniff_ports list.
-	port := dst.Port()
+	port := key.Dst.Port()
 	shouldSniff := false
 	for _, p := range c.udpSniffPorts {
 		if p == port {
@@ -56,12 +55,12 @@ func (c *ControlPlane) sniffPkt(
 	domain, err = sniffer.SniffUdp()
 	if err != nil && !sniffing.IsSniffingError(err) {
 		return nil, common.In("sniffUDP").
-			With("from", src).
-			With("to", dst).
+			With("from", key.Src).
+			With("to", key.Dst).
 			Wrapf(err, "non sniffing error")
 	}
 	if err != nil && log.IsLevelEnabled(log.TraceLevel) {
-		log.Tracef("sniffUDP: %v (from=%v to=%v)", err, src, dst)
+		log.Tracef("sniffUDP: %v (from=%v to=%v)", err, key.Src, key.Dst)
 	}
 	if !sniffer.NeedMore() {
 		result = &sniffingResult{
@@ -73,18 +72,17 @@ func (c *ControlPlane) sniffPkt(
 	return result, nil
 }
 
-func (c *ControlPlane) createUdpEndpoint(
-	ueKey UdpEndpointKey, data []byte, src, dst netip.AddrPort) (ue *UdpEndpoint, err error) {
+func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue *UdpEndpoint, err error) {
 	networkType := &common.NetworkType{
 		L4Proto:   consts.L4ProtoStr_UDP,
-		IpVersion: consts.IpVersionStrFromAddr(dst.Addr()),
+		IpVersion: consts.IpVersionStrFromAddr(ueKey.Dst.Addr()),
 	}
 	var sniffingResult *sniffingResult
-	sniffkey := PacketSnifferKey{LAddr: src, RAddr: dst}
-	sniffingResult, err = c.sniffPkt(sniffkey, data, src, dst)
+	sniffingResult, err = c.sniffPkt(ueKey, data)
 	if sniffingResult == nil {
 		return nil, err
 	}
+	src := ueKey.Src
 	// Use an empty AddrPort for dst
 	var routingResult bpfRoutingResult
 	if err := c.core.RetrieveUDPRoutingResult(src, &routingResult); err != nil {
@@ -92,7 +90,7 @@ func (c *ControlPlane) createUdpEndpoint(
 	}
 
 	// Route
-	dialOption, err := c.RouteDialOption(src, dst, sniffingResult.domain, networkType, &routingResult)
+	dialOption, err := c.RouteDialOption(src, ueKey.Dst, sniffingResult.domain, networkType, &routingResult)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +109,7 @@ func (c *ControlPlane) createUdpEndpoint(
 	// This fixes a problem that quic connection to google servers.
 	// Reproduce:
 	// docker run --rm --name curl-http3 ymuski/curl-http3 curl --http3 -o /dev/null -v -L https://i.ytimg.com
+	dst := ueKey.Dst
 	udpConn, err := dialOption.Dialer.ListenPacket(ctx, dst.String())
 	if err != nil {
 		netErr, ok := IsNetError(err)
@@ -189,15 +188,15 @@ func (c *ControlPlane) createUdpEndpoint(
 				log.Warnf("write pending data: %v", err)
 			}
 		}
-		DefaultPacketSnifferSessionMgr.Remove(sniffkey)
+		DefaultPacketSnifferSessionMgr.Remove(ueKey)
 	}
 	return ue, nil
 }
 
 func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err error) {
 	ueKey := UdpEndpointKey{Src: src, Dst: dst}
-	l, _ := DefaultUdpEndpointPool.UdpEndpointKeyLocker.Lock(ueKey)
-	defer DefaultUdpEndpointPool.UdpEndpointKeyLocker.Unlock(ueKey, l)
+	l := DefaultUdpEndpointPool.UdpEndpointKeyLocker.Lock(ueKey)
+	defer l.Unlock()
 
 	// Get udp endpoint.
 	ue, ok := DefaultUdpEndpointPool.Get(ueKey)
@@ -215,7 +214,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 		ok = false
 	}
 	if !ok {
-		ue, err = c.createUdpEndpoint(ueKey, data, src, dst)
+		ue, err = c.createUdpEndpoint(ueKey, data)
 		if ue == nil {
 			return err
 		}

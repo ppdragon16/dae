@@ -42,3 +42,24 @@ func (kl *KeyLocker[K]) Unlock(key K, l *locker) {
 	}
 	kl.mu.Unlock()
 }
+
+type ShardedKeyLocker[K comparable] struct {
+	shards   []sync.Mutex
+	mask     uint32
+	hashFunc func(key K, mask uint32) uint32
+}
+
+func NewShardedKeyLocker[K comparable](size uint32, hashFunc func(key K, mask uint32) uint32) *ShardedKeyLocker[K] {
+	return &ShardedKeyLocker[K]{
+		shards:   make([]sync.Mutex, size),
+		mask:     size - 1,
+		hashFunc: hashFunc,
+	}
+}
+
+func (s *ShardedKeyLocker[K]) Lock(key K) *sync.Mutex {
+	idx := s.hashFunc(key, s.mask)
+	mu := &s.shards[idx]
+	mu.Lock()
+	return mu
+}

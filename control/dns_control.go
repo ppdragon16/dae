@@ -132,8 +132,7 @@ func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, answers []dnsmes
 }
 
 type dnsRequest struct {
-	src           netip.AddrPort
-	dst           netip.AddrPort
+	AddrPortPair
 	routingResult *bpfRoutingResult
 	isTcp         bool
 }
@@ -178,7 +177,7 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	if log.IsLevelEnabled(log.TraceLevel) && len(dnsMessage.Question) > 0 {
 		q := dnsMessage.Question[0]
 		log.Tracef("Received UDP(DNS) %v <-> %v: %v %v",
-			RefineSourceToShow(req.src, req.dst.Addr()), req.dst.String(), strings.ToLower(q.Name), QtypeToString(q.Qtype),
+			RefineSourceToShow(req.Src, req.Dst.Addr()), req.Dst.String(), strings.ToLower(q.Name), QtypeToString(q.Qtype),
 		)
 	}
 
@@ -245,10 +244,10 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	}
 
 	// Send back the dns response.
-	af, err := DefaultAnyfromPool.Obtain(req.dst, AnyfromTimeoutDefault)
+	af, err := DefaultAnyfromPool.Obtain(req.Dst, AnyfromTimeoutDefault)
 	if err == nil {
-		_, err = af.WriteToUDPAddrPort(data, req.src)
-		DefaultAnyfromPool.Recycle(req.dst, af)
+		_, err = af.WriteToUDPAddrPort(data, req.Src)
+		DefaultAnyfromPool.Recycle(req.Dst, af)
 	}
 	if err != nil {
 		log.Warningf("failed to send dns message back: %v", err)
@@ -284,9 +283,9 @@ func (c *DnsController) handleDNSRequest(
 		// As-is should not be valid in response routing, thus using connection realDest is reasonable.
 		upstream = &dns.Upstream{
 			Scheme:   "udp",
-			Hostname: req.dst.Addr().String(),
-			Port:     req.dst.Port(),
-			Ip46:     netutils.FromAddr(req.dst.Addr()),
+			Hostname: req.Dst.Addr().String(),
+			Port:     req.Dst.Port(),
+			Ip46:     netutils.FromAddr(req.Dst.Addr()),
 			IsAsIs:   true,
 		}
 	} else {
@@ -439,9 +438,9 @@ func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgume
 			if req.isTcp {
 				tcpDnsStr = "(TCP)"
 			}
-			log.WithFields(fields).Infof("[DNS%s] %v <-> %v", tcpDnsStr, RefineSourceToShow(req.src, req.dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
+			log.WithFields(fields).Infof("[DNS%s] %v <-> %v", tcpDnsStr, RefineSourceToShow(req.Src, req.Dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
 		} else {
-			log.WithFields(fields).Infof("[DNS] %v <-> %v Reject with empty answer", RefineSourceToShow(req.src, req.dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
+			log.WithFields(fields).Infof("[DNS] %v <-> %v Reject with empty answer", RefineSourceToShow(req.Src, req.Dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
 		}
 	}
 }

@@ -72,8 +72,7 @@ func (c *ControlPlane) handleTcpDns(
 		return nil
 	}
 	req := &dnsRequest{
-		src:           src,
-		dst:           dst,
+		AddrPortPair:  AddrPortPair{Src: src, Dst: dst},
 		routingResult: routingResult,
 		isTcp:         true,
 	}
