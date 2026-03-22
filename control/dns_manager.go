@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -101,21 +101,21 @@ func (m *DnsManager) read() (data []byte, err error) {
 		var lenBuf [2]byte
 		// Read two byte length.
 		if _, err = io.ReadFull(m.conn, lenBuf[:]); err != nil {
-			return nil, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload length"))
+			return nil, AsDebug(common.Wrap(err, "failed to read tcp DNS resp payload length"))
 		}
 		msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
 		if msgLen > consts.EthernetMtu {
-			return nil, AsWarn(oops.Wrapf(err, "tcp dns msg len too large: %d > %d", msgLen, consts.EthernetMtu))
+			return nil, AsWarn(common.Wrap(err, "tcp dns msg len too large: %d > %d", msgLen, consts.EthernetMtu))
 		}
 		data = make([]byte, msgLen)
 		if _, err = io.ReadFull(m.conn, data); err != nil {
-			return nil, AsDebug(oops.Wrapf(err, "failed to read tcp DNS resp payload"))
+			return nil, AsDebug(common.Wrap(err, "failed to read tcp DNS resp payload"))
 		}
 	} else {
 		data = make([]byte, consts.EthernetMtu)
 		var n int
 		if n, err = m.conn.Read(data); err != nil {
-			return nil, AsDebug(oops.Wrapf(err, "failed to read udp DNS resp payload"))
+			return nil, AsDebug(common.Wrap(err, "failed to read udp DNS resp payload"))
 		}
 		data = data[:n]
 	}

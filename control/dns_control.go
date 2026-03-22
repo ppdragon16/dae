@@ -133,8 +133,7 @@ func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, data []byte) {
 }
 
 type dnsRequest struct {
-	src           netip.AddrPort
-	dst           netip.AddrPort
+	AddrPortPair
 	routingResult *bpfRoutingResult
 	isTcp         bool
 }
@@ -198,7 +197,7 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	queryInfo := dnsQueryInfo(data)
 	if log.IsLevelEnabled(log.TraceLevel) {
 		log.Tracef("Received UDP(DNS) %v <-> %v: %v %v",
-			RefineSourceToShow(req.src, req.dst.Addr()), req.dst.String(), queryInfo.qname, queryInfo.qtype)
+			RefineSourceToShow(req.Src, req.Dst.Addr()), req.Dst.String(), queryInfo.qname, queryInfo.qtype)
 	}
 
 	id := dnsId(data)
@@ -276,10 +275,10 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	if dnsResp.upstreamFrom != nil && dnsResp.upstreamFrom.IsAsIs {
 		ttl = AnyfromTimeoutDefault
 	}
-	af, err := DefaultAnyfromPool.Obtain(req.dst, ttl)
+	af, err := DefaultAnyfromPool.Obtain(req.Dst, ttl)
 	if err == nil {
-		_, err = af.WriteToUDPAddrPort(dataToWrite, req.src)
-		DefaultAnyfromPool.Recycle(req.dst, af)
+		_, err = af.WriteToUDPAddrPort(dataToWrite, req.Src)
+		DefaultAnyfromPool.Recycle(req.Dst, af)
 	}
 	if err != nil {
 		log.Warningf("failed to send dns message back: %v", err)
@@ -316,9 +315,9 @@ func (c *DnsController) handleDNSRequest(
 		// As-is should not be valid in response routing, thus using connection realDest is reasonable.
 		upstream = &dns.Upstream{
 			Scheme:   "udp",
-			Hostname: req.dst.Addr().String(),
-			Port:     req.dst.Port(),
-			Ip46:     netutils.FromAddr(req.dst.Addr()),
+			Hostname: req.Dst.Addr().String(),
+			Port:     req.Dst.Port(),
+			Ip46:     netutils.FromAddr(req.Dst.Addr()),
 			IsAsIs:   true,
 		}
 	} else {
@@ -456,15 +455,15 @@ func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgume
 		}
 		var source string
 		if req.isTcp {
-			source = fmt.Sprintf("[DNS(TCP)] %s", RefineSourceToShow(req.src, req.dst.Addr()))
+			source = fmt.Sprintf("[DNS(TCP)] %s", RefineSourceToShow(req.Src, req.Dst.Addr()))
 		} else {
-			source = fmt.Sprintf("[DNS] %s", RefineSourceToShow(req.src, req.dst.Addr()))
+			source = fmt.Sprintf("[DNS] %s", RefineSourceToShow(req.Src, req.Dst.Addr()))
 		}
 		var target string
-		if dialArgument.Target == req.dst {
+		if dialArgument.Target == req.Dst {
 			target = RefineAddrPortToShow(dialArgument.Target)
 		} else {
-			target = fmt.Sprintf("%s (%s)", RefineAddrPortToShow(dialArgument.Target), RefineAddrPortToShow(req.dst))
+			target = fmt.Sprintf("%s (%s)", RefineAddrPortToShow(dialArgument.Target), RefineAddrPortToShow(req.Dst))
 		}
 		if accepted {
 			log.WithFields(fields).Infof("%s <-> %s", source, target)

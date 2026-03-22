@@ -1127,8 +1127,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 					}
 					if routingResult.Must == 0 {
 						handled := c.dnsController.Handle(data, &dnsRequest{
-							src:           src,
-							dst:           dst,
+							AddrPortPair:  AddrPortPair{Src: src, Dst: dst},
 							routingResult: routingResult,
 						})
 						if handled {
@@ -1219,7 +1218,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	var routeKey *dnsRouteCacheKey
 	if !dnsUpstream.IsAsIs {
 		// AsIs's upstream instance is dynamic, so it doesn't support route cache.
-		routeKey = &dnsRouteCacheKey{upstream: dnsUpstream, src: req.src.Addr()}
+		routeKey = &dnsRouteCacheKey{upstream: dnsUpstream, src: req.Src.Addr()}
 	}
 	// Get the min latency path.
 	var networkType *common.NetworkType
@@ -1246,7 +1245,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		if !ok {
 			var err error
 			// TODO: Mark
-			outboundIndex, _, _, err = c.Route(req.src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
+			outboundIndex, _, _, err = c.Route(req.Src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
 			if err != nil {
 				return err
 			}

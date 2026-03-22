@@ -135,15 +135,12 @@ func (ue *UdpEndpoint) Close() error {
 }
 
 // UdpEndpointKey is the pool key. Dst=0 for Full-Cone NAT, non-zero for QUIC.
-type UdpEndpointKey struct {
-	Src netip.AddrPort
-	Dst netip.AddrPort
-}
+type UdpEndpointKey = AddrPortPair
 
 // UdpEndpointPool is a full-cone udp conn pool
 type UdpEndpointPool struct {
 	pool                 sync.Map
-	UdpEndpointKeyLocker common.KeyLocker[UdpEndpointKey]
+	UdpEndpointKeyLocker *common.ShardedKeyLocker[UdpEndpointKey]
 }
 
 type UdpEndpointOptions struct {
@@ -159,7 +156,9 @@ type UdpEndpointOptions struct {
 	SniffedDomain string
 }
 
-var DefaultUdpEndpointPool = UdpEndpointPool{}
+var DefaultUdpEndpointPool = UdpEndpointPool{
+	UdpEndpointKeyLocker: common.NewShardedKeyLocker(1024, AddrPortPairShard),
+}
 
 func (p *UdpEndpointPool) Remove(key UdpEndpointKey) (err error) {
 	if ue, ok := p.pool.LoadAndDelete(key); ok {
