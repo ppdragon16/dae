@@ -184,6 +184,17 @@ func (p *AnyfromPool) Start(ctx context.Context) {
 		KeepAlive: 0,
 	}
 	GetDaeNetns().With(func() error {
+		defer func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			for _, af := range p.pool {
+				if af.deadlineTimer != nil {
+					af.deadlineTimer.Stop()
+				}
+				af.Close()
+			}
+			p.pool = make(map[netip.AddrPort]*Anyfrom)
+		}()
 		for {
 			select {
 			case <-ctx.Done():
