@@ -13,6 +13,7 @@ import (
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/trie"
+	"github.com/daeuniverse/outbound/pool"
 	log "github.com/sirupsen/logrus"
 	"github.com/v2rayA/ahocorasick-domain"
 )
@@ -125,7 +126,8 @@ func (n *AhocorasickSlimtrie) MatchDomainBitmapInplace(domain string, bitmap []u
 		bitmap[i] = 0
 	}
 
-	var buf [256]byte
+	buf := pool.GetBuffer(256)
+	defer pool.PutBuffer(buf)
 	dLen := len(domain)
 	if dLen == 0 || dLen > 253 {
 		return

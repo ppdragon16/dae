@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"strconv"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/routing"
 	"github.com/daeuniverse/dae/component/routing/domain_matcher"
@@ -222,8 +223,9 @@ func (m *ResponseMatcher) Match(
 	if qName == "" {
 		return 0, fmt.Errorf("qName cannot be empty")
 	}
-	var domainMatchBitmap [32]uint32
-	m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap[:])
+	domainMatchBitmap := common.ObtainDomainBitmap()
+	defer common.RecycleDomainBitmap(domainMatchBitmap)
+	m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap)
 	bin128 := make([]string, 0, len(ips))
 	for _, ip := range ips {
 		bin128 = append(bin128, trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(ip.As16()), 128)))
