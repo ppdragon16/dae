@@ -305,6 +305,9 @@ func exit(c *control.ControlPlane) {
 	if err := os.Remove(PidFilePath); err != nil {
 		std.Errorf("%+v", oops.Wrapf(err, "failed to remove pid file"))
 	}
+	if err := control.GetDaeNetns().Close(); err != nil {
+		std.Errorf("%+v", oops.Wrapf(err, "failed to close netns"))
+	}
 	if e := c.Close(); e != nil {
 		std.Errorf("%+v", oops.Wrapf(e, "failed to close control plane"))
 	}
