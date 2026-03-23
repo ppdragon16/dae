@@ -18,6 +18,7 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/oops"
+	log "github.com/sirupsen/logrus"
 )
 
 type UdpHandler func(data []byte, from netip.AddrPort) error
@@ -27,7 +28,9 @@ type UdpEndpoint struct {
 	// mu protects deadlineTimer
 	mu            sync.Mutex
 	deadlineTimer *time.Timer
-	handler       UdpHandler
+
+	src, dst netip.AddrPort
+	af       *Anyfrom
 
 	natTimeout            time.Duration
 	bonusNatTimeout       time.Duration
@@ -44,39 +47,24 @@ type UdpEndpoint struct {
 	receivedReply  bool
 }
 
-func (ue *UdpEndpoint) run() error {
+type ReadPacketFunc func(buf []byte) (int, netip.AddrPort, error)
+
+func (ue *UdpEndpoint) run() (err error) {
 	common.ActiveConnections.With(ue.labels).Inc()
 	defer common.ActiveConnections.With(ue.labels).Dec()
 	buf := pool.GetBuffer(2048)
 	defer pool.PutBuffer(buf)
+	var readFunc ReadPacketFunc
 	if pc, ok := ue.conn.(PacketConnAddrPort); ok {
-		return ue.runWithAddrPort(pc, buf)
-	}
-	return ue.runWithAddr(ue.conn, buf)
-}
-
-func (ue *UdpEndpoint) runWithAddr(pc net.PacketConn, buf []byte) error {
-	for {
-		n, from, err := pc.ReadFrom(buf)
-		if err != nil {
-			if ue.IsClosed() {
-				break
-			}
-			return oops.Wrapf(err, "failed to ReadFrom")
+		readFunc = pc.ReadFromAddrPort
+	} else {
+		readFunc = func(buf []byte) (int, netip.AddrPort, error) {
+			n, from, err := ue.conn.ReadFrom(buf)
+			return n, ToAddrPort(from), err
 		}
-		ue.counterTraffic.Add(float64(n))
-		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
-		if err = ue.handler(buf[:n], ToAddrPort(from)); err != nil {
-			return err
-		}
-		ue.receivedReply = true
 	}
-	return nil
-}
-
-func (ue *UdpEndpoint) runWithAddrPort(pc PacketConnAddrPort, buf []byte) error {
 	for {
-		n, from, err := pc.ReadFromAddrPort(buf)
+		n, from, err := readFunc(buf)
 		if err != nil {
 			if ue.IsClosed() {
 				break
@@ -85,11 +73,16 @@ func (ue *UdpEndpoint) runWithAddrPort(pc PacketConnAddrPort, buf []byte) error 
 		}
 		ue.counterTraffic.Add(float64(n))
 		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
-		if err = ue.handler(buf[:n], from); err != nil {
+		// Only print routing for new connection to avoid the log exploded (Quic and BT).
+		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) {
+			log.Infof("Received UDP packet reply: %v <- %v", ue.src, from)
+		}
+		if _, err = ue.af.WriteToUDPAddrPort(buf[:n], ue.src); err != nil {
 			return err
 		}
 		ue.receivedReply = true
 	}
+	DefaultAnyfromPool.Recycle(ue.dst, ue.af)
 	return nil
 }
 
@@ -127,6 +120,7 @@ func (ue *UdpEndpoint) WriteTo(b []byte, addr netip.AddrPort) (n int, err error)
 
 // Close should only called by UdpEndpointPool.Remove
 func (ue *UdpEndpoint) Close() error {
+	common.RecyclePrometheusLabels(ue.labels)
 	ue.mu.Lock()
 	ue.deadlineTimer.Stop()
 	ue.mu.Unlock()
@@ -141,19 +135,6 @@ type UdpEndpointKey = AddrPortPair
 type UdpEndpointPool struct {
 	pool                 sync.Map
 	UdpEndpointKeyLocker *common.ShardedKeyLocker[UdpEndpointKey]
-}
-
-type UdpEndpointOptions struct {
-	PacketConn      net.PacketConn
-	Handler         UdpHandler
-	InitNatTimeout  time.Duration
-	BonusNatTimeout time.Duration
-	BonusTraffic    int64
-
-	Dialer *dialer.Dialer
-	labels prometheus.Labels
-
-	SniffedDomain string
 }
 
 var DefaultUdpEndpointPool = UdpEndpointPool{
@@ -175,26 +156,30 @@ func (p *UdpEndpointPool) Get(key UdpEndpointKey) (udpEndpoint *UdpEndpoint, ok 
 	return _ue.(*UdpEndpoint), ok
 }
 
-func (p *UdpEndpointPool) Create(key UdpEndpointKey, createOption *UdpEndpointOptions) (udpEndpoint *UdpEndpoint) {
-	ctx, cancel := context.WithCancel(context.Background())
-	udpEndpoint = &UdpEndpoint{
-		conn:            createOption.PacketConn,
-		handler:         createOption.Handler,
-		natTimeout:      createOption.InitNatTimeout,
-		bonusNatTimeout: createOption.BonusNatTimeout,
-		bonusTraffic:    createOption.BonusTraffic,
-		ctx:             ctx,
-		cancel:          cancel,
-		dialer:          createOption.Dialer,
-		labels:          createOption.labels,
-		counterTraffic:  common.TrafficBytes.With(createOption.labels),
-		sniffedDomain:   createOption.SniffedDomain,
+func (p *UdpEndpointPool) Create(
+	key UdpEndpointKey,
+	udpConn net.PacketConn,
+	src, dst netip.AddrPort,
+	initNatTimeout time.Duration) (ue *UdpEndpoint, err error) {
+	af, err := DefaultAnyfromPool.Obtain(dst, AnyfromTimeoutDefault)
+	if err != nil {
+		return nil, err
 	}
-	udpEndpoint.deadlineTimer = time.AfterFunc(createOption.InitNatTimeout, func() {
-		if !udpEndpoint.checkTraffic() {
+	ctx, cancel := context.WithCancel(context.Background())
+	ue = &UdpEndpoint{
+		natTimeout: initNatTimeout,
+		ctx:        ctx,
+		cancel:     cancel,
+		src:        src,
+		dst:        dst,
+		af:         af,
+	}
+	ue.conn = udpConn
+	ue.deadlineTimer = time.AfterFunc(initNatTimeout, func() {
+		if !ue.checkTraffic() {
 			p.Remove(key)
 		}
 	})
-	p.pool.Store(key, udpEndpoint)
+	p.pool.Store(key, ue)
 	return
 }

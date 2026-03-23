@@ -16,7 +16,6 @@ import (
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/netutils"
-	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/daeuniverse/dae/common/consts"
@@ -136,6 +135,22 @@ type dnsRequest struct {
 	AddrPortPair
 	routingResult *bpfRoutingResult
 	isTcp         bool
+}
+
+var dnsRequestPool = sync.Pool{New: func() any { return &dnsRequest{} }}
+
+func ObtainDnsRequest(src, dst netip.AddrPort, routingResult *bpfRoutingResult, isTcp bool) *dnsRequest {
+	v := dnsRequestPool.Get()
+	dq := v.(*dnsRequest)
+	dq.Src = src
+	dq.Dst = dst
+	dq.routingResult = routingResult
+	dq.isTcp = isTcp
+	return dq
+}
+
+func RecycleDnsRequest(q *dnsRequest) {
+	dnsRequestPool.Put(q)
 }
 
 type dialArgument struct {
@@ -363,12 +378,12 @@ Dial:
 				if !ok || !dnsResponse(dnsResp.respData) {
 					return dnsResp, err
 				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
-					labels := prometheus.Labels{
-						"outbound": dialArgument.Outbound.Name,
-						"subtag":   dialArgument.Dialer.Property.SubscriptionTag,
-						"dialer":   dialArgument.Dialer.Name,
-						"network":  dialArgument.networkType.String(),
-					}
+					labels := common.ObtainPrometheusLabels(
+						dialArgument.Outbound.Name,
+						dialArgument.Dialer.Property.SubscriptionTag,
+						dialArgument.Dialer.Name,
+						dialArgument.networkType.String())
+					defer common.RecyclePrometheusLabels(labels)
 					common.ErrorCount.With(labels).Inc()
 					dialArgument.Dialer.ReportUnavailable()
 					return dnsResp, err

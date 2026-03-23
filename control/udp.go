@@ -14,7 +14,6 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/sniffing"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -73,10 +72,7 @@ func (c *ControlPlane) sniffPkt(key PacketSnifferKey, data []byte) (result *snif
 }
 
 func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue *UdpEndpoint, err error) {
-	networkType := &common.NetworkType{
-		L4Proto:   consts.L4ProtoStr_UDP,
-		IpVersion: consts.IpVersionStrFromAddr(ueKey.Dst.Addr()),
-	}
+	networkType := GetNetworkType(consts.L4ProtoStr_UDP, ueKey.Dst.Addr())
 	var sniffingResult *sniffingResult
 	sniffingResult, err = c.sniffPkt(ueKey, data)
 	if sniffingResult == nil {
@@ -84,23 +80,31 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 	}
 	src := ueKey.Src
 	// Use an empty AddrPort for dst
-	var routingResult bpfRoutingResult
-	if err := c.core.RetrieveUDPRoutingResult(src, &routingResult); err != nil {
+	routingResult := ObtainBpfRoutingResult()
+	defer RecycleBpfRoutingResult(routingResult)
+
+	if err := c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
 		return nil, common.Wrap(err, "No AddrPort presented")
 	}
 
 	// Route
-	dialOption, err := c.RouteDialOption(src, ueKey.Dst, sniffingResult.domain, networkType, &routingResult)
-	if err != nil {
+	dialOption := ObtainDialOption()
+	defer RecycleDialOption(dialOption)
+	if err = c.RouteDialOption(src, ueKey.Dst, sniffingResult.domain, networkType, routingResult, dialOption); err != nil {
 		return nil, err
 	}
-
-	labels := prometheus.Labels{
-		"outbound": dialOption.Outbound.Name,
-		"subtag":   dialOption.Dialer.Property.SubscriptionTag,
-		"dialer":   dialOption.Dialer.Name,
-		"network":  networkType.String(),
-	}
+	// labels will be recycled in ue's Close().
+	labels := common.ObtainPrometheusLabels(
+		dialOption.Outbound.Name,
+		dialOption.Dialer.Property.SubscriptionTag,
+		dialOption.Dialer.Name,
+		networkType.String())
+	labelsIntoUe := false
+	defer func() {
+		if !labelsIntoUe {
+			common.RecyclePrometheusLabels(labels)
+		}
+	}()
 
 	// Dial
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
@@ -135,32 +139,24 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 		}
 		return nil, nil
 	}
-	af, err := DefaultAnyfromPool.Obtain(dst, AnyfromTimeoutDefault)
+	// Create & init ue.
+	ue, err = DefaultUdpEndpointPool.Create(ueKey, udpConn, src, dst, 30*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	ue = DefaultUdpEndpointPool.Create(ueKey, &UdpEndpointOptions{
-		PacketConn: udpConn,
-		Handler: func(data []byte, from netip.AddrPort) (err error) {
-			// Only print routing for new connection to avoid the log exploded (Quic and BT).
-			// Note: Log dialOption.dialTarget but dial dst.string().
-			if !ue.receivedReply {
-				LogDial(src, from, ue.sniffedDomain, dialOption, networkType, &routingResult)
-			}
-			_, err = af.WriteToUDPAddrPort(data, src)
-			return err
-		},
-		InitNatTimeout:  30 * time.Second,
-		BonusNatTimeout: DefaultNatTimeoutUDP,
-		BonusTraffic:    1024 * 1024, // 1MB traffic will extend BonusNatTimeout
-		Dialer:          dialOption.Dialer,
-		labels:          labels,
-		SniffedDomain:   sniffingResult.domain,
-	})
+	ue.bonusNatTimeout = DefaultNatTimeoutUDP
+	ue.bonusTraffic = 1024 * 1024 // 1MB traffic will extend BonusNatTimeout
+	ue.dialer = dialOption.Dialer
+	ue.labels = labels
+	ue.counterTraffic = common.TrafficBytes.With(labels)
+	ue.sniffedDomain = sniffingResult.domain
+	labelsIntoUe = true
+
+	LogDial(src, dst, ue.sniffedDomain, dialOption, networkType, routingResult)
+
 	// Receive UDP messages.
 	go func() {
 		err = ue.run()
-		DefaultAnyfromPool.Recycle(dst, af)
 		DefaultUdpEndpointPool.Remove(ueKey)
 		if err != nil {
 			netErr, ok := IsNetError(err)

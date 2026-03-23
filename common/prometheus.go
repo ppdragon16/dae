@@ -1,6 +1,8 @@
 package common
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -114,4 +116,20 @@ func InitPrometheus(registry *prometheus.Registry) {
 	registry.MustRegister(HeapInuse)
 	registry.MustRegister(HeapIdle)
 	registry.MustRegister(HeapReleased)
+}
+
+var labelsPool = sync.Pool{New: func() any { return prometheus.Labels{"outbound": "", "subtag": "", "dialer": "", "network": ""} }}
+
+func ObtainPrometheusLabels(outbound string, subtag string, dialer string, network string) prometheus.Labels {
+	v := labelsPool.Get()
+	labels := v.(prometheus.Labels)
+	labels["outbound"] = outbound
+	labels["subtag"] = subtag
+	labels["dialer"] = dialer
+	labels["network"] = network
+	return labels
+}
+
+func RecyclePrometheusLabels(labels prometheus.Labels) {
+	labelsPool.Put(labels)
 }

@@ -90,7 +90,22 @@ var (
 	CheckBatchUpdateFeatureOnce sync.Once
 	SimulateBatchUpdate         bool
 	SimulateBatchUpdateLpmTrie  bool
+
+	bpfRoutingResultPool = sync.Pool{
+		New: func() any {
+			return &bpfRoutingResult{}
+		},
+	}
 )
+
+func ObtainBpfRoutingResult() *bpfRoutingResult {
+	r := bpfRoutingResultPool.Get()
+	return r.(*bpfRoutingResult)
+}
+
+func RecycleBpfRoutingResult(r *bpfRoutingResult) {
+	bpfRoutingResultPool.Put(r)
+}
 
 func BpfMapBatchUpdate(m *ebpf.Map, keys interface{}, values interface{}, opts *ebpf.BatchOptions) (n int, err error) {
 	CheckBatchUpdateFeatureOnce.Do(func() {

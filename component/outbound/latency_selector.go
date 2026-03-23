@@ -10,7 +10,6 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -186,12 +185,8 @@ func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, di
 	if !dialer.Supported(networkType) {
 		return
 	}
-	labels := prometheus.Labels{
-		"outbound": s.dialerGroup.Name,
-		"subtag":   dialer.Property.SubscriptionTag,
-		"dialer":   dialer.Name,
-		"network":  networkType.String(),
-	}
+	labels := common.ObtainPrometheusLabels(s.dialerGroup.Name, dialer.Property.SubscriptionTag, dialer.Name, networkType.String())
+	defer common.RecyclePrometheusLabels(labels)
 
 	lastLatency, ok := dialer.Latencies10[s.dialerGroup].LastLatency()
 	if !ok {

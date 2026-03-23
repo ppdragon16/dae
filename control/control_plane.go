@@ -1118,6 +1118,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 					var ok bool
 					if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
 						var err error
+						// Don't use ObtainBpfRoutingResult() because it would be saved in cache.
 						routingResult = new(bpfRoutingResult)
 						if err = c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
 							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
@@ -1127,14 +1128,14 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 						c.dnsRoutingResultCache.Save(src.Addr(), routingResult)
 					}
 					if routingResult.Must == 0 {
-						handled := c.dnsController.Handle(data, &dnsRequest{
-							AddrPortPair:  AddrPortPair{Src: src, Dst: dst},
-							routingResult: routingResult,
-						})
+						dq := ObtainDnsRequest(src, dst, routingResult, false)
+						handled := c.dnsController.Handle(data, dq)
 						if handled {
+							RecycleDnsRequest(dq)
 							pool.PutBuffer(data)
 							return
 						}
+						RecycleDnsRequest(dq)
 					}
 				}
 
@@ -1194,6 +1195,22 @@ var allNetworkTypes = []*common.NetworkType{
 	{L4Proto: consts.L4ProtoStr_TCP, IpVersion: consts.IpVersionStr_4},
 }
 
+func GetNetworkType(l4Proto consts.L4ProtoStr, addr netip.Addr) *common.NetworkType {
+	switch {
+	case addr.Is4() || addr.Is4In6():
+		if l4Proto == consts.L4ProtoStr_UDP {
+			return allNetworkTypes[1]
+		}
+		return allNetworkTypes[3]
+	case addr.Is6():
+		if l4Proto == consts.L4ProtoStr_UDP {
+			return allNetworkTypes[0]
+		}
+		return allNetworkTypes[2]
+	}
+	return nil
+}
+
 func (c *ControlPlane) chooseBestDnsDialer(
 	req *dnsRequest,
 	dnsUpstream *dns.Upstream,
@@ -1216,10 +1233,11 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		bestTarget   netip.AddrPort
 		// dialMark     uint32
 	)
-	var routeKey *dnsRouteCacheKey
+	var routeKey dnsRouteCacheKey
 	if !dnsUpstream.IsAsIs {
 		// AsIs's upstream instance is dynamic, so it doesn't support route cache.
-		routeKey = &dnsRouteCacheKey{upstream: dnsUpstream, src: req.Src.Addr()}
+		routeKey.upstream = dnsUpstream
+		routeKey.src = req.Src.Addr()
 	}
 	// Get the min latency path.
 	var networkType *common.NetworkType
@@ -1240,8 +1258,8 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		}
 		var outboundIndex consts.OutboundIndex
 		var ok bool
-		if routeKey != nil {
-			outboundIndex, ok = c.dnsRouteCache.Get(*routeKey)
+		if routeKey.upstream != nil {
+			outboundIndex, ok = c.dnsRouteCache.Get(routeKey)
 		}
 		if !ok {
 			var err error
@@ -1253,8 +1271,8 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			if int(outboundIndex) >= len(c.outbounds) {
 				return oops.Errorf("bad outbound index: %v", outboundIndex)
 			}
-			if routeKey != nil {
-				c.dnsRouteCache.Save(*routeKey, outboundIndex)
+			if routeKey.upstream != nil {
+				c.dnsRouteCache.Save(routeKey, outboundIndex)
 			}
 		}
 		// Handles outbound redirects
