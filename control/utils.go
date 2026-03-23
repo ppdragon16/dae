@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"structs"
+	"sync"
 	"syscall"
 
 	"github.com/daeuniverse/dae/common"
@@ -37,6 +38,17 @@ type DialOption struct {
 	// Mark          uint32
 }
 
+var dialOptionPool = sync.Pool{New: func() any { return &DialOption{} }}
+
+func ObtainDialOption() *DialOption {
+	v := dialOptionPool.Get()
+	return v.(*DialOption)
+}
+
+func RecycleDialOption(option *DialOption) {
+	dialOptionPool.Put(option)
+}
+
 func IsNetError(err error) (netErr net.Error, ok bool) {
 	ok = errors.As(err, &netErr)
 	return
@@ -46,7 +58,8 @@ func (c *ControlPlane) RouteDialOption(
 	src, dst netip.AddrPort,
 	domain string,
 	networkType *common.NetworkType,
-	routingResult *bpfRoutingResult) (dialOption *DialOption, err error) {
+	routingResult *bpfRoutingResult,
+	dialOptionOut *DialOption) (err error) {
 	// TODO: Why not directly transfer routingResult
 	outboundIndex := consts.OutboundIndex(routingResult.Outbound)
 	// mark := p.routingResult.Mark
@@ -104,14 +117,12 @@ func (c *ControlPlane) RouteDialOption(
 		}
 		fallbackDialer = true
 	}
-	return &DialOption{
-		DialTarget:        dialTarget,
-		Dialer:            dialer,
-		Outbound:          outbound,
-		FallbackIpVersion: fallback,
-		FallbackDialer:    fallbackDialer,
-		// Mark:           mark,
-	}, nil
+	dialOptionOut.DialTarget = dialTarget
+	dialOptionOut.Dialer = dialer
+	dialOptionOut.Outbound = outbound
+	dialOptionOut.FallbackIpVersion = fallback
+	dialOptionOut.FallbackDialer = fallbackDialer
+	return nil
 }
 
 type TrafficLogConn struct {

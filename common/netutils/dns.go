@@ -99,7 +99,7 @@ func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error)
 		data []byte
 		err  error
 	}
-	recvCh := make(chan result, 1)
+	recvCh := make(chan *result, 1)
 	go func() {
 		var resp []byte
 		var err error
@@ -114,7 +114,7 @@ func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error)
 			}
 		}
 		select {
-		case recvCh <- result{data: resp, err: err}:
+		case recvCh <- &result{data: resp, err: err}:
 		case <-ctx.Done():
 		}
 	}()
@@ -138,14 +138,14 @@ func ResolveUDP(conn net.Conn, data []byte) (resp []byte, err error) {
 		err  error
 	}
 
-	recvCh := make(chan result, 1)
+	recvCh := make(chan *result, 1)
 
 	go func() {
 		// Wait for response.
 		buf := make([]byte, consts.EthernetMtu)
 		n, rErr := conn.Read(buf)
 		select {
-		case recvCh <- result{data: buf[:n], err: rErr}:
+		case recvCh <- &result{data: buf[:n], err: rErr}:
 		case <-ctx.Done():
 		}
 	}()

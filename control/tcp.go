@@ -23,7 +23,6 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -71,20 +70,19 @@ func (c *ControlPlane) handleTcpDns(
 		// It's common to get EOF when reading tcp dns request.
 		return nil
 	}
-	req := &dnsRequest{
-		AddrPortPair:  AddrPortPair{Src: src, Dst: dst},
-		routingResult: routingResult,
-		isTcp:         true,
-	}
+
 	id := msg.Id
 	// Avoids duplicated id from clients, so make the id unique.
 	msg.Id = uint16(fastrand.Intn(math.MaxUint16))
 	queryInfo := c.dnsController.prepareQueryInfo(msg)
-	if err = c.dnsController.handleDNSRequest(msg, req, queryInfo); err != nil {
+	dq := ObtainDnsRequest(src, dst, routingResult, true)
+	if err = c.dnsController.handleDNSRequest(msg, dq, queryInfo); err != nil {
 		log.Errorf("Failed to handle tcp dns request: %v", err)
 		msg.Response = true
 		msg.SetRcode(msg, dnsmessage.RcodeServerFailure)
 	}
+	RecycleDnsRequest(dq)
+
 	// Keep the id the same with request.
 	msg.Id = id
 	if err = writeDnsMsg(msg, lConn); err != nil {
@@ -99,15 +97,21 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	dstTcpAddr := lConn.LocalAddr().(*net.TCPAddr)
 	dst := dstTcpAddr.AddrPort()
 	istcpdns := dstTcpAddr.Port == 53
-	var routingResult bpfRoutingResult
-	if err := c.core.RetrieveTCPRoutingResult(src, dst, &routingResult); err != nil {
+	routingResult := ObtainBpfRoutingResult()
+	defer func() {
+		if routingResult != nil {
+			RecycleBpfRoutingResult(routingResult)
+		}
+	}()
+
+	if err := c.core.RetrieveTCPRoutingResult(src, dst, routingResult); err != nil {
 		return common.Wrap(err, "failed to retrieve target info %v", dst.String())
 	}
 
 	src = common.ConvergeAddrPort(src)
 	dst = common.ConvergeAddrPort(dst)
 	if istcpdns {
-		return c.handleTcpDns(lConn, src, dst, &routingResult)
+		return c.handleTcpDns(lConn, src, dst, routingResult)
 	}
 
 	// No need sniffer for tcp://8.8.8.8:53.
@@ -148,24 +152,25 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	}
 
 	// Route
-	networkType := &common.NetworkType{
-		L4Proto:   consts.L4ProtoStr_TCP,
-		IpVersion: consts.IpVersionStrFromAddr(dst.Addr()),
-	}
-	dialOption, err := c.RouteDialOption(src, dst, sniffedDomain, networkType, &routingResult)
-	if err != nil {
+	networkType := GetNetworkType(consts.L4ProtoStr_TCP, dst.Addr())
+	dialOption := ObtainDialOption()
+	defer RecycleDialOption(dialOption)
+	if err := c.RouteDialOption(src, dst, sniffedDomain, networkType, routingResult, dialOption); err != nil {
 		return err
 	}
-
-	labels := prometheus.Labels{
-		"outbound": dialOption.Outbound.Name,
-		"subtag":   dialOption.Dialer.Property.SubscriptionTag,
-		"dialer":   dialOption.Dialer.Name,
-		"network":  networkType.String(),
-	}
+	labels := common.ObtainPrometheusLabels(
+		dialOption.Outbound.Name,
+		dialOption.Dialer.Property.SubscriptionTag,
+		dialOption.Dialer.Name,
+		networkType.String())
+	defer common.RecyclePrometheusLabels(labels)
 
 	// Dial
-	LogDial(src, dst, sniffedDomain, dialOption, networkType, &routingResult)
+	LogDial(src, dst, sniffedDomain, dialOption, networkType, routingResult)
+	// routingResult is not used in following code, recycle it eariler.
+	RecycleBpfRoutingResult(routingResult)
+	routingResult = nil
+
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	rConn, err := dialOption.Dialer.DialContext(ctx, "tcp", dialOption.DialTarget)
@@ -251,7 +256,7 @@ type relayResult struct {
 	direction bool // true for lConn->rConn, false for rConn->lConn
 }
 
-func relayDirection(dst, src net.Conn, result chan<- relayResult, direction bool) {
+func relayDirection(dst, src net.Conn, result chan<- *relayResult, direction bool) {
 	// As `io.Copy` uses a 32KB buffer.
 	// See https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/io/io.go;l=419
 	// Uses a smaller buffer for less memory blooming. And 2K is enough for tcp dns.
@@ -285,7 +290,7 @@ func relayDirection(dst, src net.Conn, result chan<- relayResult, direction bool
 			break
 		}
 	}
-	result <- relayResult{err: err, direction: direction}
+	result <- &relayResult{err: err, direction: direction}
 	if err != nil {
 		dst.Close()
 	} else if writeCloser, ok := dst.(netproxy.CloseWriter); ok {
@@ -300,7 +305,7 @@ func relayDirection(dst, src net.Conn, result chan<- relayResult, direction bool
 // TODO: 引入 ctx, 在 dialer 不可用时取消 relay
 // 进一步的, 给 lConn 发送 rst
 func RelayTCP(lConn, rConn net.Conn) error {
-	resultCh := make(chan relayResult, 2)
+	resultCh := make(chan *relayResult, 2)
 
 	// Start relay goroutines for both directions.
 	go relayDirection(lConn, rConn, resultCh, false) // rConn -> lConn

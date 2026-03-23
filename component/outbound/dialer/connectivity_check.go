@@ -456,6 +456,25 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 			d.MovingAverage[g] = time.Duration(float64(d.MovingAverage[g])*(1-alpha) + float64(latency)*alpha)
 		}
 		d.Latencies10[g].AppendLatency(latency)
+
+		var logLevel log.Level
+		if ok {
+			if oldAlive {
+				logLevel = log.DebugLevel
+			} else {
+				logLevel = log.InfoLevel
+			}
+		} else {
+			if oldAlive {
+				logLevel = log.WarnLevel
+			} else {
+				logLevel = log.InfoLevel
+			}
+		}
+		if !log.IsLevelEnabled(logLevel) {
+			continue
+		}
+
 		if ok {
 			avg, _ := d.Latencies10[g].AvgLatency()
 			fields := log.Fields{
@@ -467,10 +486,10 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 			if networkType != nil {
 				fields["network"] = networkType.String()
 			}
-			if !oldAlive {
-				log.WithFields(fields).Infoln("Connectivity Check")
-			} else {
+			if oldAlive {
 				log.WithFields(fields).Debugln("Connectivity Check")
+			} else {
+				log.WithFields(fields).Infoln("Connectivity Check")
 			}
 		} else {
 			fields := log.Fields{
