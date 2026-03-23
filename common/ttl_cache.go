@@ -13,10 +13,9 @@ const (
 )
 
 type cacheEntry[K any, V any] struct {
-	key      K
-	value    V
-	expireAt time.Time
-	element  *list.Element
+	key     K
+	value   V
+	element *list.Element
 }
 
 type listEntry[K any] struct {
@@ -95,7 +94,7 @@ func (c *CacheWithTTL[K, V]) Get(key K) (V, bool) {
 	entry, ok := c.data[key]
 	c.mu.RUnlock()
 
-	if ok && time.Now().Before(entry.expireAt) {
+	if ok {
 		return entry.value, true
 	}
 	var zero V
@@ -107,7 +106,7 @@ func (c *CacheWithTTL[K, V]) GetWithKey(key K) (V, K, bool) {
 	entry, ok := c.data[key]
 	c.mu.RUnlock()
 
-	if ok && time.Now().Before(entry.expireAt) {
+	if ok {
 		return entry.value, entry.key, true
 	}
 	var zeroV V
@@ -125,14 +124,12 @@ func (c *CacheWithTTL[K, V]) Save(key K, value V) {
 		}
 	}
 
-	expireAt := time.Now().Add(c.ttl)
 	c.data[key] = cacheEntry[K, V]{
-		key:      key,
-		value:    value,
-		expireAt: expireAt,
+		key:   key,
+		value: value,
 		element: c.expireList.PushBack(listEntry[K]{
 			key:      key,
-			expireAt: expireAt,
+			expireAt: time.Now().Add(c.ttl),
 		}),
 	}
 }
