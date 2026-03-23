@@ -179,8 +179,8 @@ func (c *controlPlaneCore) addQdisc(ifname string) error {
 		},
 		QdiscType: "clsact",
 	}
-	if err := netlink.QdiscAdd(qdisc); err != nil {
-		return oops.Errorf("cannot add clsact qdisc: %w", err)
+	if err := netlink.QdiscReplace(qdisc); err != nil {
+		return oops.Errorf("cannot replace clsact qdisc: %w", err)
 	}
 	return nil
 }
