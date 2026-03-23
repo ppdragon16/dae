@@ -920,8 +920,9 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 		// Successful sniff without DNS lookup record.
 		// Only tries to reroute when the domain is mentioned in routing rules.
 		shouldRerouteFunc = func() bool {
-			var bitmap [32]uint32
-			c.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap[:])
+			bitmap := common.ObtainDomainBitmap()
+			defer common.RecycleDomainBitmap(bitmap)
+			c.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap)
 			for _, v := range bitmap {
 				if v != 0 {
 					return true

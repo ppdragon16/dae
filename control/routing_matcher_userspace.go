@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/routing"
 	"github.com/daeuniverse/dae/pkg/trie"
@@ -40,7 +41,8 @@ func (m *RoutingMatcher) Match(
 	bin128s[consts.MatchType_SourceIpSet] = sourceAddr
 	bin128s[consts.MatchType_Mac] = mac
 
-	var domainMatchBitmap [32]uint32
+	domainMatchBitmap := common.ObtainDomainBitmap()
+	defer common.RecycleDomainBitmap(domainMatchBitmap)
 	bitmapFetched := domain == ""
 
 	goodSubrule := false
@@ -58,7 +60,7 @@ func (m *RoutingMatcher) Match(
 			}
 		case consts.MatchType_DomainSet:
 			if !bitmapFetched {
-				m.domainMatcher.MatchDomainBitmapInplace(domain, domainMatchBitmap[:])
+				m.domainMatcher.MatchDomainBitmapInplace(domain, domainMatchBitmap)
 				bitmapFetched = true
 			}
 			if (domainMatchBitmap[i>>5] & (1 << (uint(i) & 31))) != 0 {

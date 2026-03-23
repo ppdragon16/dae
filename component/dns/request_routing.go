@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/routing"
 	"github.com/daeuniverse/dae/component/routing/domain_matcher"
@@ -195,9 +196,10 @@ func (m *RequestMatcher) Match(
 	qName string,
 	qType uint16,
 ) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
-	var domainMatchBitmap [32]uint32
+	domainMatchBitmap := common.ObtainDomainBitmap()
+	defer common.RecycleDomainBitmap(domainMatchBitmap)
 	if qName != "" {
-		m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap[:])
+		m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap)
 	}
 
 	goodSubrule := false
