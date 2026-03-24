@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
@@ -256,7 +258,7 @@ type relayResult struct {
 	direction bool // true for lConn->rConn, false for rConn->lConn
 }
 
-func relayDirection(dst, src net.Conn, result chan<- *relayResult, direction bool) {
+func relayDirection(dst, src net.Conn, direction bool) error {
 	// As `io.Copy` uses a 32KB buffer.
 	// See https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/io/io.go;l=419
 	// Uses a smaller buffer for less memory blooming. And 2K is enough for tcp dns.
@@ -290,7 +292,6 @@ func relayDirection(dst, src net.Conn, result chan<- *relayResult, direction boo
 			break
 		}
 	}
-	result <- &relayResult{err: err, direction: direction}
 	if err != nil {
 		dst.Close()
 	} else if writeCloser, ok := dst.(netproxy.CloseWriter); ok {
@@ -298,6 +299,7 @@ func relayDirection(dst, src net.Conn, result chan<- *relayResult, direction boo
 	} else {
 		dst.SetReadDeadline(time.Now().Add(10 * time.Second))
 	}
+	return err
 }
 
 // Error1 is the error from lConn to rConn
@@ -305,36 +307,48 @@ func relayDirection(dst, src net.Conn, result chan<- *relayResult, direction boo
 // TODO: 引入 ctx, 在 dialer 不可用时取消 relay
 // 进一步的, 给 lConn 发送 rst
 func RelayTCP(lConn, rConn net.Conn) error {
-	resultCh := make(chan *relayResult, 2)
-
-	// Start relay goroutines for both directions.
-	go relayDirection(lConn, rConn, resultCh, false) // rConn -> lConn
-	relayDirection(rConn, lConn, resultCh, true)     // lConn -> rConn
-	result := <-resultCh
-	<-resultCh
-
-	err := result.err
-	if err != nil {
-		// We ignore lConn errors or temporary network errors
-		// TODO: Why get EOF as an error?
-		if result.direction { // l -> r
-			switch {
-			case err == io.EOF,
-				strings.HasSuffix(err.Error(), "canceled by remote with error code 0"), // rConn closed
-				strings.Contains(err.Error(), "read:"):                                 // lConn Read
-				err = nil
-			default:
-				err = common.In("lConn -> rConn Relay").Wrap(err)
-			}
-		} else { // r -> l
-			switch {
-			case strings.Contains(err.Error(), "write:"): // lConn Write
-				err = nil
-			default:
-				err = common.In("rConn -> lConn Relay").Wrap(err)
+	var (
+		r2lErr   error
+		l2rErr   error
+		errState int32
+		wg       sync.WaitGroup
+	)
+	wg.Go(func() {
+		e := relayDirection(lConn, rConn, false) // rConn -> lConn
+		if e != nil {
+			if atomic.CompareAndSwapInt32(&errState, 0, 1) {
+				r2lErr = e
 			}
 		}
+	})
+	e := relayDirection(rConn, lConn, true) // lConn -> rConn
+	if e != nil {
+		if atomic.CompareAndSwapInt32(&errState, 0, 2) {
+			l2rErr = e
+		}
 	}
+	wg.Wait()
 
-	return err
+	switch atomic.LoadInt32(&errState) {
+	case 1: // r -> l
+		switch {
+		case strings.Contains(r2lErr.Error(), "write:"): // lConn Write
+			return nil
+		default:
+			return common.In("rConn -> lConn Relay").Wrap(r2lErr)
+		}
+	case 2: // l -> r
+		if l2rErr == io.EOF {
+			return nil
+		}
+		errMsg := l2rErr.Error()
+		switch {
+		case strings.HasSuffix(errMsg, "canceled by remote with error code 0"), // rConn closed
+			strings.Contains(errMsg, "read:"): // lConn Read
+			return nil
+		default:
+			return common.In("lConn -> rConn Relay").Wrap(l2rErr)
+		}
+	}
+	return nil
 }
