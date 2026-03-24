@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
@@ -296,7 +297,7 @@ func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uin
 			Authoritative:    false,
 		},
 	}
-	msg.SetQuestion(dnsmessage.CanonicalName(host), typ)
+	msg.SetQuestion(common.CanonicalName(host), typ)
 
 	var data []byte
 	if data, err = msg.Pack(); err != nil {

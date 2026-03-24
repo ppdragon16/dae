@@ -188,7 +188,7 @@ func (k dnsCacheKey) String() string {
 func (c *DnsController) prepareQueryInfo(dnsMessage *dnsmessage.Msg) (queryInfo queryInfo) {
 	if len(dnsMessage.Question) != 0 {
 		q := dnsMessage.Question[0]
-		queryInfo.qname = dnsmessage.CanonicalName(q.Name)
+		queryInfo.qname = common.CanonicalName(q.Name)
 		queryInfo.qtype = q.Qtype
 	}
 	return

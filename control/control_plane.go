@@ -41,11 +41,11 @@ import (
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
+	dnsmessage "github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/meek"
-	dnsmessage "github.com/miekg/dns"
 	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
@@ -809,7 +809,7 @@ func ParseFixedDomainTtl(ks []config.KeyableString) (map[string]int, error) {
 	m := make(map[string]int)
 	for _, k := range ks {
 		key, value, _ := strings.Cut(string(k), ":")
-		key = dnsmessage.CanonicalName(strings.TrimSpace(key))
+		key = common.CanonicalName(strings.TrimSpace(key))
 		ttl, err := strconv.ParseInt(strings.TrimSpace(value), 0, strconv.IntSize)
 		if err != nil {
 			return nil, oops.Errorf("failed to parse ttl: %v", err)
@@ -875,7 +875,7 @@ func (c *ControlPlane) InjectBpf(bpf *bpfObjects) {
 
 func (c *ControlPlane) cacheDnsUpstream(dnsUpstream *dns.Upstream) {
 	/// Updates dns cache to support domain routing for hostname of dns_upstream.
-	fqdn := dnsmessage.CanonicalName(dnsUpstream.Hostname)
+	fqdn := common.CanonicalName(dnsUpstream.Hostname)
 	var ips []netip.Addr
 
 	if dnsUpstream.Ip4.IsValid() {
@@ -898,7 +898,7 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 	if domain == "" {
 		return
 	}
-	fqdn := dnsmessage.CanonicalName(domain)
+	fqdn := common.CanonicalName(domain)
 	if submap, ok := c.dnsController.deadlineTimers[fqdn]; ok {
 		// Successful sniff without DNS lookup record.
 		// In this case, the kernel may not handle domain match set, so re-route is required.

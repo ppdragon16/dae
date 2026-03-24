@@ -225,7 +225,7 @@ func checkFunc(d *Dialer, server string, network string, data []byte) func() (ok
 
 func (d *Dialer) createCheckOptions() []*CheckOption {
 	msg := dnsmessage.Msg{MsgHdr: dnsmessage.MsgHdr{RecursionDesired: true}}
-	msg.SetQuestion(dnsmessage.CanonicalName(consts.UdpCheckLookupHost), dnsmessage.TypeA)
+	msg.SetQuestion(common.CanonicalName(consts.UdpCheckLookupHost), dnsmessage.TypeA)
 	var newMsgData = func() []byte {
 		msg.Id = uint16(fastrand.Intn(math.MaxUint16 + 1))
 		d, _ := msg.Pack()
