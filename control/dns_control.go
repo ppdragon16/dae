@@ -160,6 +160,12 @@ type dialArgument struct {
 	// mark        uint32
 }
 
+var dialArgumentPool = sync.Pool{
+	New: func() any {
+		return &dialArgument{}
+	},
+}
+
 type dnsForwarderKey struct {
 	upstream     dns.Upstream
 	dialArgument dialArgument
@@ -319,7 +325,8 @@ func (c *DnsController) handleDNSRequest(
 	} else {
 		reqMsg = dnsMessage.Copy()
 	}
-	dialArgument := dialArgument{}
+	dialArgument := dialArgumentPool.Get().(*dialArgument)
+	defer dialArgumentPool.Put(dialArgument)
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		if log.IsLevelEnabled(log.DebugLevel) {
@@ -330,12 +337,12 @@ Dial:
 		}
 
 		// Select best dial arguments (outbound, dialer, l4proto, ipversion, etc.)
-		if err := c.bestDialerChooser(req, upstream, &dialArgument); err != nil {
+		if err := c.bestDialerChooser(req, upstream, dialArgument); err != nil {
 			return err
 		}
 
 		// TODO: 这里可能不可以这样做
-		isNew, err = c.dialSend(dnsMessage, upstream, &dialArgument, queryInfo)
+		isNew, err = c.dialSend(dnsMessage, upstream, dialArgument, queryInfo)
 		if err != nil {
 			netErr, ok := IsNetError(err)
 			if !ok || !dnsMessage.Response || (!netErr.Timeout() && dialArgument.Dialer.NeedAliveState()) {
@@ -371,7 +378,7 @@ Dial:
 			return err
 		}
 		if ResponseIndex.IsReserved() {
-			c.logDnsResponse(req, &dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
+			c.logDnsResponse(req, dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
 			switch ResponseIndex {
 			case consts.DnsResponseOutboundIndex_Reject:
 				// Reject
