@@ -17,20 +17,19 @@ import (
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
 type UdpHandler func(data []byte, from netip.AddrPort) error
 
 type UdpEndpoint struct {
+	UdpEndpointKey
 	conn net.PacketConn
 	// mu protects deadlineTimer
 	mu            sync.Mutex
 	deadlineTimer *time.Timer
 
-	src, dst netip.AddrPort
-	af       *Anyfrom
+	af *Anyfrom
 
 	natTimeout            time.Duration
 	bonusNatTimeout       time.Duration
@@ -49,7 +48,7 @@ type UdpEndpoint struct {
 
 type ReadPacketFunc func(buf []byte) (int, netip.AddrPort, error)
 
-func (ue *UdpEndpoint) run() (err error) {
+func (ue *UdpEndpoint) run() {
 	common.ActiveConnections.With(ue.labels).Inc()
 	defer common.ActiveConnections.With(ue.labels).Dec()
 	buf := pool.GetBuffer(2048)
@@ -63,27 +62,48 @@ func (ue *UdpEndpoint) run() (err error) {
 			return n, ToAddrPort(from), err
 		}
 	}
+	var err error
 	for {
-		n, from, err := readFunc(buf)
-		if err != nil {
+		n, from, e := readFunc(buf)
+		if e != nil {
 			if ue.IsClosed() {
 				break
 			}
-			return oops.Wrapf(err, "failed to ReadFromAddrPort")
+			err = common.Wrap(e, "failed to ReadFromAddrPort")
+			break
 		}
 		ue.counterTraffic.Add(float64(n))
 		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
 		// Only print routing for new connection to avoid the log exploded (Quic and BT).
 		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) {
-			log.Infof("Received UDP packet reply: %v <- %v", ue.src, from)
+			log.Infof("Received UDP packet reply: %v <- %v", ue.Src, from)
 		}
-		if _, err = ue.af.WriteToUDPAddrPort(buf[:n], ue.src); err != nil {
-			return err
+		if _, err = ue.af.WriteToUDPAddrPort(buf[:n], ue.Src); err != nil {
+			break
 		}
 		ue.receivedReply = true
 	}
-	DefaultAnyfromPool.Recycle(ue.dst, ue.af)
-	return nil
+	DefaultAnyfromPool.Recycle(ue.Dst, ue.af)
+	DefaultUdpEndpointPool.Remove(ue.UdpEndpointKey)
+	if err != nil {
+		netErr, ok := IsNetError(err)
+		if !ok || (!netErr.Timeout() && ue.dialer.NeedAliveState()) {
+			err = common.
+				In("UdpEndpoint r -> l relay").
+				With("Is NetError", ok).
+				With("Is Temporary", ok && netErr.Temporary()).
+				With("Is Timeout", ok && netErr.Timeout()).
+				With("Dialer", ue.dialer.Name).
+				Wrap(err)
+			if !ok {
+				log.Warnf("%+v", err)
+			} else if !netErr.Timeout() && ue.dialer.NeedAliveState() {
+				common.ErrorCount.With(ue.labels).Inc()
+				ue.dialer.ReportUnavailable()
+				log.Warnf("%+v", err)
+			}
+		}
+	}
 }
 
 func (ue *UdpEndpoint) checkTraffic() bool {
@@ -167,12 +187,11 @@ func (p *UdpEndpointPool) Create(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ue = &UdpEndpoint{
-		natTimeout: initNatTimeout,
-		ctx:        ctx,
-		cancel:     cancel,
-		src:        src,
-		dst:        dst,
-		af:         af,
+		natTimeout:     initNatTimeout,
+		ctx:            ctx,
+		cancel:         cancel,
+		UdpEndpointKey: UdpEndpointKey{Src: src, Dst: dst},
+		af:             af,
 	}
 	ue.conn = udpConn
 	ue.deadlineTimer = time.AfterFunc(initNatTimeout, func() {

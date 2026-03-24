@@ -155,29 +155,8 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 	LogDial(src, dst, ue.sniffedDomain, dialOption, networkType, routingResult)
 
 	// Receive UDP messages.
-	go func() {
-		err = ue.run()
-		DefaultUdpEndpointPool.Remove(ueKey)
-		if err != nil {
-			netErr, ok := IsNetError(err)
-			if !ok || (!netErr.Timeout() && ue.dialer.NeedAliveState()) {
-				err = common.
-					In("UdpEndpoint r -> l relay").
-					With("Is NetError", ok).
-					With("Is Temporary", ok && netErr.Temporary()).
-					With("Is Timeout", ok && netErr.Timeout()).
-					With("Dialer", ue.dialer.Name).
-					Wrap(err)
-				if !ok {
-					log.Warnf("%+v", err)
-				} else if !netErr.Timeout() && ue.dialer.NeedAliveState() {
-					common.ErrorCount.With(labels).Inc()
-					ue.dialer.ReportUnavailable()
-					log.Warnf("%+v", err)
-				}
-			}
-		}
-	}()
+	go ue.run()
+
 	if !sniffingResult.ignored {
 		for _, d := range sniffingResult.pending {
 			if _, err := ue.WriteTo(d, dst); err != nil {

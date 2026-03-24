@@ -547,6 +547,31 @@ func (c *DnsController) reject(msg *dnsmessage.Msg) {
 	msg.Truncated = false
 }
 
+type dnsRefreshParam struct {
+	data     *dnsmessage.Msg
+	cacheKey dnsCacheKey
+	upstream *dns.Upstream
+	dialArg  dialArgument
+}
+
+var dnsRefreshParamPool = sync.Pool{
+	New: func() any { return &dnsRefreshParam{} },
+}
+
+func obtainDnsRefreshParam(data *dnsmessage.Msg, cacheKey *dnsCacheKey, upstream *dns.Upstream, dialArg *dialArgument) *dnsRefreshParam {
+	p := dnsRefreshParamPool.Get().(*dnsRefreshParam)
+	p.data = data
+	p.cacheKey = *cacheKey
+	p.upstream = upstream
+	p.dialArg = *dialArg
+	return p
+}
+
+func recycleDnsRefreshParam(p *dnsRefreshParam) {
+	p.data = nil
+	dnsRefreshParamPool.Put(p)
+}
+
 func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo) (bool, error) {
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
@@ -554,15 +579,8 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 		if cache := c.dnsCache.Get(cacheKey); cache != nil {
 			originalMsgForExpiredFetch := FillMsgByCache(msg, cache)
 			if originalMsgForExpiredFetch != nil {
-				// Copy dialArgument by value to avoid SWR UAF (Use-After-Free) as the original dialArgument
-				// comes from a pool and will be recycled when the parent function returns.
-				argCopy := *dialArg
-				go func(m *dnsmessage.Msg, arg dialArgument) {
-					// Refresh cache asynchronously.
-					if _, err := c.singleFlightForwardDNS(cacheKey, m, upstream, &arg); err != nil {
-						log.Warnf("failed to refresh dns cache for %v: %+v", cacheKey.String(), err)
-					}
-				}(originalMsgForExpiredFetch, argCopy)
+				// Refresh cache asynchronously.
+				go c.refreshDnsCache(obtainDnsRefreshParam(originalMsgForExpiredFetch, &cacheKey, upstream, dialArg))
 			}
 			if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
 				log.WithFields(log.Fields{
@@ -588,6 +606,13 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 		msg.Extra = msgResp.Extra
 	}
 	return true, err
+}
+
+func (c *DnsController) refreshDnsCache(p *dnsRefreshParam) {
+	defer recycleDnsRefreshParam(p)
+	if _, err := c.singleFlightForwardDNS(p.cacheKey, p.data, p.upstream, &p.dialArg); err != nil {
+		log.Warnf("failed to refresh dns cache for %v: %+v", p.cacheKey, err)
+	}
 }
 
 func (c *DnsController) singleFlightForwardDNS(
