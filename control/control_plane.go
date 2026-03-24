@@ -1195,6 +1195,11 @@ var allNetworkTypes = []*common.NetworkType{
 	{L4Proto: consts.L4ProtoStr_TCP, IpVersion: consts.IpVersionStr_4},
 }
 
+var unkIpNetworkTypes = []*common.NetworkType{
+	{L4Proto: consts.L4ProtoStr_UDP},
+	{L4Proto: consts.L4ProtoStr_TCP},
+}
+
 func GetNetworkType(l4Proto consts.L4ProtoStr, addr netip.Addr) *common.NetworkType {
 	switch {
 	case addr.Is4() || addr.Is4In6():
@@ -1208,7 +1213,10 @@ func GetNetworkType(l4Proto consts.L4ProtoStr, addr netip.Addr) *common.NetworkT
 		}
 		return allNetworkTypes[2]
 	}
-	return nil
+	if l4Proto == consts.L4ProtoStr_UDP {
+		return unkIpNetworkTypes[0]
+	}
+	return unkIpNetworkTypes[1]
 }
 
 func (c *ControlPlane) chooseBestDnsDialer(
