@@ -95,6 +95,8 @@ type ControlPlane struct {
 	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
 	dnsRouteCache         *common.CacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex]
 	dnsRoutingResultCache *common.CacheWithTTL[netip.Addr, *bpfRoutingResult]
+
+	udpTaskPool *UdpTaskPool[netip.AddrPort, emitParam]
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -446,6 +448,7 @@ func NewControlPlane(
 		outboundRedirects:      outboundRedirects,
 		dnsRouteCache:          common.NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
 		dnsRoutingResultCache:  common.NewCacheWithTTL[netip.Addr, *bpfRoutingResult](1*time.Hour, nil),
+		udpTaskPool:            NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 	}
 	defer func() {
 		if err != nil {
@@ -1032,94 +1035,180 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			}
 		}
 	}()
-	go func() {
-		for {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-			}
-			lconn, err := listener.tcpListener.Accept()
-			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					log.Errorf("%+v", oops.Wrapf(err, "Error when accept"))
-				}
-				break
-			}
-			go func(lconn net.Conn) {
-				c.inConnections.Store(lconn, struct{}{})
-				defer c.inConnections.Delete(lconn)
-				if err := c.handleConn(lconn); err != nil && c.ctx.Err() == nil {
-					log.Warningf("%+v", oops.Wrapf(err, "handleConn"))
-				}
-			}(lconn)
-		}
-	}()
+	go c.loopTcp(listener)
 
 	DefaultAnyfromPool = NewAnyfromPool()
 	go DefaultAnyfromPool.Start(c.ctx)
 
-	go func() {
-		for {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-			}
-			buf := pool.GetBuffer(consts.EthernetMtu)
-			oobBuf := pool.GetBuffer(120)
-			n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(buf, oobBuf)
-			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						log.Errorf("%+v", oops.Wrapf(err, "ReadFromUDPAddrPort: %v", src.String()))
-					}
-				}
-				break
-			}
-			go func(data, oob []byte) {
-				dst := common.ConvergeAddrPort(RetrieveOriginalDest(oob))
-				pool.PutBuffer(oob)
-				src := common.ConvergeAddrPort(src)
-				/// Handle DNS
-				// To keep consistency with kernel program, we only sniff DNS request sent to 53.
-				if dst.Port() == 53 {
-					var routingResult *bpfRoutingResult
-					var ok bool
-					if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
-						var err error
-						// Don't use ObtainBpfRoutingResult() because it would be saved in cache.
-						routingResult = new(bpfRoutingResult)
-						if err = c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
-							log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
-							pool.PutBuffer(data)
-							return
-						}
-						c.dnsRoutingResultCache.Save(src.Addr(), routingResult)
-					}
-					if routingResult.Must == 0 {
-						dq := ObtainDnsRequest(src, dst, routingResult, false)
-						handled := c.dnsController.Handle(data, dq)
-						if handled {
-							RecycleDnsRequest(dq)
-							pool.PutBuffer(data)
-							return
-						}
-						RecycleDnsRequest(dq)
-					}
-				}
+	udpTaskChan := c.startUdpWorkers(100)
+	go c.loopUdp(udpConn, udpTaskChan)
 
-				DefaultUdpTaskPool.EmitTask(src, func() {
-					defer pool.PutBuffer(data)
-					if e := c.handlePkt(data, src, dst); e != nil && c.ctx.Err() == nil {
-						log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
-					}
-				})
-			}(buf[:n], oobBuf[:oobn])
-		}
-	}()
 	<-c.ctx.Done()
+	close(udpTaskChan)
 	return nil
+}
+
+func (c *ControlPlane) loopTcp(listener *Listener) {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+		}
+		lconn, err := listener.tcpListener.Accept()
+		if err != nil {
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				log.Errorf("%+v", oops.Wrapf(err, "Error when accept"))
+			}
+			break
+		}
+		go func(lconn net.Conn) {
+			c.inConnections.Store(lconn, struct{}{})
+			defer c.inConnections.Delete(lconn)
+			if err := c.handleConn(lconn); err != nil && c.ctx.Err() == nil {
+				log.Warningf("%+v", oops.Wrapf(err, "handleConn"))
+			}
+		}(lconn)
+	}
+}
+
+type udpRoutineParam struct {
+	buf    []byte
+	oobBuf []byte
+	src    netip.AddrPort
+}
+
+var udpRoutineParamPool = sync.Pool{
+	New: func() any { return &udpRoutineParam{} },
+}
+
+func obtainUdpRoutineParam(udpConn *net.UDPConn) (*udpRoutineParam, error) {
+	param := udpRoutineParamPool.Get().(*udpRoutineParam)
+	param.buf = pool.GetBuffer(consts.EthernetMtu + 120)
+	param.oobBuf = param.buf[consts.EthernetMtu:]
+	param.buf = param.buf[:consts.EthernetMtu]
+	n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(param.buf, param.oobBuf)
+	if err != nil {
+		pool.PutBuffer(param.buf)
+		udpRoutineParamPool.Put(param)
+		return nil, err
+	}
+	param.src = src
+	param.buf = param.buf[:n]
+	param.oobBuf = param.oobBuf[:oobn]
+	return param, nil
+}
+
+func recycleUdpRoutineParam(param *udpRoutineParam) {
+	param.buf = nil
+	param.oobBuf = nil
+	udpRoutineParamPool.Put(param)
+}
+
+func (c *ControlPlane) loopUdp(udpConn *net.UDPConn, udpTaskChan chan *udpRoutineParam) {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+		}
+		param, err := obtainUdpRoutineParam(udpConn)
+		if err != nil {
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					log.Errorf("ReadMsgUDPAddrPort failed: %v", err)
+				}
+			}
+			break
+		}
+		select {
+		case udpTaskChan <- param:
+		case <-c.ctx.Done():
+			pool.PutBuffer(param.buf)
+			recycleUdpRoutineParam(param)
+		}
+	}
+}
+
+func (c *ControlPlane) startUdpWorkers(workerCount int) chan *udpRoutineParam {
+	udpTaskChan := make(chan *udpRoutineParam, 10240)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			for p := range udpTaskChan {
+				c.udpRoutine(p)
+			}
+		}()
+	}
+	return udpTaskChan
+}
+
+func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
+	defer recycleUdpRoutineParam(param)
+	data := param.buf
+	dst := common.ConvergeAddrPort(RetrieveOriginalDest(param.oobBuf))
+	src := common.ConvergeAddrPort(param.src)
+	/// Handle DNS
+	// To keep consistency with kernel program, we only sniff DNS request sent to 53.
+	if dst.Port() == 53 {
+		var routingResult *bpfRoutingResult
+		var ok bool
+		if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
+			var err error
+			// Don't use ObtainBpfRoutingResult() because it would be saved in cache.
+			routingResult = new(bpfRoutingResult)
+			if err = c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
+				log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
+				pool.PutBuffer(data)
+				return
+			}
+			c.dnsRoutingResultCache.Save(src.Addr(), routingResult)
+		}
+		if routingResult.Must == 0 {
+			dq := ObtainDnsRequest(src, dst, routingResult, false)
+			handled := c.dnsController.Handle(data, dq)
+			if handled {
+				RecycleDnsRequest(dq)
+				pool.PutBuffer(data)
+				return
+			}
+			RecycleDnsRequest(dq)
+		}
+	}
+
+	c.udpTaskPool.EmitTask(src, c.obtainUdpEmitTask(src, dst, data))
+}
+
+type emitParam struct {
+	AddrPortPair
+	data []byte
+}
+
+var udpEmitTaskPool = sync.Pool{
+	New: func() any { return &UdpTask[emitParam]{} },
+}
+
+func (c *ControlPlane) udpEmitTaskFunc(t *UdpTask[emitParam]) {
+	p := &t.param
+	defer recycleUdpEmitTask(t)
+	if e := c.handlePkt(p.data, p.Src, p.Dst); e != nil && c.ctx.Err() == nil {
+		log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
+	}
+}
+
+func (c *ControlPlane) obtainUdpEmitTask(src, dst netip.AddrPort, data []byte) *UdpTask[emitParam] {
+	t := udpEmitTaskPool.Get().(*UdpTask[emitParam])
+	t.param.Src = src
+	t.param.Dst = dst
+	t.param.data = data
+	t.exec = c.udpEmitTaskFunc
+	return t
+}
+
+func recycleUdpEmitTask(t *UdpTask[emitParam]) {
+	pool.PutBuffer(t.param.data)
+	t.param.data = nil
+	t.exec = nil
+	udpEmitTaskPool.Put(t)
 }
 
 func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (listener *Listener, err error) {
