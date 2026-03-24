@@ -161,6 +161,12 @@ type dialArgument struct {
 	// mark        uint32
 }
 
+var dialArgumentPool = sync.Pool{
+	New: func() any {
+		return &dialArgument{}
+	},
+}
+
 type dnsForwarderKey struct {
 	upstream     dns.Upstream
 	dialArgument dialArgument
@@ -177,6 +183,12 @@ type dnsResponseData struct {
 	isNew    bool
 
 	upstreamFrom *dns.Upstream
+}
+
+var dnsResponseDataPool = sync.Pool{
+	New: func() any {
+		return &dnsResponseData{}
+	},
 }
 
 type dnsCacheKey struct {
@@ -219,57 +231,61 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	// Avoids duplicated id from clients, so make the id unique.
 	dnsIdSet(data, uint16(fastrand.Intn(math.MaxUint16)))
 
+	// Get pooled dnsResponseData and pass it as output parameter.
+	dnsResp := dnsResponseDataPool.Get().(*dnsResponseData)
+	defer func() {
+		if dnsResp.respData != nil && dnsResp.fromPool {
+			pool.PutBuffer(dnsResp.respData)
+		}
+		dnsResponseDataPool.Put(dnsResp)
+	}()
+
 	var err error
-	var dnsResp dnsResponseData
 	// Check ip version preference and qtype.
 	switch queryInfo.qtype {
 	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
 		if c.qtypePrefer == 0 {
-			dnsResp, err = c.handleDNSRequest(data, req, queryInfo)
+			err = c.handleDNSRequest(data, req, queryInfo, dnsResp)
 		} else {
 			// Try to make both A and AAAA lookups.
 			// TODO: ignoreFixedTTL?
-			resultCh := make(chan struct {
-				dnsResp dnsResponseData
-				err     error
-			}, 1)
+			type alternateResult struct {
+				err       error
+				hasAnswer bool
+			}
+			resultCh := make(chan *alternateResult, 1)
 			go func() {
+				dnsResp2 := dnsResponseDataPool.Get().(*dnsResponseData)
 				data2 := pool.GetBuffer(len(data))
-				defer pool.PutBuffer(data2)
+				defer func() {
+					pool.PutBuffer(data2)
+					if dnsResp2.respData != nil && dnsResp2.fromPool {
+						pool.PutBuffer(dnsResp2.respData)
+					}
+					dnsResponseDataPool.Put(dnsResp2)
+				}()
 				copy(data2, data)
 				dnsSwitchQtype(data2)
-
-				dnsResp2 := dnsResponseData{}
-				var err error
-				if dnsResp2, err = c.handleDNSRequest(data2, req, queryInfo); err == nil {
-					ips, _ := dnsAnswers(dnsResp2.respData)
-					if len(ips) == 0 {
-						dnsResp2 = dnsResponseData{}
-					}
+				err := c.handleDNSRequest(data2, req, queryInfo, dnsResp2)
+				if err != nil {
+					resultCh <- &alternateResult{err: err}
+					return
 				}
-				resultCh <- struct {
-					dnsResp dnsResponseData
-					err     error
-				}{dnsResp2, err}
+				ips, _ := dnsAnswers(dnsResp2.respData)
+				resultCh <- &alternateResult{hasAnswer: len(ips) > 0}
 			}()
-			dnsResp, err = c.handleDNSRequest(data, req, queryInfo)
+			err = c.handleDNSRequest(data, req, queryInfo, dnsResp)
 			result := <-resultCh
-			if result.dnsResp.respData != nil && result.dnsResp.fromPool {
-				defer pool.PutBuffer(result.dnsResp.respData)
-			}
 			err = common.Join(err, result.err)
 			if err != nil {
 				break
 			}
-			if c.qtypePrefer != queryInfo.qtype && result.dnsResp.respData != nil {
+			if c.qtypePrefer != queryInfo.qtype && result.hasAnswer && dnsResp.respData != nil {
 				c.reject(dnsResp.respData)
 			}
 		}
 	default:
-		dnsResp, err = c.handleDNSRequest(data, req, queryInfo)
-	}
-	if dnsResp.respData != nil && dnsResp.fromPool {
-		defer pool.PutBuffer(dnsResp.respData)
+		err = c.handleDNSRequest(data, req, queryInfo, dnsResp)
 	}
 	dataToWrite := dnsResp.respData
 	if err != nil {
@@ -308,21 +324,25 @@ func (c *DnsController) handleDNSRequest(
 	data []byte,
 	req *dnsRequest,
 	queryInfo queryInfo,
-) (dnsResponseData, error) {
+	dnsResp *dnsResponseData,
+) error {
 	var err error
 	// Route Requset
 	RequestIndex, queryInfo, ok := c.requestSelectCache.GetWithKey(queryInfo)
 	if !ok {
 		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
 		if err != nil {
-			return dnsResponseData{}, err
+			return err
 		}
 		c.requestSelectCache.Save(queryInfo, RequestIndex)
 	}
 
 	if RequestIndex == consts.DnsRequestOutboundIndex_Reject {
 		c.reject(data)
-		return dnsResponseData{respData: data, fromPool: false}, nil
+		dnsResp.respData = data
+		dnsResp.fromPool = false
+		dnsResp.isNew = false
+		return nil
 	}
 
 	var upstream *dns.Upstream
@@ -339,13 +359,13 @@ func (c *DnsController) handleDNSRequest(
 		// Get corresponding upstream.
 		upstream, err = c.routing.GetUpstream(RequestIndex)
 		if err != nil {
-			return dnsResponseData{}, err
+			return err
 		}
 	}
 
 	// Dial and re-route
-	var dnsResp dnsResponseData
-	dialArgument := dialArgument{}
+	dialArgument := dialArgumentPool.Get().(*dialArgument)
+	defer dialArgumentPool.Put(dialArgument)
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		if log.IsLevelEnabled(log.DebugLevel) {
@@ -356,13 +376,12 @@ Dial:
 		}
 
 		// Select best dial arguments (outbound, dialer, l4proto, ipversion, etc.)
-		if err := c.bestDialerChooser(req, upstream, &dialArgument); err != nil {
-			return dnsResponseData{}, err
+		if err := c.bestDialerChooser(req, upstream, dialArgument); err != nil {
+			return err
 		}
 
 		// TODO: 这里可能不可以这样做
-		dnsResp, err = c.dialSend(data, upstream, &dialArgument, queryInfo)
-		if err != nil {
+		if err = c.dialSend(data, upstream, dialArgument, queryInfo, dnsResp); err != nil {
 			netErr, ok := IsNetError(err)
 			if !ok || !dnsResponse(dnsResp.respData) || (!netErr.Timeout() && dialArgument.Dialer.NeedAliveState()) {
 				err = common.
@@ -376,7 +395,7 @@ Dial:
 					With("Dialer", dialArgument.Dialer.Name).
 					Wrapf(err, "DNS dialSend error")
 				if !ok || !dnsResponse(dnsResp.respData) {
-					return dnsResp, err
+					return err
 				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
 					labels := common.ObtainPrometheusLabels(
 						dialArgument.Outbound.Name,
@@ -386,13 +405,13 @@ Dial:
 					defer common.RecyclePrometheusLabels(labels)
 					common.ErrorCount.With(labels).Inc()
 					dialArgument.Dialer.ReportUnavailable()
-					return dnsResp, err
+					return err
 				}
 			}
 		}
 		if !c.routing.HasResponseRules() {
 			if dnsResp.isNew {
-				c.logDnsResponse(req, &dialArgument, queryInfo, true)
+				c.logDnsResponse(req, dialArgument, queryInfo, true)
 			}
 			break Dial
 		}
@@ -402,11 +421,11 @@ Dial:
 		ips, _ := dnsAnswers(dnsResp.respData)
 		ResponseIndex, nextUpstream, err = c.routing.ResponseSelect(queryInfo.qname, queryInfo.qtype, ips, upstream)
 		if err != nil {
-			return dnsResp, err
+			return err
 		}
 		if ResponseIndex.IsReserved() {
 			if dnsResp.isNew {
-				c.logDnsResponse(req, &dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
+				c.logDnsResponse(req, dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
 			}
 			switch ResponseIndex {
 			case consts.DnsResponseOutboundIndex_Reject:
@@ -418,11 +437,11 @@ Dial:
 				// Accept.
 				break Dial
 			default:
-				return dnsResp, common.Errf("unknown upstream: %v", ResponseIndex.String())
+				return common.Errf("unknown upstream: %v", ResponseIndex.String())
 			}
 		}
 		if invokingDepth == MaxDnsLookupDepth {
-			return dnsResp, common.Errf("too deep DNS lookup invoking (depth: %v); there may be infinite loop in your DNS response routing", MaxDnsLookupDepth)
+			return common.Errf("too deep DNS lookup invoking (depth: %v); there may be infinite loop in your DNS response routing", MaxDnsLookupDepth)
 		}
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
@@ -451,7 +470,7 @@ Dial:
 			err = c.updateLookupCache(queryInfo.qname, domainBitmap, allZero, ips, time.Duration(ttl)*time.Second)
 		}
 	}
-	return dnsResp, err
+	return err
 }
 
 func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgument, queryInfo queryInfo, accepted bool) {
@@ -571,7 +590,7 @@ func (c *DnsController) reject(data []byte) {
 	data[10], data[11] = 0, 0 // ARCOUNT = 0
 }
 
-func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo) (dnsResponseData, error) {
+func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
@@ -593,12 +612,18 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 					"answer": FormatDnsRsc(respData),
 				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 			}
-			return dnsResponseData{respData: respData, fromPool: true, isNew: cache.IsNew, upstreamFrom: upstream}, nil
+			// Use the caller's pooled dnsResp to avoid extra allocation.
+			dnsResp.respData = respData
+			dnsResp.fromPool = true
+			dnsResp.isNew = cache.IsNew
+			dnsResp.upstreamFrom = upstream
+			return nil
 		}
 	}
 	// Pending for the same lookup.
 	respData, leader, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
-	dnsResp := dnsResponseData{isNew: leader, upstreamFrom: upstream}
+	dnsResp.isNew = leader
+	dnsResp.upstreamFrom = upstream
 	if respData != nil {
 		if !shared {
 			dnsResp.respData = respData
@@ -611,7 +636,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 		}
 		dnsIdSet(dnsResp.respData, dnsId(data)) // keep the same id with request
 	}
-	return dnsResp, err
+	return err
 }
 
 func (c *DnsController) singleFlightForwardDNS(

@@ -50,18 +50,21 @@ func (c *ControlPlane) handleTcpDns(
 	// Avoids duplicated id from clients, so make the id unique.
 	dnsIdSet(data, uint16(fastrand.Intn(math.MaxUint16)))
 	queryInfo := dnsQueryInfo(data)
-	var respData dnsResponseData
 	dq := ObtainDnsRequest(src, dst, routingResult, true)
-	if respData, err = c.dnsController.handleDNSRequest(data, dq, queryInfo); err != nil {
+	respData := dnsResponseDataPool.Get().(*dnsResponseData)
+	if err = c.dnsController.handleDNSRequest(data, dq, queryInfo, respData); err != nil {
 		log.Errorf("Failed to handle tcp dns request: %v", err)
 		dnsRcodeSet(respData.respData, dnsmessage.RcodeServerFailure)
 	}
 	RecycleDnsRequest(dq)
+	defer func() {
+		if respData.respData != nil && respData.fromPool {
+			pool.PutBuffer(respData.respData)
+		}
+		dnsResponseDataPool.Put(respData)
+	}()
 	if len(respData.respData) == 0 {
 		return nil
-	}
-	if respData.fromPool {
-		defer pool.PutBuffer(respData.respData)
 	}
 	// Keep the id the same with request.
 	dnsIdSet(respData.respData, id)
