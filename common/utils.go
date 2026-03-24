@@ -496,3 +496,52 @@ func GenerateCertChainHash(rawCerts [][]byte) (chainHash []byte) {
 	}
 	return chainHash
 }
+
+func isFqdn(domain []byte) bool {
+	dLen := len(domain)
+	if dLen == 0 {
+		return false
+	}
+	if domain[dLen-1] != '.' {
+		return false
+	}
+	i := dLen - 2
+	escape := false
+	for i >= 0 && domain[i] == '\\' {
+		escape = !escape
+		i--
+	}
+	if escape {
+		return false
+	}
+	for i := 0; i < dLen; i++ {
+		c := domain[i]
+		if c >= 'A' && c <= 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+func CanonicalName(domain string) string {
+	dLen := len(domain)
+	if dLen == 0 {
+		return "."
+	}
+	domainBytes := unsafe.Slice(unsafe.StringData(domain), dLen)
+	if isFqdn(domainBytes) {
+		return domain
+	}
+	result := make([]byte, dLen, dLen+1)
+	for i := 0; i < dLen; i++ {
+		c := domain[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		result[i] = c
+	}
+	if !isFqdn(result) {
+		result = append(result, '.')
+	}
+	return unsafe.String(unsafe.SliceData(result), len(result))
+}
