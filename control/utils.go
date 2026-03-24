@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"structs"
 	"sync"
@@ -107,7 +108,7 @@ func (c *ControlPlane) RouteDialOption(
 		outboundIndex = redirected
 	}
 	outbound := c.outbounds[outboundIndex]
-	dialTarget, dialIp := c.ChooseDialTarget(outboundIndex, dst, domain, verified && c.dialTargetOverride)
+	dialTarget, dialIp := chooseDialTarget(dst, domain, verified && c.dialTargetOverride)
 	dialer, fallback, err := outbound.SelectFallbackIpVersion(networkType, dialIp)
 	fallbackDialer := false
 	if err != nil {
@@ -123,6 +124,62 @@ func (c *ControlPlane) RouteDialOption(
 	dialOptionOut.FallbackIpVersion = fallback
 	dialOptionOut.FallbackDialer = fallbackDialer
 	return nil
+}
+
+func chooseDialTarget(dst netip.AddrPort, domain string, override bool) (dialTarget string, dialIp bool) {
+	if !override || len(domain) == 0 {
+		return dst.String(), true
+	}
+	// domain cases:
+	// - ""
+	// - "abc.xyz.com"
+	// - "abc.xyz.com:789"
+	// - "[2606:4700:20::681a:d1f]"
+	// - "2606:4700:20::681a:d1f"
+	// - "111.222.333.444"
+	// - "[2606:4700:20::681a:d1f]:5678"
+	// - "111.222.333.444:5678"
+	hasAlpha := false
+	lastColon := -1
+	colonCount := 0
+	inBracket := domain[0] == '['
+	for i := range len(domain) {
+		c := domain[i]
+		if !hasAlpha && ((c >= 'g' && c <= 'z') || (c >= 'G' && c <= 'Z')) {
+			hasAlpha = true
+		}
+		if inBracket && c == ']' {
+			inBracket = false
+		}
+		if !inBracket && c == ':' {
+			lastColon = i
+			colonCount++
+		}
+	}
+
+	if lastColon > 0 {
+		// domain-or-ip4/6:port
+		dialTarget = domain
+	} else if colonCount > 1 {
+		// ipv6 address
+		dialTarget = "[" + domain + "]:" + strconv.Itoa(int(dst.Port()))
+		dialIp = true
+	} else {
+		// ipv4 address or domain
+		dialTarget = domain + ":" + strconv.Itoa(int(dst.Port()))
+		if !hasAlpha {
+			// ipv4 address
+			dialIp = true
+		}
+	}
+
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.WithFields(log.Fields{
+			"from": dst.String(),
+			"to":   dialTarget,
+		}).Debugln("Rewrite dial target to domain")
+	}
+	return
 }
 
 type TrafficLogConn struct {

@@ -957,35 +957,6 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 	return
 }
 
-func (c *ControlPlane) ChooseDialTarget(outbound consts.OutboundIndex, dst netip.AddrPort, domain string, override bool) (dialTarget string, dialIp bool) {
-	if override {
-		if strings.HasPrefix(domain, "[") && strings.HasSuffix(domain, "]") {
-			// Sniffed domain may be like `[2606:4700:20::681a:d1f]`. We should remove the brackets.
-			domain = domain[1 : len(domain)-1]
-		}
-		if _, err := netip.ParseAddr(domain); err == nil {
-			// domain is IPv4 or IPv6 (has colon)
-			dialTarget = net.JoinHostPort(domain, strconv.Itoa(int(dst.Port())))
-			dialIp = true
-		} else if _, _, err := net.SplitHostPort(domain); err == nil {
-			// domain is already domain:port
-			dialTarget = domain
-		} else {
-			dialTarget = net.JoinHostPort(domain, strconv.Itoa(int(dst.Port())))
-		}
-		if log.IsLevelEnabled(log.DebugLevel) {
-			log.WithFields(log.Fields{
-				"from": dst.String(),
-				"to":   dialTarget,
-			}).Debugln("Rewrite dial target to domain")
-		}
-	} else {
-		dialTarget = dst.String()
-		dialIp = true
-	}
-	return
-}
-
 type Listener struct {
 	tcpListener net.Listener
 	packetConn  net.PacketConn
