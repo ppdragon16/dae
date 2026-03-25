@@ -25,6 +25,9 @@ func RefineAddrPortToShow(addrPort netip.AddrPort) (srcToShow string) {
 }
 
 func ToAddrPort(addr net.Addr) netip.AddrPort {
+	if addr == nil {
+		return netip.AddrPort{}
+	}
 	var ap netip.AddrPort
 	switch a := addr.(type) {
 	case *net.UDPAddr:
