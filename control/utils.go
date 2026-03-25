@@ -16,7 +16,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"structs"
 	"sync"
 	"syscall"
 
@@ -268,21 +267,27 @@ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto con
 	)
 }
 
-func (c *controlPlaneCore) RetrieveTCPRoutingResult(src, dst netip.AddrPort, outResult *bpfRoutingResult) error {
-	tuples := &bpfTuplesKey{
-		Sip: struct {
-			_       structs.HostLayout
-			U6Addr8 [16]uint8
-		}{U6Addr8: src.Addr().As16()},
-		Sport: common.Htons(src.Port()),
-		Dip: struct {
-			_       structs.HostLayout
-			U6Addr8 [16]uint8
-		}{U6Addr8: dst.Addr().As16()},
-		Dport:   common.Htons(dst.Port()),
-		L4proto: unix.IPPROTO_TCP,
-	}
+var bpfTuplesKeyPool = sync.Pool{
+	New: func() any { return &bpfTuplesKey{} },
+}
 
+func obtainBpfTuplesKey(src, dst netip.AddrPort, l4Proto uint8) *bpfTuplesKey {
+	tuples := bpfTuplesKeyPool.Get().(*bpfTuplesKey)
+	tuples.Sip.U6Addr8 = src.Addr().As16()
+	tuples.Dip.U6Addr8 = dst.Addr().As16()
+	tuples.Sport = common.Htons(src.Port())
+	tuples.Dport = common.Htons(dst.Port())
+	tuples.L4proto = l4Proto
+	return tuples
+}
+
+func recycleBpfTuplesKey(tuples *bpfTuplesKey) {
+	bpfTuplesKeyPool.Put(tuples)
+}
+
+func (c *controlPlaneCore) RetrieveTCPRoutingResult(src, dst netip.AddrPort, outResult *bpfRoutingResult) error {
+	tuples := obtainBpfTuplesKey(src, dst, unix.IPPROTO_TCP)
+	defer recycleBpfTuplesKey(tuples)
 	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, outResult); err != nil {
 		return fmt.Errorf("reading map for tcp: key [%v, tcp, %v]: %w", src.String(), dst.String(), err)
 	}
@@ -290,15 +295,8 @@ func (c *controlPlaneCore) RetrieveTCPRoutingResult(src, dst netip.AddrPort, out
 }
 
 func (c *controlPlaneCore) RetrieveUDPRoutingResult(src netip.AddrPort, outResult *bpfRoutingResult) error {
-	tuples := &bpfTuplesKey{
-		Sip: struct {
-			_       structs.HostLayout
-			U6Addr8 [16]uint8
-		}{U6Addr8: src.Addr().As16()},
-		Sport:   common.Htons(src.Port()),
-		L4proto: unix.IPPROTO_UDP,
-	}
-
+	tuples := obtainBpfTuplesKey(src, netip.AddrPort{}, unix.IPPROTO_UDP)
+	defer recycleBpfTuplesKey(tuples)
 	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, outResult); err != nil {
 		return fmt.Errorf("reading map for udp: key [%v, udp, 0]: %w", src.String(), err)
 	}
