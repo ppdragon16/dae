@@ -1045,7 +1045,6 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	go c.loopUdp(udpConn, udpTaskChan)
 
 	<-c.ctx.Done()
-	close(udpTaskChan)
 	return nil
 }
 
@@ -1135,8 +1134,16 @@ func (c *ControlPlane) startUdpWorkers(workerCount int) chan *udpRoutineParam {
 	udpTaskChan := make(chan *udpRoutineParam, 10240)
 	for i := 0; i < workerCount; i++ {
 		go func() {
-			for p := range udpTaskChan {
-				c.udpRoutine(p)
+			for {
+				select {
+				case <-c.ctx.Done():
+					return
+				case p, ok := <-udpTaskChan:
+					if !ok {
+						return
+					}
+					c.udpRoutine(p)
+				}
 			}
 		}()
 	}
