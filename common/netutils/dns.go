@@ -67,15 +67,22 @@ func ResolveHttp(client *http.Client, url *url.URL, data []byte) ([]byte, error)
 
 func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error) {
 	deadline := time.Now().Add(consts.DefaultDNSTimeout)
+	var hasReadDeadline, hasWriteDeadline bool
 	if d, ok := stream.(interface{ SetReadDeadline(time.Time) error }); ok {
 		d.SetReadDeadline(deadline)
+		hasReadDeadline = true
 	}
 	if d, ok := stream.(interface{ SetWriteDeadline(time.Time) error }); ok {
 		d.SetWriteDeadline(deadline)
+		hasWriteDeadline = true
 	}
 
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	defer cancel()
+	ctx := context.Background()
+	if !hasReadDeadline || !hasWriteDeadline {
+		ctxWithDeadline, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		ctx = ctxWithDeadline
+	}
 
 	buf := pool.GetBuffer(len(data) + 2)
 	defer pool.PutBuffer(buf)
@@ -246,20 +253,12 @@ func ResolveSOA(d netproxy.Dialer, dns netip.AddrPort, host string, network stri
 	return records, nil
 }
 
-func DnsCheck(dialer netproxy.Dialer, server string, network string, data []byte) (ok bool, err error) {
-	resources, err := resolveMsg(dialer, server, network, data)
-	if err != nil {
-		return false, err
-	}
-	for _, ans := range resources {
-		if ans.Header().Rrtype == dnsmessage.TypeA {
-			return true, nil
-		}
-	}
-	return false, ErrNoIpRecord
+func DnsCheck(dialer netproxy.Dialer, server string, network string, data []byte) (bool, error) {
+	_, err := resolveMsg(dialer, server, network, data)
+	return err == nil, err
 }
 
-func resolveMsg(dialer netproxy.Dialer, server string, network string, data []byte) (ans []dnsmessage.RR, err error) {
+func resolveMsg(dialer netproxy.Dialer, server string, network string, data []byte) (resp []byte, err error) {
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	conn, err := dialer.DialContext(ctx, network, server)
@@ -268,21 +267,10 @@ func resolveMsg(dialer netproxy.Dialer, server string, network string, data []by
 	}
 	defer conn.Close()
 
-	var resp []byte
 	if network == "tcp" {
-		resp, err = ResolveStream(conn, data, false)
-	} else {
-		resp, err = ResolveUDP(conn, data)
+		return ResolveStream(conn, data, false)
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	msg := dnsmessage.Msg{}
-	if err = msg.Unpack(resp); err != nil {
-		return nil, err
-	}
-	return msg.Answer, nil
+	return ResolveUDP(conn, data)
 }
 
 func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uint16, network string) (ans []dnsmessage.RR, err error) {
@@ -304,5 +292,14 @@ func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uin
 		return nil, err
 	}
 
-	return resolveMsg(dialer, server.String(), network, data)
+	resp, err := resolveMsg(dialer, server.String(), network, data)
+	if err != nil {
+		return nil, err
+	}
+	msg = dnsmessage.Msg{}
+	if err = msg.Unpack(resp); err != nil {
+		return nil, err
+	}
+	return msg.Answer, nil
+
 }
