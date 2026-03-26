@@ -182,7 +182,7 @@ type dnsCacheKey struct {
 }
 
 func (k dnsCacheKey) String() string {
-	return fmt.Sprintf("%v,%v,%v", k.qname, k.qtype, k.outbound.Name)
+	return k.qname + string(k.qtype) + k.outbound.Name
 }
 
 func (c *DnsController) prepareQueryInfo(dnsMessage *dnsmessage.Msg) (queryInfo queryInfo) {
@@ -663,12 +663,14 @@ func (c *DnsController) singleFlightForwardDNS(
 		switch {
 		case len(msg.Question) == 0, // Check healthy resp.
 			msg.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
-			log.WithFields(log.Fields{
-				"qname": cacheKey.qname,
-				"qtype": cacheKey.qtype,
-				"rcode": msg.Rcode,
-				"ans":   FormatDnsRsc(msg.Answer),
-			}).Tracef("Not a valid DNS response")
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"qname": cacheKey.qname,
+					"qtype": cacheKey.qtype,
+					"rcode": msg.Rcode,
+					"ans":   FormatDnsRsc(msg.Answer),
+				}).Debugf("Not a valid DNS response")
+			}
 			return msg, nil
 		}
 

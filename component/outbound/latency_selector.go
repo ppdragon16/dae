@@ -149,6 +149,16 @@ func (s *LatencyBasedSelector) updateDialerAliveState(dialer *dialer.Dialer, ali
 }
 
 func (s *LatencyBasedSelector) logDialerSelection(oldBestDialer *dialer.Dialer, newBestDialer *dialer.Dialer, networkType *common.NetworkType) {
+	var logLevel log.Level
+	if oldBestDialer == nil {
+		logLevel = log.WarnLevel
+	} else {
+		logLevel = log.InfoLevel
+	}
+	if !log.IsLevelEnabled(logLevel) {
+		return
+	}
+
 	var re string
 	var oldDialerName, newDialerName string
 
