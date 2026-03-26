@@ -129,9 +129,11 @@ select_dialer:
 }
 
 func (g *DialerGroup) PrintLatency() {
-	for i := 0; i < 4; i++ {
-		networkType := common.IndexToNetworkType(i)
-		g.selector.PrintLatencies(networkType, log.Infoln)
+	if log.IsLevelEnabled(log.InfoLevel) {
+		for i := 0; i < 4; i++ {
+			networkType := common.IndexToNetworkType(i)
+			g.selector.PrintLatencies(networkType, log.Infoln)
+		}
 	}
 }
 

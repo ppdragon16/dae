@@ -197,7 +197,7 @@ type dnsCacheKey struct {
 }
 
 func (k dnsCacheKey) String() string {
-	return fmt.Sprintf("%v,%v,%v", k.qname, k.qtype, k.outbound.Name)
+	return k.qname + string(k.qtype) + k.outbound.Name
 }
 
 func dnsQueryInfo(data []byte) (queryInfo queryInfo) {
@@ -717,12 +717,14 @@ func (c *DnsController) singleFlightForwardDNS(
 			return nil, common.Errf("DNS message response flag is unset")
 		}
 		if !isDnsResponseValid(r) {
-			log.WithFields(log.Fields{
-				"qname": cacheKey.qname,
-				"qtype": cacheKey.qtype,
-				"rcode": rcode,
-				"ans":   FormatDnsRsc(r),
-			}).Tracef("Not a valid DNS response")
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"qname": cacheKey.qname,
+					"qtype": cacheKey.qtype,
+					"rcode": rcode,
+					"ans":   FormatDnsRsc(r),
+				}).Debugf("Not a valid DNS response")
+			}
 			return r, nil
 		}
 
