@@ -364,30 +364,25 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	if err := d.Connect(); err != nil {
 		log.WithFields(log.Fields{
 			"node": d.Name,
-		}).Infof("Failed to connect: %v", err)
+		}).Errorf("Failed to connect: %v", err)
 		return nil
 	}
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
 		wg.Go(func() {
 			d.supported[i], latency[i], err[i] = d.Check(opt)
-			if d.supported[i] {
-				log.WithFields(log.Fields{
-					"network": opt.networkType.String(),
-					"node":    d.Name,
-					"last":    latency[i].Truncate(time.Millisecond).String(),
-				}).Infoln("Inital Connectivity Check")
-			} else {
-				if log.IsLevelEnabled(log.TraceLevel) {
+			if log.IsLevelEnabled(log.InfoLevel) {
+				if d.supported[i] {
 					log.WithFields(log.Fields{
 						"network": opt.networkType.String(),
 						"node":    d.Name,
-					}).Infof("Inital Connectivity Check Failed: %v\n", err[i])
+						"last":    latency[i].Truncate(time.Millisecond).String(),
+					}).Infoln("Inital Connectivity Check")
 				} else {
 					log.WithFields(log.Fields{
 						"network": opt.networkType.String(),
 						"node":    d.Name,
-					}).Infof("Inital Connectivity Check Failed: %v", err[i])
+					}).Infof("Inital Connectivity Check Failed: %v\n", err[i])
 				}
 			}
 		})

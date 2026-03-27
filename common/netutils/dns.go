@@ -65,23 +65,18 @@ func ResolveHttp(client *http.Client, url *url.URL, data []byte) ([]byte, error)
 	return buf, nil
 }
 
-func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error) {
-	deadline := time.Now().Add(consts.DefaultDNSTimeout)
-	var hasReadDeadline, hasWriteDeadline bool
-	if d, ok := stream.(interface{ SetReadDeadline(time.Time) error }); ok {
-		d.SetReadDeadline(deadline)
-		hasReadDeadline = true
-	}
-	if d, ok := stream.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		d.SetWriteDeadline(deadline)
-		hasWriteDeadline = true
-	}
+type deadlineStream interface {
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+}
 
-	ctx := context.Background()
-	if !hasReadDeadline || !hasWriteDeadline {
-		ctxWithDeadline, cancel := context.WithDeadline(ctx, deadline)
-		defer cancel()
-		ctx = ctxWithDeadline
+func ResolveStream(stream io.ReadWriter, data []byte, quic bool, respBuf []byte) ([]byte, error) {
+	if d, ok := stream.(deadlineStream); ok {
+		deadline := time.Now().Add(consts.DefaultDNSTimeout)
+		d.SetReadDeadline(deadline)
+		d.SetWriteDeadline(deadline)
+	} else {
+		return nil, errors.New("stream does not support deadlines")
 	}
 
 	buf := pool.GetBuffer(len(data) + 2)
@@ -100,62 +95,45 @@ func ResolveStream(stream io.ReadWriter, data []byte, quic bool) ([]byte, error)
 	}
 	_, err := stream.Write(buf)
 	if err != nil {
-		return nil, oops.Wrapf(err, "failed to write DNS req")
+		return nil, err
 	}
-
-	type result struct {
-		data []byte
-		err  error
-	}
-	recvCh := make(chan *result, 1)
-	go func() {
-		var resp []byte
-		var err error
-		// Read two byte length.
-		if _, err = io.ReadFull(stream, buf[:2]); err != nil {
-			err = oops.Wrapf(err, "failed to read DNS resp payload length")
-		}
-		if err == nil {
-			resp = make([]byte, binary.BigEndian.Uint16(buf[:2]))
-			if _, err = io.ReadFull(stream, resp); err != nil {
-				err = oops.Wrapf(err, "failed to read DNS resp payload")
-			}
-		}
-		select {
-		case recvCh <- &result{data: resp, err: err}:
-		case <-ctx.Done():
-		}
-	}()
-	select {
-	case res := <-recvCh:
-		return res.data, res.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return readResolveStream(stream, buf[:2], respBuf)
 }
 
-func ResolveUDP(conn net.Conn, data []byte) (resp []byte, err error) {
+func readResolveStream(stream io.ReadWriter, lenBuf []byte, respBuf []byte) (resp []byte, err error) {
+	// Read two byte length.
+	if _, err = io.ReadFull(stream, lenBuf[:2]); err != nil {
+		err = oops.Wrapf(err, "failed to read DNS resp payload length")
+	}
+	var n int
+	if err == nil {
+		respLen := binary.BigEndian.Uint16(lenBuf[:2])
+		if int(respLen) > len(respBuf) {
+			err = fmt.Errorf("DNS resp payload is too large")
+		} else if n, err = io.ReadFull(stream, respBuf[:respLen]); err != nil {
+			err = oops.Wrapf(err, "failed to read DNS resp payload")
+		}
+	}
+	if err == nil {
+		return respBuf[:n], nil
+	}
+	return nil, err
+}
+
+func ResolveUDP(conn net.Conn, data []byte, respBuf []byte) (resp []byte, err error) {
 	deadline := time.Now().Add(consts.DefaultDNSTimeout)
 	conn.SetReadDeadline(deadline)
 
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
-	type result struct {
-		data []byte
-		err  error
-	}
-
-	recvCh := make(chan *result, 1)
-
+	recvCh := make(chan error, 1)
+	var n int
 	go func() {
 		// Wait for response.
-		buf := make([]byte, consts.EthernetMtu)
-		n, rErr := conn.Read(buf)
-		select {
-		case recvCh <- &result{data: buf[:n], err: rErr}:
-		case <-ctx.Done():
-		}
+		var rErr error
+		n, rErr = conn.Read(respBuf)
+		recvCh <- rErr
 	}()
 
 	ticker := time.NewTicker(consts.DefaultDNSRetryInterval)
@@ -168,8 +146,11 @@ func ResolveUDP(conn net.Conn, data []byte) (resp []byte, err error) {
 		}
 
 		select {
-		case res := <-recvCh:
-			return res.data, res.err
+		case err = <-recvCh:
+			if err == nil {
+				return respBuf[:n], nil
+			}
+			return nil, err
 		case <-ticker.C:
 			continue
 		case <-ctx.Done():
@@ -254,11 +235,13 @@ func ResolveSOA(d netproxy.Dialer, dns netip.AddrPort, host string, network stri
 }
 
 func DnsCheck(dialer netproxy.Dialer, server string, network string, data []byte) (bool, error) {
-	_, err := resolveMsg(dialer, server, network, data)
+	resp := pool.GetBuffer(consts.EthernetMtu)
+	defer pool.PutBuffer(resp)
+	_, err := resolveMsg(dialer, server, network, data, resp)
 	return err == nil, err
 }
 
-func resolveMsg(dialer netproxy.Dialer, server string, network string, data []byte) (resp []byte, err error) {
+func resolveMsg(dialer netproxy.Dialer, server string, network string, data []byte, respBuf []byte) (resp []byte, err error) {
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	conn, err := dialer.DialContext(ctx, network, server)
@@ -268,9 +251,9 @@ func resolveMsg(dialer netproxy.Dialer, server string, network string, data []by
 	defer conn.Close()
 
 	if network == "tcp" {
-		return ResolveStream(conn, data, false)
+		return ResolveStream(conn, data, false, respBuf)
 	}
-	return ResolveUDP(conn, data)
+	return ResolveUDP(conn, data, respBuf)
 }
 
 func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uint16, network string) (ans []dnsmessage.RR, err error) {
@@ -287,12 +270,15 @@ func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uin
 	}
 	msg.SetQuestion(common.CanonicalName(host), typ)
 
-	var data []byte
-	if data, err = msg.Pack(); err != nil {
+	data := pool.GetBuffer(consts.EthernetMtu)
+	defer pool.PutBuffer(data)
+	if data, err = msg.PackBuffer(data); err != nil {
 		return nil, err
 	}
 
-	resp, err := resolveMsg(dialer, server.String(), network, data)
+	respBuf := pool.GetBuffer(consts.EthernetMtu)
+	defer pool.PutBuffer(respBuf)
+	resp, err := resolveMsg(dialer, server.String(), network, data, respBuf)
 	if err != nil {
 		return nil, err
 	}

@@ -253,7 +253,7 @@ func (d *DoQ) ForwardDNS(data []byte) (resp []byte, err error) {
 	}
 	defer stream.Close()
 
-	resp, err = netutils.ResolveStream(stream, data, true)
+	resp, err = netutils.ResolveStream(stream, data, true, make([]byte, consts.EthernetMtu))
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +326,7 @@ func (d *DoTLS) ForwardDNS(data []byte) (resp []byte, err error) {
 		return nil, err
 	}
 
-	resp, err = netutils.ResolveStream(conn, data, false)
+	resp, err = netutils.ResolveStream(conn, data, false, make([]byte, consts.EthernetMtu))
 	if err != nil {
 		conn.Close()
 		return nil, err
