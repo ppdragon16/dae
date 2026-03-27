@@ -140,7 +140,7 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 		return nil, nil
 	}
 	// Create & init ue.
-	ue, err = DefaultUdpEndpointPool.Create(ueKey, udpConn, src, dst, 30*time.Second)
+	ue, err = DefaultUdpEndpointPool.Create(ueKey, udpConn, 30*time.Second)
 	if err != nil {
 		return nil, err
 	}

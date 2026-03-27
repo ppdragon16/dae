@@ -25,9 +25,6 @@ type UdpHandler func(data []byte, from netip.AddrPort) error
 type UdpEndpoint struct {
 	UdpEndpointKey
 	conn net.PacketConn
-	// mu protects deadlineTimer
-	mu            sync.Mutex
-	deadlineTimer *time.Timer
 
 	af *Anyfrom
 
@@ -49,6 +46,23 @@ type UdpEndpoint struct {
 type ReadPacketFunc func(buf []byte) (int, netip.AddrPort, error)
 
 func (ue *UdpEndpoint) run() {
+	var deadlineTimer *time.Timer
+	deadlineTimer = time.AfterFunc(ue.natTimeout, func() {
+		if ue.IsClosed() {
+			return
+		}
+		traffic := atomic.SwapInt64(&ue.trafficSinceLastCheck, 0)
+		if traffic <= 0 {
+			ue.Close()
+			return
+		}
+		newTimeout := ue.natTimeout
+		if traffic > ue.bonusTraffic {
+			newTimeout = ue.bonusNatTimeout
+		}
+		deadlineTimer.Reset(newTimeout)
+	})
+
 	common.ActiveConnections.With(ue.labels).Inc()
 	defer common.ActiveConnections.With(ue.labels).Dec()
 	buf := pool.GetBuffer(2048)
@@ -83,6 +97,7 @@ func (ue *UdpEndpoint) run() {
 		}
 		ue.receivedReply = true
 	}
+	deadlineTimer.Stop()
 	DefaultAnyfromPool.Recycle(ue.Dst, ue.af)
 	DefaultUdpEndpointPool.Remove(ue.UdpEndpointKey)
 	if err != nil {
@@ -106,24 +121,6 @@ func (ue *UdpEndpoint) run() {
 	}
 }
 
-func (ue *UdpEndpoint) checkTraffic() bool {
-	if ue.IsClosed() {
-		return false
-	}
-	traffic := atomic.SwapInt64(&ue.trafficSinceLastCheck, 0)
-	if traffic <= 0 {
-		return false
-	}
-	ue.mu.Lock()
-	defer ue.mu.Unlock()
-	newTimeout := ue.natTimeout
-	if traffic > ue.bonusTraffic {
-		newTimeout = ue.bonusNatTimeout
-	}
-	ue.deadlineTimer.Reset(newTimeout)
-	return true
-}
-
 func (ue *UdpEndpoint) IsClosed() bool {
 	return ue.ctx.Err() != nil
 }
@@ -141,9 +138,6 @@ func (ue *UdpEndpoint) WriteTo(b []byte, addr netip.AddrPort) (n int, err error)
 // Close should only called by UdpEndpointPool.Remove
 func (ue *UdpEndpoint) Close() error {
 	common.RecyclePrometheusLabels(ue.labels)
-	ue.mu.Lock()
-	ue.deadlineTimer.Stop()
-	ue.mu.Unlock()
 	ue.cancel()
 	return ue.conn.Close()
 }
@@ -179,26 +173,20 @@ func (p *UdpEndpointPool) Get(key UdpEndpointKey) (udpEndpoint *UdpEndpoint, ok 
 func (p *UdpEndpointPool) Create(
 	key UdpEndpointKey,
 	udpConn net.PacketConn,
-	src, dst netip.AddrPort,
 	initNatTimeout time.Duration) (ue *UdpEndpoint, err error) {
-	af, err := DefaultAnyfromPool.Obtain(dst, AnyfromTimeoutDefault)
+	af, err := DefaultAnyfromPool.Obtain(key.Dst, AnyfromTimeoutDefault)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ue = &UdpEndpoint{
+		UdpEndpointKey: key,
+		conn:           udpConn,
 		natTimeout:     initNatTimeout,
 		ctx:            ctx,
 		cancel:         cancel,
-		UdpEndpointKey: UdpEndpointKey{Src: src, Dst: dst},
 		af:             af,
 	}
-	ue.conn = udpConn
-	ue.deadlineTimer = time.AfterFunc(initNatTimeout, func() {
-		if !ue.checkTraffic() {
-			p.Remove(key)
-		}
-	})
 	p.pool.Store(key, ue)
 	return
 }
