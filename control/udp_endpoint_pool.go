@@ -137,7 +137,6 @@ func (ue *UdpEndpoint) WriteTo(b []byte, addr netip.AddrPort) (n int, err error)
 
 // Close should only called by UdpEndpointPool.Remove
 func (ue *UdpEndpoint) Close() error {
-	common.RecyclePrometheusLabels(ue.labels)
 	ue.cancel()
 	return ue.conn.Close()
 }
