@@ -644,15 +644,15 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 	respData, leader, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
 	dnsResp.isNew = leader
 	dnsResp.upstreamFrom = upstream
+	dnsResp.fromPool = true
 	if respData != nil {
 		if !shared {
 			dnsResp.respData = respData
-			dnsResp.fromPool = false
 		} else {
 			// Each dns handler goroutine should NOT share the same response data.
 			dnsResp.respData = pool.GetBuffer(len(respData))
 			copy(dnsResp.respData, respData)
-			dnsResp.fromPool = true
+			pool.PutBuffer(respData)
 		}
 		dnsIdSet(dnsResp.respData, dnsId(data)) // keep the same id with request
 	}
@@ -661,8 +661,12 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 
 func (c *DnsController) refreshDnsCache(p *dnsRefreshParam) {
 	defer recycleDnsRefreshParam(p)
-	if _, _, _, err := c.singleFlightForwardDNS(p.cacheKey, p.data, p.upstream, &p.dialArg); err != nil {
+	resp, _, _, err := c.singleFlightForwardDNS(p.cacheKey, p.data, p.upstream, &p.dialArg)
+	if err != nil {
 		log.Warnf("failed to refresh dns cache for %v: %+v", p.cacheKey, err)
+	}
+	if resp != nil {
+		pool.PutBuffer(resp)
 	}
 }
 

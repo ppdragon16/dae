@@ -116,7 +116,13 @@ func NewDoH(upstream *dns.Upstream, dialArgument dialArgument, http3 bool) *DoH 
 }
 
 func (d *DoH) ForwardDNS(data []byte) ([]byte, error) {
-	return netutils.ResolveHttp(d.client, d.serverURL, data)
+	r, err := netutils.ResolveHttp(d.client, d.serverURL, data)
+	if err != nil {
+		return nil, err
+	}
+	resp := pool.GetBuffer(len(r))
+	copy(resp, r)
+	return resp, nil
 }
 
 func (d *DoH) Close() error {
@@ -253,8 +259,10 @@ func (d *DoQ) ForwardDNS(data []byte) (resp []byte, err error) {
 	}
 	defer stream.Close()
 
-	resp, err = netutils.ResolveStream(stream, data, true, make([]byte, consts.EthernetMtu))
+	buf := pool.GetBuffer(consts.EthernetMtu)
+	resp, err = netutils.ResolveStream(stream, data, true, buf)
 	if err != nil {
+		pool.PutBuffer(buf)
 		return nil, err
 	}
 	return resp, nil
@@ -326,9 +334,11 @@ func (d *DoTLS) ForwardDNS(data []byte) (resp []byte, err error) {
 		return nil, err
 	}
 
-	resp, err = netutils.ResolveStream(conn, data, false, make([]byte, consts.EthernetMtu))
+	buf := pool.GetBuffer(consts.EthernetMtu)
+	resp, err = netutils.ResolveStream(conn, data, false, buf)
 	if err != nil {
 		conn.Close()
+		pool.PutBuffer(buf)
 		return nil, err
 	}
 	d.putConn(conn)
@@ -518,24 +528,34 @@ func (d *DoTcpAndUdp) ForwardDNS(data []byte) ([]byte, error) {
 		}()
 	}
 
-	var respData []byte
 	var firstErr error
 	for i := 0; i < n; i++ {
 		res := <-resCh
 		if res.err == nil {
 			// cancel() only works for the tcp goroutine.
 			cancel()
-			respData = res.respData
 			if log.IsLevelEnabled(log.DebugLevel) {
 				qInfo := dnsQueryInfo(data)
 				log.Debugf("tcp+udp dns resp, tcp: %v, qname: %v, qtype: %v", res.tcp, qInfo.qname, qInfo.qtype)
 			}
-			return respData, nil
+			// Spawn a goroutine to drain the remaining result and PutBuffer its respData.
+			if n == 2 {
+				go func(ch chan dnsResult) {
+					if r := <-ch; r.respData != nil {
+						pool.PutBuffer(r.respData)
+					}
+				}(resCh)
+			}
+			return res.respData, nil
+		} else if res.respData != nil {
+			pool.PutBuffer(res.respData)
 		}
-		firstErr = res.err
+		if firstErr == nil {
+			firstErr = res.err
+		}
 	}
 
-	return respData, firstErr
+	return nil, firstErr
 }
 
 func (d *DoTcpAndUdp) maybeSuspendUdp() {
@@ -661,8 +681,10 @@ func (s *StaticForwarder) ForwardDNS(data []byte) ([]byte, error) {
 	msg.Truncated = false
 
 	// Pack the response
-	resp, err := msg.Pack()
+	buf := pool.GetBuffer(2048)
+	resp, err := msg.PackBuffer(buf)
 	if err != nil {
+		pool.PutBuffer(buf)
 		return nil, fmt.Errorf("failed to pack DNS response: %w", err)
 	}
 
