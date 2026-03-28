@@ -12,13 +12,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/assets"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/config_parser"
 	"github.com/daeuniverse/dae/pkg/geodata"
 	"github.com/mohae/deepcopy"
 	"github.com/oschwald/maxminddb-golang/v2"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -173,9 +173,7 @@ func (o *DatReaderOptimizer) loadGeoSite(filename string, code string) (params [
 	}
 	filePath, err := o.LocationFinder.GetLocationAsset(filename)
 	if err != nil {
-		return nil, oops.
-			With("filename", filename).
-			Wrapf(err, "Failed to read geosite")
+		return nil, common.In("optimizer").With("filename", filename).Wrapf(err, "Failed to read geosite")
 	}
 	log.Debugf("Read geosite \"%v:%v\" from %v", filename, code, filePath)
 	code, attr, _ := strings.Cut(code, "@")
@@ -234,9 +232,7 @@ func (o *DatReaderOptimizer) loadGeoIp(filename string, code string) (params []*
 	}
 	filePath, err := o.LocationFinder.GetLocationAsset(filename)
 	if err != nil {
-		return nil, oops.
-			With("filename", filename).
-			Wrapf(err, "Failed to read geoip")
+		return nil, common.In("optimizer").With("filename", filename).Wrapf(err, "Failed to read geoip")
 	}
 	log.Debugf("Read geoip \"%v:%v\" from %v", filename, code, filePath)
 	geoIp, err := geodata.UnmarshalGeoIp(filePath, code)
@@ -266,9 +262,7 @@ func (o *DatReaderOptimizer) loadMMDB(filename string, field string, value strin
 
 	filePath, err := o.LocationFinder.GetLocationAsset(filename)
 	if err != nil {
-		return nil, oops.
-			With("filename", filename).
-			Wrapf(err, "Failed to read mmdb")
+		return nil, common.In("optimizer").With("filename", filename).Wrapf(err, "Failed to read mmdb")
 	}
 	log.Debugf("Read mmdb \"%v:%v=%v\" from %v", filename, field, value, filePath)
 

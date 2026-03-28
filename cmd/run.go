@@ -24,7 +24,6 @@ import (
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/samber/oops"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	_ "net/http/pprof"
@@ -158,7 +157,7 @@ func Run(conf *config.Config, externGeoDataDirs []string) {
 		}()
 		err := control.GetDaeNetns().With(func() error {
 			if listener, err = c.ListenAndServe(readyChan, conf.Global.TproxyPort); err != nil {
-				return oops.Wrapf(err, "ListenAndServe")
+				return common.Wrap(err, "ListenAndServe")
 			}
 			return nil
 		})
@@ -189,7 +188,7 @@ loop:
 				readyChan := make(chan bool, 1)
 				go func() {
 					if err := c.Serve(readyChan, listener); err != nil {
-						errCh <- oops.Wrapf(err, "Serve")
+						errCh <- common.Wrap(err, "Serve")
 					} else {
 						sigs <- nil
 					}
@@ -239,7 +238,7 @@ loop:
 					var includes []string
 					newConf, includes, err = readConfig(cfgFile)
 					if err != nil {
-						std.Errorf("%+v", oops.Wrapf(err, "[Reload] Failed to reload"))
+						std.Errorf("%+v", common.Wrap(err, "[Reload] Failed to reload"))
 						sdnotify.Ready()
 						_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.ReloadError}, []byte("\n"+err.Error())...), 0644)
 						continue
@@ -255,14 +254,14 @@ loop:
 				newC, err := newControlPlane(obj, newConf, externGeoDataDirs)
 				if err != nil {
 					reloadingErr = err
-					std.Errorf("%+v", oops.Wrapf(err, "[Reload] Failed to reload; try to roll back configuration"))
+					std.Errorf("%+v", common.Wrap(err, "[Reload] Failed to reload; try to roll back configuration"))
 					// Load last config back.
 					newC, err = newControlPlane(obj, conf, externGeoDataDirs)
 					if err != nil {
 						sdnotify.Stopping()
 						obj.Close()
 						c.Close()
-						std.Errorf("%+v", oops.Wrapf(err, "[Reload] Failed to roll back configuration"))
+						std.Errorf("%+v", common.Wrap(err, "[Reload] Failed to roll back configuration"))
 					}
 					newConf = conf
 					std.Errorln("[Reload] Last reload failed; rolled back configuration")
@@ -303,13 +302,13 @@ loop:
 
 func exit(c *control.ControlPlane) {
 	if err := os.Remove(PidFilePath); err != nil {
-		std.Errorf("%+v", oops.Wrapf(err, "failed to remove pid file"))
+		std.Errorf("%+v", common.Wrap(err, "failed to remove pid file"))
 	}
 	if err := control.GetDaeNetns().Close(); err != nil {
-		std.Errorf("%+v", oops.Wrapf(err, "failed to close netns"))
+		std.Errorf("%+v", common.Wrap(err, "failed to close netns"))
 	}
 	if e := c.Close(); e != nil {
-		std.Errorf("%+v", oops.Wrapf(e, "failed to close control plane"))
+		std.Errorf("%+v", common.Wrap(e, "failed to close control plane"))
 	}
 }
 
@@ -391,7 +390,7 @@ func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []s
 		for i := 0; ; i++ {
 			resp, err := client.Get(CheckNetworkLinks[i%len(CheckNetworkLinks)])
 			if err != nil {
-				log.Debugf("%+v", oops.Wrapf(err, "CheckNetwork"))
+				log.Debugf("%+v", common.Wrap(err, "CheckNetwork"))
 				var neterr net.Error
 				if errors.As(err, &neterr) && neterr.Timeout() {
 					// Do not sleep.
@@ -491,7 +490,7 @@ func preprocessWanInterfaceAuto(params *config.Config) error {
 		if ifname == "auto" {
 			defaultIfs, err := common.GetDefaultIfnames()
 			if err != nil {
-				return oops.Errorf("failed to convert 'auto': %w", err)
+				return common.Errf("failed to convert 'auto': %w", err)
 			}
 			ifs = append(ifs, defaultIfs...)
 		} else {

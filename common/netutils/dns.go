@@ -25,7 +25,6 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/samber/oops"
 )
 
 var (
@@ -103,7 +102,7 @@ func ResolveStream(stream io.ReadWriter, data []byte, quic bool, respBuf []byte)
 func readResolveStream(stream io.ReadWriter, lenBuf []byte, respBuf []byte) (resp []byte, err error) {
 	// Read two byte length.
 	if _, err = io.ReadFull(stream, lenBuf[:2]); err != nil {
-		err = oops.Wrapf(err, "failed to read DNS resp payload length")
+		err = common.Wrap(err, "failed to read DNS resp payload length")
 	}
 	var n int
 	if err == nil {
@@ -111,7 +110,7 @@ func readResolveStream(stream io.ReadWriter, lenBuf []byte, respBuf []byte) (res
 		if int(respLen) > len(respBuf) {
 			err = fmt.Errorf("DNS resp payload is too large")
 		} else if n, err = io.ReadFull(stream, respBuf[:respLen]); err != nil {
-			err = oops.Wrapf(err, "failed to read DNS resp payload")
+			err = common.Wrap(err, "failed to read DNS resp payload")
 		}
 	}
 	if err == nil {
@@ -142,7 +141,7 @@ func ResolveUDP(conn net.Conn, data []byte, respBuf []byte) (resp []byte, err er
 	for i := 0; i < consts.DefaultDNSRetryCount; i++ {
 		_, err = conn.Write(data)
 		if err != nil {
-			return nil, oops.Wrapf(err, "udp write error")
+			return nil, common.Wrap(err, "udp write error")
 		}
 
 		select {

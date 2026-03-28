@@ -21,7 +21,6 @@ import (
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
 	"github.com/mohae/deepcopy"
 	"github.com/safchain/ethtool"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -106,7 +105,7 @@ func (c *controlPlaneCore) Close() (err error) {
 		if e := c.deferFuncs[i](); e != nil {
 			// Combine errors.
 			if err != nil {
-				err = oops.Errorf("%w; %v", err, e)
+				err = common.Errf("%w; %v", err, e)
 			} else {
 				err = e
 			}
@@ -180,7 +179,7 @@ func (c *controlPlaneCore) addQdisc(ifname string) error {
 		QdiscType: "clsact",
 	}
 	if err := netlink.QdiscReplace(qdisc); err != nil {
-		return oops.Errorf("cannot replace clsact qdisc: %w", err)
+		return common.Errf("cannot replace clsact qdisc: %w", err)
 	}
 	return nil
 }
@@ -200,7 +199,7 @@ func (c *controlPlaneCore) delQdisc(ifname string) error {
 	}
 	if err := netlink.QdiscDel(qdisc); err != nil {
 		if !os.IsExist(err) {
-			return oops.Errorf("cannot add clsact qdisc: %w", err)
+			return common.Errf("cannot add clsact qdisc: %w", err)
 		}
 	}
 	return nil
@@ -305,11 +304,11 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 		_ = netlink.FilterDel(filterIngressFlipped)
 	}
 	if err := netlink.FilterAdd(filterIngress); err != nil {
-		return oops.Errorf("cannot attach ebpf object to filter ingress: %w", err)
+		return common.Errf("cannot attach ebpf object to filter ingress: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterIngress); err != nil {
-			return oops.Errorf("FilterDel(%v:%v): %w", ifname, filterIngress.Name, err)
+			return common.Errf("FilterDel(%v:%v): %w", ifname, filterIngress.Name, err)
 		}
 		return nil
 	})
@@ -342,11 +341,11 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 		_ = netlink.FilterDel(filterEgressFlipped)
 	}
 	if err := netlink.FilterAdd(filterEgress); err != nil {
-		return oops.Errorf("cannot attach ebpf object to filter egress: %w", err)
+		return common.Errf("cannot attach ebpf object to filter egress: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterEgress); err != nil {
-			return oops.Errorf("FilterDel(%v:%v): %w", ifname, filterEgress.Name, err)
+			return common.Errf("FilterDel(%v:%v): %w", ifname, filterEgress.Name, err)
 		}
 		return nil
 	})
@@ -383,10 +382,10 @@ func (c *controlPlaneCore) setupSkPidMonitor() error {
 			Program: prog.Prog,
 		})
 		if err != nil {
-			return oops.Wrapf(err, "AttachCgroup: %v", prog.Prog.String())
+			return common.Wrap(err, "AttachCgroup: %v", prog.Prog.String())
 		}
 		c.deferFuncs = append(c.deferFuncs, func() error {
-			return oops.Wrapf(attached.Close(), "inet6Bind.Close()")
+			return common.Wrap(attached.Close(), "inet6Bind.Close()")
 		})
 	}
 	return nil
@@ -403,7 +402,7 @@ func (c *controlPlaneCore) setupLocalTcpFastRedirect() (err error) {
 		Attach:  ebpf.AttachCGroupSockOps,
 	})
 	if err != nil {
-		return oops.Errorf("AttachCgroupSockOps: %w", err)
+		return common.Errf("AttachCgroupSockOps: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, cg.Close)
 
@@ -412,7 +411,7 @@ func (c *controlPlaneCore) setupLocalTcpFastRedirect() (err error) {
 		Program: c.bpf.SkMsgFastRedirect,
 		Attach:  ebpf.AttachSkMsgVerdict,
 	}); err != nil {
-		return oops.Errorf("AttachSkMsgVerdict: %w", err)
+		return common.Errf("AttachSkMsgVerdict: %w", err)
 	}
 	return nil
 }
@@ -423,7 +422,7 @@ func (c *controlPlaneCore) setupExitHandler() (err error) {
 	}
 	link, err := link.Tracepoint("sched", "sched_process_exit", c.bpf.HandleExit, nil)
 	if err != nil {
-		return oops.Errorf("Tracepoint: %w", err)
+		return common.Errf("Tracepoint: %w", err)
 	}
 	exitHandlerClose = link.Close
 	return nil
@@ -474,7 +473,7 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 		return err
 	}
 	if link.Attrs().Index == consts.LoopbackIfIndex {
-		return oops.Errorf("cannot bind to loopback interface")
+		return common.Errf("cannot bind to loopback interface")
 	}
 	_ = c.addQdisc(ifname)
 	linkHdrLen, err := c.linkHdrLen(ifname)
@@ -520,11 +519,11 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 		_ = netlink.FilterDel(filterEgressFlipped)
 	}
 	if err := netlink.FilterAdd(filterEgress); err != nil {
-		return oops.Errorf("cannot attach ebpf object to filter egress: %w", err)
+		return common.Errf("cannot attach ebpf object to filter egress: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterEgress); err != nil && !os.IsNotExist(err) {
-			return oops.Errorf("FilterDel(%v:%v): %w", ifname, filterEgress.Name, err)
+			return common.Errf("FilterDel(%v:%v): %w", ifname, filterEgress.Name, err)
 		}
 		return nil
 	})
@@ -556,11 +555,11 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 		_ = netlink.FilterDel(filterIngressFlipped)
 	}
 	if err := netlink.FilterAdd(filterIngress); err != nil {
-		return oops.Errorf("cannot attach ebpf object to filter ingress: %w", err)
+		return common.Errf("cannot attach ebpf object to filter ingress: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterIngress); err != nil && !os.IsNotExist(err) {
-			return oops.Errorf("FilterDel(%v:%v): %w", ifname, filterIngress.Name, err)
+			return common.Errf("FilterDel(%v:%v): %w", ifname, filterIngress.Name, err)
 		}
 		return nil
 	})
@@ -606,7 +605,7 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 	if err = daens.With(func() error {
 		return netlink.FilterAdd(filterDae0peerIngress)
 	}); err != nil {
-		return oops.Errorf("cannot attach ebpf object to filter ingress: %w", err)
+		return common.Errf("cannot attach ebpf object to filter ingress: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		daens.With(func() error {
@@ -638,11 +637,11 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 		_ = netlink.FilterDel(filterEgressFlipped)
 	}
 	if err := netlink.FilterAdd(filterDae0Ingress); err != nil {
-		return oops.Errorf("cannot attach ebpf object to filter egress: %w", err)
+		return common.Errf("cannot attach ebpf object to filter egress: %w", err)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterDae0Ingress); err != nil && !os.IsNotExist(err) {
-			return oops.Errorf("FilterDel(%v:%v): %w", daens.Dae0().Attrs().Name, filterDae0Ingress.Name, err)
+			return common.Errf("FilterDel(%v:%v): %w", daens.Dae0().Attrs().Name, filterDae0Ingress.Name, err)
 		}
 		return nil
 	})
