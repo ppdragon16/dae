@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+	"unsafe"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
@@ -303,21 +303,48 @@ func (c *controlPlaneCore) RetrieveUDPRoutingResult(src netip.AddrPort, outResul
 }
 
 func RetrieveOriginalDest(oob []byte) netip.AddrPort {
-	msgs, err := syscall.ParseSocketControlMessage(oob)
-	if err != nil {
-		return netip.AddrPort{}
-	}
-	for _, msg := range msgs {
-		if msg.Header.Level == syscall.SOL_IP && msg.Header.Type == syscall.IP_RECVORIGDSTADDR {
-			ip := msg.Data[4:8]
-			port := binary.BigEndian.Uint16(msg.Data[2:4])
-			return netip.AddrPortFrom(netip.AddrFrom4(*(*[4]byte)(ip)), port)
-		} else if msg.Header.Level == syscall.SOL_IPV6 && msg.Header.Type == unix.IPV6_RECVORIGDSTADDR {
-			ip := msg.Data[8:24]
-			port := binary.BigEndian.Uint16(msg.Data[2:4])
-			return netip.AddrPortFrom(netip.AddrFrom16(*(*[16]byte)(ip)), port)
+	// 模拟 C 语言中的 CMSG_ALIGN 宏
+	// Linux 下对齐大小通常等于指针大小 (SizeofPtr)
+	const sizeofPtr = int(unsafe.Sizeof(uintptr(0)))
+
+	for i := 0; i+unix.SizeofCmsghdr <= len(oob); {
+		// 1. 获取 CMSG 头部
+		h := (*unix.Cmsghdr)(unsafe.Pointer(&oob[i]))
+
+		// 2. 严格的长度校验，防止畸形 OOB 导致无限循环
+		cmsgLen := int(h.Len)
+		if cmsgLen < unix.SizeofCmsghdr || i+cmsgLen > len(oob) {
+			break
 		}
+
+		// 3. 提取数据部分 (严格对应 syscall.ParseSocketControlMessage 的逻辑)
+		data := oob[i+unix.SizeofCmsghdr : i+cmsgLen]
+
+		// 4. 类型判断 (使用 unix 包常量提高跨架构兼容性)
+		// 注意: h.Level 和 h.Type 是 int32，常量是 untyped，可以直接比较
+		if h.Level == unix.SOL_IP && h.Type == unix.IP_RECVORIGDSTADDR {
+			if len(data) >= 8 { // sockaddr_in 结构
+				// data[0:2] 是 Family, data[2:4] 是 Port, data[4:8] 是 Addr
+				port := binary.BigEndian.Uint16(data[2:4])
+				var addr [4]byte
+				copy(addr[:], data[4:8])
+				return netip.AddrPortFrom(netip.AddrFrom4(addr), port)
+			}
+		} else if h.Level == unix.SOL_IPV6 && h.Type == unix.IPV6_RECVORIGDSTADDR {
+			if len(data) >= 24 { // sockaddr_in6 结构
+				// data[2:4] 是 Port, data[8:24] 是 Addr
+				port := binary.BigEndian.Uint16(data[2:4])
+				var addr [16]byte
+				copy(addr[:], data[8:24])
+				return netip.AddrPortFrom(netip.AddrFrom16(addr), port)
+			}
+		}
+
+		// 5. 关键：跳转到下一个 CMSG 头部
+		// 必须进行对齐处理，否则在解析包含多个控制消息（如同时包含 IP_PKTINFO）时会偏移错误
+		i += (cmsgLen + sizeofPtr - 1) &^ (sizeofPtr - 1)
 	}
+
 	return netip.AddrPort{}
 }
 
