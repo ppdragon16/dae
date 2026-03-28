@@ -145,12 +145,11 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	if err := c.RouteDialOption(src, dst, sniffedDomain, networkType, routingResult, dialOption); err != nil {
 		return err
 	}
-	labels := common.ObtainPrometheusLabels(
+	labels := common.GetPrometheusLabels(
 		dialOption.Outbound.Name,
 		dialOption.Dialer.Property.SubscriptionTag,
 		dialOption.Dialer.Name,
 		networkType.String())
-	defer common.RecyclePrometheusLabels(labels)
 
 	// Dial
 	LogDial(src, dst, sniffedDomain, dialOption, networkType, routingResult)

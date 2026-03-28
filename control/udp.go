@@ -94,17 +94,11 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 		return nil, err
 	}
 	// labels will be recycled in ue's Close().
-	labels := common.ObtainPrometheusLabels(
+	labels := common.GetPrometheusLabels(
 		dialOption.Outbound.Name,
 		dialOption.Dialer.Property.SubscriptionTag,
 		dialOption.Dialer.Name,
 		networkType.String())
-	labelsIntoUe := false
-	defer func() {
-		if !labelsIntoUe {
-			common.RecyclePrometheusLabels(labels)
-		}
-	}()
 
 	// Dial
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
@@ -150,7 +144,6 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 	ue.labels = labels
 	ue.counterTraffic = common.TrafficBytes.With(labels)
 	ue.sniffedDomain = sniffingResult.domain
-	labelsIntoUe = true
 
 	LogDial(src, dst, ue.sniffedDomain, dialOption, networkType, routingResult)
 

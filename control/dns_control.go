@@ -397,12 +397,11 @@ Dial:
 				if !ok || !dnsResponse(dnsResp.respData) {
 					return err
 				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
-					labels := common.ObtainPrometheusLabels(
+					labels := common.GetPrometheusLabels(
 						dialArgument.Outbound.Name,
 						dialArgument.Dialer.Property.SubscriptionTag,
 						dialArgument.Dialer.Name,
 						dialArgument.networkType.String())
-					defer common.RecyclePrometheusLabels(labels)
 					common.ErrorCount.With(labels).Inc()
 					dialArgument.Dialer.ReportUnavailable()
 					return err

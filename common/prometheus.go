@@ -6,6 +6,57 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// labelsCache 按 (outbound, subtag, dialer, network) 组合缓存 Labels 实例。
+// 组合数量有限（~200），预分配后 Get 仅为 map lookup，无锁竞争。
+var labelsCache atomicLabelsCache
+
+type atomicLabelsCache struct {
+	sync.RWMutex
+	m map[uint64]prometheus.Labels
+}
+
+func fnv64(s string) uint64 {
+	h := uint64(14695981039346656037) // FNV offset basis
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211 // FNV prime
+	}
+	return h
+}
+
+func (c *atomicLabelsCache) Get(outbound, subtag, dialer, network string) prometheus.Labels {
+	key := fnv64(outbound)
+	key = key*1099511628211 ^ fnv64(subtag)
+	key = key*1099511628211 ^ fnv64(dialer)
+	key = key*1099511628211 ^ fnv64(network)
+
+	c.RLock()
+	labels, ok := c.m[key]
+	c.RUnlock()
+	if ok {
+		return labels
+	}
+	c.Lock()
+	defer c.Unlock()
+	if c.m == nil {
+		c.m = make(map[uint64]prometheus.Labels)
+	}
+	if labels, ok = c.m[key]; !ok {
+		labels = prometheus.Labels{
+			"outbound": outbound,
+			"subtag":   subtag,
+			"dialer":   dialer,
+			"network":  network,
+		}
+		c.m[key] = labels
+	}
+	return labels
+}
+
+func GetPrometheusLabels(outbound, subtag, dialer, network string) prometheus.Labels {
+	return labelsCache.Get(outbound, subtag, dialer, network)
+}
+
 var (
 	ActiveConnections  *prometheus.GaugeVec
 	CoreIpDomainBitmap prometheus.Gauge
@@ -116,20 +167,4 @@ func InitPrometheus(registry *prometheus.Registry) {
 	registry.MustRegister(HeapInuse)
 	registry.MustRegister(HeapIdle)
 	registry.MustRegister(HeapReleased)
-}
-
-var labelsPool = sync.Pool{New: func() any { return prometheus.Labels{"outbound": "", "subtag": "", "dialer": "", "network": ""} }}
-
-func ObtainPrometheusLabels(outbound string, subtag string, dialer string, network string) prometheus.Labels {
-	v := labelsPool.Get()
-	labels := v.(prometheus.Labels)
-	labels["outbound"] = outbound
-	labels["subtag"] = subtag
-	labels["dialer"] = dialer
-	labels["network"] = network
-	return labels
-}
-
-func RecyclePrometheusLabels(labels prometheus.Labels) {
-	labelsPool.Put(labels)
 }
