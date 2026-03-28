@@ -128,5 +128,9 @@ func Wrap(err error, format string, args ...any) error {
 	if len(args) == 0 {
 		return fmt.Errorf("%s: %w", format, err)
 	}
-	return fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), err)
+	var b strings.Builder
+	fmt.Fprintf(&b, format, args...)
+	b.WriteString(": ")
+	b.WriteString(err.Error())
+	return fmt.Errorf(b.String())
 }
