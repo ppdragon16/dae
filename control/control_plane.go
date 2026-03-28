@@ -46,7 +46,6 @@ import (
 
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/meek"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -122,33 +121,33 @@ func NewControlPlane(
 
 	kernelVersion, e := internal.KernelVersion()
 	if e != nil {
-		return nil, oops.Errorf("failed to get kernel version: %w", e)
+		return nil, common.Errf("failed to get kernel version: %w", e)
 	}
 	/// Check linux kernel requirements.
 	// Check version from high to low to reduce the number of user upgrading kernel.
 	if err := features.HaveProgramHelper(ebpf.SchedCLS, asm.FnLoop); err != nil {
-		return nil, oops.Errorf("%w: your kernel version %v does not support bpf_loop (needed by routing); expect >=%v; upgrade your kernel and try again",
+		return nil, common.Errf("%w: your kernel version %v does not support bpf_loop (needed by routing); expect >=%v; upgrade your kernel and try again",
 			err,
 			kernelVersion.String(),
 			consts.BpfLoopFeatureVersion.String())
 	}
 	if requirement := consts.ChecksumFeatureVersion; kernelVersion.Less(requirement) {
-		return nil, oops.Errorf("your kernel version %v does not support checksum related features; expect >=%v; upgrade your kernel and try again",
+		return nil, common.Errf("your kernel version %v does not support checksum related features; expect >=%v; upgrade your kernel and try again",
 			kernelVersion.String(),
 			requirement.String())
 	}
 	if requirement := consts.BpfTimerFeatureVersion; len(global.WanInterface) > 0 && kernelVersion.Less(requirement) {
-		return nil, oops.Errorf("your kernel version %v does not support bind to WAN; expect >=%v; remove wan_interface in config file and try again",
+		return nil, common.Errf("your kernel version %v does not support bind to WAN; expect >=%v; remove wan_interface in config file and try again",
 			kernelVersion.String(),
 			requirement.String())
 	}
 	if requirement := consts.SkAssignFeatureVersion; len(global.LanInterface) > 0 && kernelVersion.Less(requirement) {
-		return nil, oops.Errorf("your kernel version %v does not support bind to LAN; expect >=%v; remove lan_interface in config file and try again",
+		return nil, common.Errf("your kernel version %v does not support bind to LAN; expect >=%v; remove lan_interface in config file and try again",
 			kernelVersion.String(),
 			requirement.String())
 	}
 	if kernelVersion.Less(consts.BasicFeatureVersion) {
-		return nil, oops.Errorf("your kernel version %v does not satisfy basic requirement; expect >=%v",
+		return nil, common.Errf("your kernel version %v does not satisfy basic requirement; expect >=%v",
 			kernelVersion.String(),
 			consts.BasicFeatureVersion.String())
 	}
@@ -158,7 +157,7 @@ func NewControlPlane(
 
 	/// Allow the current process to lock memory for eBPF resources.
 	if err = rlimit.RemoveMemlock(); err != nil {
-		return nil, oops.Errorf("rlimit.RemoveMemlock:%v", err)
+		return nil, common.Errf("rlimit.RemoveMemlock:%v", err)
 	}
 
 	/// Init DaeNetns.
@@ -168,7 +167,7 @@ func NewControlPlane(
 	}
 
 	if err = GetDaeNetns().Setup(); err != nil {
-		return nil, oops.Errorf("failed to setup dae netns: %w", err)
+		return nil, common.Errf("failed to setup dae netns: %w", err)
 	}
 	pinPath := filepath.Join(consts.BpfPinRoot, consts.AppName)
 	if err = os.MkdirAll(pinPath, 0755); err != nil && !os.IsExist(err) {
@@ -202,7 +201,7 @@ func NewControlPlane(
 		if _bpf, ok := _bpf.(*bpfObjects); ok {
 			bpf = _bpf
 		} else {
-			return nil, oops.Errorf("unexpected bpf type: %T", _bpf)
+			return nil, common.Errf("unexpected bpf type: %T", _bpf)
 		}
 	} else {
 		bpf = new(bpfObjects)
@@ -211,7 +210,7 @@ func NewControlPlane(
 			BigEndianTproxyPort: uint32(common.Htons(global.TproxyPort)),
 			CollectionOptions:   collectionOpts,
 		}); err != nil {
-			err = oops.Wrapf(err, "load eBPF objects")
+			err = common.Wrap(err, "load eBPF objects")
 			if log.IsLevelEnabled(log.PanicLevel) {
 				log.Panicf("%+v", err)
 			}
@@ -258,7 +257,7 @@ func NewControlPlane(
 	case "block":
 		noConnectivityOutbound = consts.OutboundBlock
 	default:
-		return nil, oops.Errorf("invalid no_connectivity_behavior: %v", global.NoConnectivityBehavior)
+		return nil, common.Errf("invalid no_connectivity_behavior: %v", global.NoConnectivityBehavior)
 	}
 
 	_direct, directProperty := D.NewDirectDialer(&option.ExtraOption)
@@ -306,12 +305,12 @@ func NewControlPlane(
 		// Parse policy.
 		policy, err := dialer.NewDialerSelectionPolicyFromGroupParam(&group)
 		if err != nil {
-			return nil, oops.Errorf("failed to create group %v: %w", group.Name, err)
+			return nil, common.Errf("failed to create group %v: %w", group.Name, err)
 		}
 		// Filter nodes with user given filters.
 		dialers, annos, err := dialerSet.FilterAndAnnotate(group.Filter, group.FilterAnnotation, group.NextHop)
 		if err != nil {
-			return nil, oops.Errorf(`failed to create group "%v": %w`, group.Name, err)
+			return nil, common.Errf(`failed to create group "%v": %w`, group.Name, err)
 		}
 		// Convert node links to dialers.
 		log.Infof(`Group "%v" node list:`, group.Name)
@@ -345,7 +344,7 @@ func NewControlPlane(
 		fromIdx, err1 := OutboundIndexByName(outbounds, fromName)
 		toIdx, err2 := OutboundIndexByName(outbounds, toName)
 		if err1 != nil || err2 != nil {
-			return nil, oops.Errorf("redirect outbound not found: %v->%v", fromName, toName)
+			return nil, common.Errf("redirect outbound not found: %v->%v", fromName, toName)
 		}
 		outboundRedirects[fromIdx] = toIdx
 		log.Infof("Outbound redirect: %v (%v) -> %v (%v)", fromName, fromIdx, toName, toIdx)
@@ -353,12 +352,12 @@ func NewControlPlane(
 
 	// Generate outboundName2Id from outbounds.
 	if len(outbounds) > int(consts.OutboundUserDefinedMax) {
-		return nil, oops.Errorf("too many outbounds")
+		return nil, common.Errf("too many outbounds")
 	}
 	outboundName2Id := make(map[string]uint8)
 	for i, o := range outbounds {
 		if _, exist := outboundName2Id[o.Name]; exist {
-			return nil, oops.Errorf("duplicated outbound name: %v", o.Name)
+			return nil, common.Errf("duplicated outbound name: %v", o.Name)
 		}
 		outboundName2Id[o.Name] = uint8(i)
 	}
@@ -387,7 +386,7 @@ func NewControlPlane(
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	); err != nil {
-		return nil, oops.Errorf("ApplyRulesOptimizers error:\n%w", err)
+		return nil, common.Errf("ApplyRulesOptimizers error:\n%w", err)
 	}
 	routingA.Rules = nil // Release.
 	if log.IsLevelEnabled(log.DebugLevel) {
@@ -400,14 +399,14 @@ func NewControlPlane(
 	// Parse rules and build.
 	builder, err := NewRoutingMatcherBuilder(rules, outboundName2Id, bpf, routingA.Fallback, core.ifmgr)
 	if err != nil {
-		return nil, oops.Errorf("NewRoutingMatcherBuilder: %w", err)
+		return nil, common.Errf("NewRoutingMatcherBuilder: %w", err)
 	}
 	if err = builder.BuildKernspace(); err != nil {
-		return nil, oops.Errorf("RoutingMatcherBuilder.BuildKernspace: %w", err)
+		return nil, common.Errf("RoutingMatcherBuilder.BuildKernspace: %w", err)
 	}
 	routingMatcher, err := builder.BuildUserspace()
 	if err != nil {
-		return nil, oops.Errorf("RoutingMatcherBuilder.BuildUserspace: %w", err)
+		return nil, common.Errf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
 
 	// Release temporary allocations from rule processing to avoid memory spike.
@@ -417,7 +416,7 @@ func NewControlPlane(
 	if global.EnableTrafficLog {
 		trafficLogger, err = NewTrafficLogger(filepath.Join(LogFileDir, "traffic.log"), 5*time.Minute)
 		if err != nil {
-			return nil, oops.Errorf("NewTrafficLogger: %w", err)
+			return nil, common.Errf("NewTrafficLogger: %w", err)
 		}
 	}
 
@@ -488,13 +487,13 @@ func NewControlPlane(
 			// Write mappings into eBPF map:
 			// IP record (from dns lookup) -> domain routing
 			if err := core.BatchNewDomain(ip, domainBitmap); err != nil {
-				return oops.Wrapf(err, "BatchNewDomain")
+				return common.Wrap(err, "BatchNewDomain")
 			}
 			return nil
 		},
 		LookupCacheTimeout: func(ip netip.Addr, domainBitmap *[32]uint32) error {
 			if err := core.BatchRemoveDomain(ip, domainBitmap); err != nil {
-				return oops.Wrapf(err, "BatchRemoveDomain")
+				return common.Wrap(err, "BatchRemoveDomain")
 			}
 			return nil
 		},
@@ -537,7 +536,7 @@ func NewControlPlane(
 
 	/// Bind to links. Binding should be advance of dialerGroups to avoid un-routable old connection.
 	if err = core.setupExitHandler(); err != nil {
-		return nil, oops.Errorf("failed to setup exit handler: %w", err)
+		return nil, common.Errf("failed to setup exit handler: %w", err)
 	}
 	// Bind to LAN
 	if len(global.LanInterface) > 0 {
@@ -553,11 +552,11 @@ func NewControlPlane(
 	// Bind to WAN
 	if len(global.WanInterface) > 0 {
 		if err = core.setupSkPidMonitor(); err != nil {
-			log.Warnf("%+v", oops.Wrapf(err, "cgroup2 is not enabled; pname routing cannot be used"))
+			log.Warnf("%+v", common.Wrap(err, "cgroup2 is not enabled; pname routing cannot be used"))
 		}
 		if global.EnableLocalTcpFastRedirect {
 			if err = core.setupLocalTcpFastRedirect(); err != nil {
-				log.Warnf("%+v", oops.Wrapf(err, "failed to setup local tcp fast redirect"))
+				log.Warnf("%+v", common.Wrap(err, "failed to setup local tcp fast redirect"))
 			}
 		}
 		for _, ifname := range global.WanInterface {
@@ -579,7 +578,7 @@ func NewControlPlane(
 	}
 	// Bind to dae0 and dae0peer
 	if err = core.bindDaens(); err != nil {
-		return nil, oops.Errorf("bindDaens: %w", err)
+		return nil, common.Errf("bindDaens: %w", err)
 	}
 
 	return plane, nil
@@ -815,7 +814,7 @@ func ParseFixedDomainTtl(ks []config.KeyableString) (map[string]int, error) {
 		key = common.CanonicalName(strings.TrimSpace(key))
 		ttl, err := strconv.ParseInt(strings.TrimSpace(value), 0, strconv.IntSize)
 		if err != nil {
-			return nil, oops.Errorf("failed to parse ttl: %v", err)
+			return nil, common.Errf("failed to parse ttl: %v", err)
 		}
 		m[key] = int(ttl)
 	}
@@ -976,7 +975,7 @@ func (l *Listener) Close() error {
 		if err == nil {
 			err = err2
 		} else {
-			err = oops.Errorf("%w: %v", err, err2)
+			err = common.Errf("%w: %v", err, err2)
 		}
 	}
 	return err
@@ -993,7 +992,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	// TCP socket.
 	tcpFile, err := listener.tcpListener.(*net.TCPListener).File()
 	if err != nil {
-		return oops.Errorf("failed to retrieve copy of the underlying TCP connection file")
+		return common.Errf("failed to retrieve copy of the underlying TCP connection file")
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		return tcpFile.Close()
@@ -1006,7 +1005,7 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	udpConn.SetDeadline(time.Time{})
 	udpFile, err := udpConn.File()
 	if err != nil {
-		return oops.Errorf("failed to retrieve copy of the underlying UDP connection file")
+		return common.Errf("failed to retrieve copy of the underlying UDP connection file")
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		udpConn.SetDeadline(time.Unix(0, 1)) // unblock ReadMsgUDPAddrPort
@@ -1058,7 +1057,7 @@ func (c *ControlPlane) loopTcp(listener *Listener) {
 		lconn, err := listener.tcpListener.Accept()
 		if err != nil {
 			if !strings.Contains(err.Error(), "use of closed network connection") {
-				log.Errorf("%+v", oops.Wrapf(err, "Error when accept"))
+				log.Errorf("%+v", common.Wrap(err, "Error when accept"))
 			}
 			break
 		}
@@ -1066,7 +1065,7 @@ func (c *ControlPlane) loopTcp(listener *Listener) {
 			c.inConnections.Store(lconn, struct{}{})
 			defer c.inConnections.Delete(lconn)
 			if err := c.handleConn(lconn); err != nil && c.ctx.Err() == nil {
-				log.Warningf("%+v", oops.Wrapf(err, "handleConn"))
+				log.Warningf("%+v", common.Wrap(err, "handleConn"))
 			}
 		}(lconn)
 	}
@@ -1165,7 +1164,7 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 			// Don't use ObtainBpfRoutingResult() because it would be saved in cache.
 			routingResult = new(bpfRoutingResult)
 			if err = c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
-				log.Warningf("%+v", oops.Wrapf(err, "No AddrPort presented"))
+				log.Warningf("%+v", common.Wrap(err, "No AddrPort presented"))
 				pool.PutBuffer(data)
 				return
 			}
@@ -1199,7 +1198,7 @@ func (c *ControlPlane) udpEmitTaskFunc(t *UdpTask[emitParam]) {
 	p := &t.param
 	defer recycleUdpEmitTask(t)
 	if e := c.handlePkt(p.data, p.Src, p.Dst); e != nil && c.ctx.Err() == nil {
-		log.Warningf("%+v", oops.Wrapf(e, "handlePkt"))
+		log.Warningf("%+v", common.Wrap(e, "handlePkt"))
 	}
 }
 
@@ -1229,12 +1228,12 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (liste
 	listenAddr := net.JoinHostPort(c.listenIp, strconv.Itoa(int(port)))
 	tcpListener, err := listenConfig.Listen(context.TODO(), "tcp", listenAddr)
 	if err != nil {
-		return nil, oops.Errorf("listenTCP: %w", err)
+		return nil, common.Errf("listenTCP: %w", err)
 	}
 	packetConn, err := listenConfig.ListenPacket(context.TODO(), "udp", listenAddr)
 	if err != nil {
 		_ = tcpListener.Close()
-		return nil, oops.Errorf("listenUDP: %w", err)
+		return nil, common.Errf("listenUDP: %w", err)
 	}
 	listener = &Listener{
 		tcpListener: tcpListener,
@@ -1249,7 +1248,7 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (liste
 
 	// Serve
 	if err = c.Serve(readyChan, listener); err != nil {
-		return nil, oops.Errorf("failed to serve: %w", err)
+		return nil, common.Errf("failed to serve: %w", err)
 	}
 
 	return listener, nil
@@ -1299,7 +1298,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		case consts.IpVersionStr_6:
 			dAddr = dnsUpstream.Ip6
 		default:
-			return oops.Errorf("unexpected ipversion: %v", ver)
+			return common.Errf("unexpected ipversion: %v", ver)
 		}
 		var outboundIndex consts.OutboundIndex
 		var ok bool
@@ -1314,7 +1313,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 				return err
 			}
 			if int(outboundIndex) >= len(c.outbounds) {
-				return oops.Errorf("bad outbound index: %v", outboundIndex)
+				return common.Errf("bad outbound index: %v", outboundIndex)
 			}
 			if routeKey.upstream != nil {
 				c.dnsRouteCache.Save(routeKey, outboundIndex)
@@ -1339,7 +1338,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	}
 
 	if bestDialer == nil {
-		return oops.Errorf("no proper dialer for DNS upstream: %v", dnsUpstream.String())
+		return common.Errf("no proper dialer for DNS upstream: %v", dnsUpstream.String())
 	}
 	switch ipversion {
 	case consts.IpVersionStr_4:
@@ -1382,7 +1381,7 @@ func (c *ControlPlane) Close() (err error) {
 		if e := c.deferFuncs[i](); e != nil {
 			// Combine errors.
 			if err != nil {
-				err = oops.Errorf("%w; %v", err, e)
+				err = common.Errf("%w; %v", err, e)
 			} else {
 				err = e
 			}

@@ -15,7 +15,6 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -175,7 +174,7 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 		data, err = msg.PackBuffer(buf)
 	}
 	if err != nil {
-		return oops.Wrapf(err, "pack DNS packet")
+		return common.Wrap(err, "pack DNS packet")
 	}
 
 	recvCh := make(chan *dnsmessage.Msg, 1)

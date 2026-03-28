@@ -24,7 +24,6 @@ import (
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samber/oops"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -80,7 +79,7 @@ func (c *ControlPlane) RouteDialOption(
 		}
 		// if outboundIndex, mark, _, err = c.Route(p.Src, p.Dest, p.Domain, p.networkType.L4Proto.ToL4ProtoType(), p.routingResult); err != nil {
 		if outboundIndex, _, _, err = c.Route(src, dst, domain_, networkType.L4Proto.ToL4ProtoType(), routingResult); err != nil {
-			oops.Wrap(err)
+			common.Wrap(err, "")
 			return
 		}
 		if log.IsLevelEnabled(log.TraceLevel) {
@@ -96,10 +95,10 @@ func (c *ControlPlane) RouteDialOption(
 	// TODO: Set-up ip to domain mapping and show domain if possible.
 	if int(outboundIndex) >= len(c.outbounds) {
 		if len(c.outbounds) == int(consts.OutboundUserDefinedMin) {
-			err = oops.Errorf("traffic was dropped due to no-load configuration")
+			err = common.Errf("traffic was dropped due to no-load configuration")
 			return
 		}
-		err = oops.Errorf("outbound id from bpf is out of range: %v not in [0, %v]", outboundIndex, len(c.outbounds)-1)
+		err = common.Errf("outbound id from bpf is out of range: %v not in [0, %v]", outboundIndex, len(c.outbounds)-1)
 		return
 	}
 	// Handles outbound redirects
@@ -438,5 +437,5 @@ func OutboundIndexByName(outbounds []*outbound.DialerGroup, name string) (consts
 			return consts.OutboundIndex(i), nil
 		}
 	}
-	return consts.OutboundIndex(0xFF), oops.Errorf("outbound not found: %v", name)
+	return consts.OutboundIndex(0xFF), common.Errf("outbound not found: %v", name)
 }
