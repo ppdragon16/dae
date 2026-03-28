@@ -1151,9 +1151,14 @@ func (c *ControlPlane) startUdpWorkers(workerCount int) chan *udpRoutineParam {
 
 func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 	defer recycleUdpRoutineParam(param)
-	data := param.buf
-	dst := common.ConvergeAddrPort(RetrieveOriginalDest(param.oobBuf))
+	dst := RetrieveOriginalDest(param.oobBuf)
+	if !dst.IsValid() {
+		log.Errorf("Invalid dst from oob: %v", param.oobBuf)
+		return
+	}
+	dst = common.ConvergeAddrPort(dst)
 	src := common.ConvergeAddrPort(param.src)
+	data := param.buf
 	/// Handle DNS
 	// To keep consistency with kernel program, we only sniff DNS request sent to 53.
 	if dst.Port() == 53 {
