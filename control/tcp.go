@@ -139,7 +139,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	}
 
 	// Route
-	networkType := GetNetworkType(consts.L4ProtoStr_TCP, dst.Addr())
+	networkType := common.GetNetworkType(consts.L4ProtoStr_TCP, dst.Addr())
 	dialOption := ObtainDialOption()
 	defer RecycleDialOption(dialOption)
 	if err := c.RouteDialOption(src, dst, sniffedDomain, networkType, routingResult, dialOption); err != nil {
