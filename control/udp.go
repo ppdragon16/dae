@@ -72,7 +72,7 @@ func (c *ControlPlane) sniffPkt(key PacketSnifferKey, data []byte) (result *snif
 }
 
 func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue *UdpEndpoint, err error) {
-	networkType := GetNetworkType(consts.L4ProtoStr_UDP, ueKey.Dst.Addr())
+	networkType := common.GetNetworkType(consts.L4ProtoStr_UDP, ueKey.Dst.Addr())
 	var sniffingResult *sniffingResult
 	sniffingResult, err = c.sniffPkt(ueKey, data)
 	if sniffingResult == nil {

@@ -1255,37 +1255,6 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (liste
 	return listener, nil
 }
 
-var allNetworkTypes = []*common.NetworkType{
-	{L4Proto: consts.L4ProtoStr_UDP, IpVersion: consts.IpVersionStr_6},
-	{L4Proto: consts.L4ProtoStr_UDP, IpVersion: consts.IpVersionStr_4},
-	{L4Proto: consts.L4ProtoStr_TCP, IpVersion: consts.IpVersionStr_6},
-	{L4Proto: consts.L4ProtoStr_TCP, IpVersion: consts.IpVersionStr_4},
-}
-
-var unkIpNetworkTypes = []*common.NetworkType{
-	{L4Proto: consts.L4ProtoStr_UDP},
-	{L4Proto: consts.L4ProtoStr_TCP},
-}
-
-func GetNetworkType(l4Proto consts.L4ProtoStr, addr netip.Addr) *common.NetworkType {
-	switch {
-	case addr.Is4() || addr.Is4In6():
-		if l4Proto == consts.L4ProtoStr_UDP {
-			return allNetworkTypes[1]
-		}
-		return allNetworkTypes[3]
-	case addr.Is6():
-		if l4Proto == consts.L4ProtoStr_UDP {
-			return allNetworkTypes[0]
-		}
-		return allNetworkTypes[2]
-	}
-	if l4Proto == consts.L4ProtoStr_UDP {
-		return unkIpNetworkTypes[0]
-	}
-	return unkIpNetworkTypes[1]
-}
-
 func (c *ControlPlane) chooseBestDnsDialer(
 	req *dnsRequest,
 	dnsUpstream *dns.Upstream,
@@ -1293,7 +1262,7 @@ func (c *ControlPlane) chooseBestDnsDialer(
 ) error {
 	if dnsUpstream.Scheme == dns.UpstreamScheme_Static {
 		// Makes dummy dial argument to avoid panic (e.g. when priting logs).
-		outArg.networkType = allNetworkTypes[0]
+		outArg.networkType = common.IndexToNetworkType(0)
 		outArg.Outbound = c.outbounds[0]
 		outArg.Dialer = c.outbounds[0].Dialers[0]
 		return nil
@@ -1316,7 +1285,8 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	}
 	// Get the min latency path.
 	var networkType *common.NetworkType
-	for _, networkType = range allNetworkTypes {
+	for i := 3; i >= 0; i-- {
+		networkType = common.IndexToNetworkType(i)
 		if !dnsUpstream.IsNetworkSupported(networkType) {
 			continue
 		}
