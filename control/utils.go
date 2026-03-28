@@ -106,7 +106,7 @@ func (c *ControlPlane) RouteDialOption(
 		outboundIndex = redirected
 	}
 	outbound := c.outbounds[outboundIndex]
-	dialTarget, dialIp := chooseDialTarget(dst, domain, verified && c.dialTargetOverride)
+	dialTarget, dialIp := chooseDialTarget(dst, domain, verified && c.dialTargetOverride && outboundIndex != consts.OutboundDirect)
 	dialer, fallback, err := outbound.SelectFallbackIpVersion(networkType, dialIp)
 	fallbackDialer := false
 	if err != nil {
