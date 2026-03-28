@@ -45,18 +45,86 @@ func (e *leveledError) Level() log.Level {
 	return e.level
 }
 
-func wrapLevel(err error, level log.Level) error {
+// ErrDisabled is returned by AsXxx when the log level is disabled.
+// It is used to trigger error handling without allocating a real error.
+var ErrDisabled = errors.New("disabled")
+
+var leveledErrorPool = sync.Pool{
+	New: func() any {
+		return &leveledError{}
+	},
+}
+
+func getLeveledError(err error, level log.Level) error {
 	if err == nil {
 		return nil
 	}
-	return &leveledError{err: err, level: level}
+	le := leveledErrorPool.Get().(*leveledError)
+	le.err = err
+	le.level = level
+	return le
 }
 
-func AsInfo(err error) error  { return wrapLevel(err, log.InfoLevel) }
-func AsWarn(err error) error  { return wrapLevel(err, log.WarnLevel) }
-func AsError(err error) error { return wrapLevel(err, log.ErrorLevel) }
-func AsDebug(err error) error { return wrapLevel(err, log.DebugLevel) }
-func AsTrace(err error) error { return wrapLevel(err, log.TraceLevel) }
+func AsInfo(err error, format string, args ...any) error {
+	if !log.IsLevelEnabled(log.InfoLevel) {
+		return ErrDisabled
+	}
+	var wrappedErr error
+	if err == nil {
+		wrappedErr = common.Errf(format, args...)
+	} else {
+		wrappedErr = common.Wrap(err, format, args...)
+	}
+	return getLeveledError(wrappedErr, log.InfoLevel)
+}
+func AsWarn(err error, format string, args ...any) error {
+	if !log.IsLevelEnabled(log.WarnLevel) {
+		return ErrDisabled
+	}
+	var wrappedErr error
+	if err == nil {
+		wrappedErr = common.Errf(format, args...)
+	} else {
+		wrappedErr = common.Wrap(err, format, args...)
+	}
+	return getLeveledError(wrappedErr, log.WarnLevel)
+}
+func AsError(err error, format string, args ...any) error {
+	if !log.IsLevelEnabled(log.ErrorLevel) {
+		return ErrDisabled
+	}
+	var wrappedErr error
+	if err == nil {
+		wrappedErr = common.Errf(format, args...)
+	} else {
+		wrappedErr = common.Wrap(err, format, args...)
+	}
+	return getLeveledError(wrappedErr, log.ErrorLevel)
+}
+func AsDebug(err error, format string, args ...any) error {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return ErrDisabled
+	}
+	var wrappedErr error
+	if err == nil {
+		wrappedErr = common.Errf(format, args...)
+	} else {
+		wrappedErr = common.Wrap(err, format, args...)
+	}
+	return getLeveledError(wrappedErr, log.DebugLevel)
+}
+func AsTrace(err error, format string, args ...any) error {
+	if !log.IsLevelEnabled(log.TraceLevel) {
+		return ErrDisabled
+	}
+	var wrappedErr error
+	if err == nil {
+		wrappedErr = common.Errf(format, args...)
+	} else {
+		wrappedErr = common.Wrap(err, format, args...)
+	}
+	return getLeveledError(wrappedErr, log.TraceLevel)
+}
 
 type DnsManager struct {
 	conn    net.Conn
@@ -88,9 +156,11 @@ func (m *DnsManager) run() {
 		var data []byte
 		var err error
 		if data, err = m.read(buf); err != nil {
-			var le LeveledError
-			if errors.As(err, &le) {
-				log.WithError(err).Logf(le.Level(), "DnsManager closed, dialer: %v", m.dialer)
+			if le, ok := err.(*leveledError); ok {
+				if log.IsLevelEnabled(le.Level()) {
+					log.WithError(err).Logf(le.Level(), "DnsManager closed, dialer: %v", m.dialer)
+				}
+				leveledErrorPool.Put(le)
 			}
 			m.Close()
 			return
@@ -104,20 +174,20 @@ func (m *DnsManager) read(buf []byte) (data []byte, err error) {
 		msgLenBuf := buf[:2]
 		// Read two byte length.
 		if _, err = io.ReadFull(m.conn, msgLenBuf); err != nil {
-			return data, AsDebug(common.Wrap(err, "failed to read tcp DNS resp payload length"))
+			return data, AsDebug(err, "failed to read tcp DNS resp payload length")
 		}
 		msgLen := int(binary.BigEndian.Uint16(msgLenBuf))
 		if msgLen > len(buf) {
-			return data, AsWarn(common.Wrap(err, "tcp dns msg len too large: %d > %d", msgLen, len(buf)))
+			return data, AsWarn(err, "tcp dns msg len too large: %d > %d", msgLen, len(buf))
 		}
 		data = buf[:msgLen]
 		if _, err = io.ReadFull(m.conn, data); err != nil {
-			return data, AsDebug(common.Wrap(err, "failed to read tcp DNS resp payload"))
+			return data, AsDebug(err, "failed to read tcp DNS resp payload")
 		}
 	} else {
 		var n int
 		if n, err = m.conn.Read(buf); err != nil {
-			return data, AsDebug(common.Wrap(err, "failed to read udp DNS resp payload"))
+			return data, AsDebug(err, "failed to read udp DNS resp payload")
 		}
 		data = buf[:n]
 	}
