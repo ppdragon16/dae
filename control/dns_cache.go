@@ -97,19 +97,11 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixe
 	if len(rrs) == 0 {
 		return nil
 	}
-	ttlOffsets := make([]int, len(rrs))
-	for i, info := range rrs {
-		ttlOffsets[i] = info.TTLOffset
-	}
-
-	dataCopy := make([]byte, len(data))
-	copy(dataCopy, data)
-
 	var maxTTL uint32
 	if fixedTtl > 0 {
 		maxTTL = uint32(fixedTtl)
 		for _, rr := range rrs {
-			binary.BigEndian.PutUint32(dataCopy[rr.TTLOffset:rr.TTLOffset+4], uint32(fixedTtl))
+			binary.BigEndian.PutUint32(data[rr.TTLOffset:rr.TTLOffset+4], maxTTL)
 		}
 	} else {
 		for _, rr := range rrs {
@@ -121,6 +113,14 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixe
 	if maxTTL < minClientTtl {
 		return nil
 	}
+
+	ttlOffsets := make([]int, len(rrs))
+	for i, info := range rrs {
+		ttlOffsets[i] = info.TTLOffset
+	}
+
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
 
 	newCache := &DnsCache{
 		Data:       dataCopy,
