@@ -554,7 +554,10 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, a
 					common.CoreIpDomainBitmap.Dec()
 				}
 			}
-			delete(c.deadlineTimers[qname], ip)
+			if timer, ok := c.deadlineTimers[qname][ip]; ok {
+				timer.Stop()
+				delete(c.deadlineTimers[qname], ip)
+			}
 			if len(c.deadlineTimers[qname]) == 0 {
 				delete(c.deadlineTimers, qname)
 			}
