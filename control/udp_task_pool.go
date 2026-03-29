@@ -6,9 +6,9 @@
 package control
 
 import (
-	"context"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,39 +23,60 @@ type UdpTask[ParamType any] struct {
 }
 
 type UdpTaskQueue[K comparable, P any] struct {
-	key K
-	p   *UdpTaskPool[K, P]
-
-	// mu protects valid and ch usage between EmitTask and GC
-	mu    sync.RWMutex
-	valid bool
+	key   K
+	valid int32
 
 	ch        chan *UdpTask[P]
-	timer     *time.Timer
 	agingTime time.Duration
-	ctx       context.Context
-	cancel    context.CancelFunc
-	closed    chan struct{}
 }
 
-func (q *UdpTaskQueue[K, P]) convoy() {
-	defer close(q.closed)
+func convoy[K comparable, P any](q *UdpTaskQueue[K, P], p *UdpTaskPool[K, P]) {
+	t := time.NewTimer(q.agingTime)
+	defer t.Stop()
+
 	for {
 		select {
-		case <-q.ctx.Done():
-			return
 		case task := <-q.ch:
 			task.exec(task)
-			// Reset timer safely
-			if !q.timer.Stop() {
+			if !t.Stop() {
 				select {
-				case <-q.timer.C:
+				case <-t.C:
 				default:
 				}
 			}
-			q.timer.Reset(q.agingTime)
+			t.Reset(q.agingTime)
+
+		case <-t.C:
+			cleanup(q, p)
+			return
 		}
 	}
+}
+
+func cleanup[K comparable, P any](q *UdpTaskQueue[K, P], p *UdpTaskPool[K, P]) {
+	h := p.hasher(q.key)
+	shard := p.shards[h%uint32(shardingCount)]
+
+	shard.mu.Lock()
+	atomic.StoreInt32(&q.valid, 0)
+
+	if shard.m[q.key] == q {
+		delete(shard.m, q.key)
+	}
+	shard.mu.Unlock()
+
+	for {
+		select {
+		case t := <-q.ch:
+			// Ensures task recycled
+			t.exec(t)
+		default:
+			goto done
+		}
+	}
+done:
+	q.key = *new(K)
+	p.queuePool.Put(q)
 }
 
 type udpTaskPoolShard[K comparable, P any] struct {
@@ -73,8 +94,7 @@ func NewUdpTaskPool[K comparable, P any](hasher Hasher[K]) *UdpTaskPool[K, P] {
 	p := &UdpTaskPool[K, P]{
 		queuePool: sync.Pool{New: func() any {
 			return &UdpTaskQueue[K, P]{
-				ch:     make(chan *UdpTask[P], UdpTaskQueueLength),
-				closed: make(chan struct{}),
+				ch: make(chan *UdpTask[P], UdpTaskQueueLength),
 			}
 		}},
 		hasher: hasher,
@@ -95,87 +115,47 @@ func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) bool {
 	q, ok := shard.m[key]
 	if ok {
 		// Fast path: try to lock queue safely
-		q.mu.RLock()
-		if q.valid {
+		if atomic.LoadInt32(&q.valid) == 1 {
 			select {
 			case q.ch <- task:
-				q.mu.RUnlock()
 				shard.mu.RUnlock()
 				return true
 			default:
 				// Channel full
 			}
 		}
-		q.mu.RUnlock()
 	}
 	shard.mu.RUnlock()
 
 	// Slow path or retry
 	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
 	// Double check
 	q, ok = shard.m[key]
 	if ok {
 		// Someone created it just now
-		q.mu.RLock()
-		if q.valid {
+		if atomic.LoadInt32(&q.valid) == 1 {
 			select {
 			case q.ch <- task:
-				q.mu.RUnlock()
-				shard.mu.Unlock()
 				return true
 			default:
 			}
 		}
-		q.mu.RUnlock()
-	} else {
-		// Create new
-		q = p.queuePool.Get().(*UdpTaskQueue[K, P])
-		q.key = key
-		q.p = p
-		q.valid = true
-		q.agingTime = DefaultNatTimeoutUDP
-		// Reset closed channel if it was closed
-		select {
-		case <-q.closed:
-			q.closed = make(chan struct{})
-		default:
-		}
-
-		q.ctx, q.cancel = context.WithCancel(context.Background())
-
-		q.timer = time.AfterFunc(q.agingTime, func() {
-			shard.mu.Lock()
-			if shard.m[key] != q {
-				shard.mu.Unlock()
-				return
-			}
-			delete(shard.m, key)
-			shard.mu.Unlock()
-
-			// Mark invalid
-			q.mu.Lock()
-			q.valid = false
-			q.mu.Unlock()
-
-			q.cancel()
-			<-q.closed
-
-			// Drain channel before recycling
-			for len(q.ch) > 0 {
-				<-q.ch
-			}
-			p.queuePool.Put(q)
-		})
-		shard.m[key] = q
-		go q.convoy()
-
-		// Send task to newly created queue (guaranteed to have space)
-		q.ch <- task
-		shard.mu.Unlock()
-		return true
+		return false
 	}
-	shard.mu.Unlock()
-	return false
+	// Create new
+	q = p.queuePool.Get().(*UdpTaskQueue[K, P])
+	q.key = key
+	atomic.StoreInt32(&q.valid, 1)
+	q.agingTime = DefaultNatTimeoutUDP
+
+	shard.m[key] = q
+	go convoy(q, p)
+
+	// Send task to newly created queue (guaranteed to have space)
+	q.ch <- task
+	return true
 }
 
 func AddrPortHash(k netip.AddrPort) uint32 {
