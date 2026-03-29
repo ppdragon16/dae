@@ -291,7 +291,7 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	if err != nil {
 		netErr, ok := IsNetError(err)
 		if !ok || !netErr.Temporary() {
-			log.Warningf("%+v", err)
+			log.Errorf("%+v", err)
 		}
 		dataToWrite = data
 		dnsRcodeSet(dataToWrite, dnsmessage.RcodeServerFailure)

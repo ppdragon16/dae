@@ -1064,7 +1064,9 @@ func (c *ControlPlane) loopTcp(listener *Listener) {
 			c.inConnections.Store(lconn, struct{}{})
 			defer c.inConnections.Delete(lconn)
 			if err := c.handleConn(lconn); err != nil && c.ctx.Err() == nil {
-				log.Warningf("%+v", common.Wrap(err, "handleConn"))
+				if log.IsLevelEnabled(log.ErrorLevel) {
+					log.Errorf("%+v", common.Wrap(err, "handleConn"))
+				}
 			}
 		}(lconn)
 	}
@@ -1171,7 +1173,9 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 			// Don't use ObtainBpfRoutingResult() because it would be saved in cache.
 			routingResult = new(bpfRoutingResult)
 			if err = c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
-				log.Warningf("%+v", common.Wrap(err, "No AddrPort presented"))
+				if log.IsLevelEnabled(log.ErrorLevel) {
+					log.Errorf("%+v", common.Wrap(err, "Failed to retrieve udp 53 routing result, src: %v", src))
+				}
 				pool.PutBuffer(data)
 				return
 			}
@@ -1209,7 +1213,9 @@ func udpEmitTaskFunc(t *UdpTask[emitParam]) {
 	p := &t.param
 	defer recycleUdpEmitTask(t)
 	if e := p.c.handlePkt(p.data, p.Src, p.Dst); e != nil && p.c.ctx.Err() == nil {
-		log.Warningf("%+v", common.Wrap(e, "handlePkt"))
+		if log.IsLevelEnabled(log.ErrorLevel) {
+			log.Errorf("%+v", common.Wrap(e, "handlePkt"))
+		}
 	}
 }
 
