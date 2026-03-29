@@ -1083,12 +1083,12 @@ var udpRoutineParamPool = sync.Pool{
 
 func obtainUdpRoutineParam(udpConn *net.UDPConn) (*udpRoutineParam, error) {
 	param := udpRoutineParamPool.Get().(*udpRoutineParam)
-	param.buf = pool.GetBuffer(consts.EthernetMtu + 120)
-	param.oobBuf = param.buf[consts.EthernetMtu:]
-	param.buf = param.buf[:consts.EthernetMtu]
+	param.buf = pool.GetBuffer(consts.EthernetMtu)
+	param.oobBuf = pool.GetBuffer(128)
 	n, oobn, _, src, err := udpConn.ReadMsgUDPAddrPort(param.buf, param.oobBuf)
 	if err != nil {
 		pool.PutBuffer(param.buf)
+		pool.PutBuffer(param.oobBuf)
 		udpRoutineParamPool.Put(param)
 		return nil, err
 	}
@@ -1124,6 +1124,7 @@ func (c *ControlPlane) loopUdp(udpConn *net.UDPConn, udpTaskChan chan *udpRoutin
 		case udpTaskChan <- param:
 		case <-c.ctx.Done():
 			pool.PutBuffer(param.buf)
+			pool.PutBuffer(param.oobBuf)
 			recycleUdpRoutineParam(param)
 		}
 	}
@@ -1153,10 +1154,12 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 	defer recycleUdpRoutineParam(param)
 	dst := RetrieveOriginalDest(param.oobBuf)
 	if !dst.IsValid() {
-		log.Errorf("Invalid dst from oob: %v", param.oobBuf)
+		log.Errorf("Invalid dst from oob: %v, cap: %d", param.oobBuf, cap(param.oobBuf))
+		pool.PutBuffer(param.oobBuf)
 		return
 	}
 	dst = common.ConvergeAddrPort(dst)
+	pool.PutBuffer(param.oobBuf)
 	src := common.ConvergeAddrPort(param.src)
 	data := param.buf
 	/// Handle DNS
