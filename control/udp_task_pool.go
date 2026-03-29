@@ -88,10 +88,9 @@ func NewUdpTaskPool[K comparable, P any](hasher Hasher[K]) *UdpTaskPool[K, P] {
 }
 
 // EmitTask: Make sure packets with the same key (4 tuples) will be sent in order.
-func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) {
+func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) bool {
 	h := p.hasher(key)
 	shard := p.shards[h%uint32(shardingCount)]
-
 	shard.mu.RLock()
 	q, ok := shard.m[key]
 	if ok {
@@ -102,7 +101,7 @@ func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) {
 			case q.ch <- task:
 				q.mu.RUnlock()
 				shard.mu.RUnlock()
-				return
+				return true
 			default:
 				// Channel full
 			}
@@ -123,7 +122,7 @@ func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) {
 			case q.ch <- task:
 				q.mu.RUnlock()
 				shard.mu.Unlock()
-				return
+				return true
 			default:
 			}
 		}
@@ -172,8 +171,11 @@ func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) {
 
 		// Send task to newly created queue (guaranteed to have space)
 		q.ch <- task
+		shard.mu.Unlock()
+		return true
 	}
 	shard.mu.Unlock()
+	return false
 }
 
 func AddrPortHash(k netip.AddrPort) uint32 {

@@ -1189,32 +1189,37 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 		}
 	}
 
-	c.udpTaskPool.EmitTask(src, c.obtainUdpEmitTask(src, dst, data))
+	emitTask := obtainUdpEmitTask(src, dst, data, c)
+	if !c.udpTaskPool.EmitTask(src, emitTask) {
+		recycleUdpEmitTask(emitTask)
+	}
 }
 
 type emitParam struct {
 	AddrPortPair
 	data []byte
+	c    *ControlPlane
 }
 
 var udpEmitTaskPool = sync.Pool{
 	New: func() any { return &UdpTask[emitParam]{} },
 }
 
-func (c *ControlPlane) udpEmitTaskFunc(t *UdpTask[emitParam]) {
+func udpEmitTaskFunc(t *UdpTask[emitParam]) {
 	p := &t.param
 	defer recycleUdpEmitTask(t)
-	if e := c.handlePkt(p.data, p.Src, p.Dst); e != nil && c.ctx.Err() == nil {
+	if e := p.c.handlePkt(p.data, p.Src, p.Dst); e != nil && p.c.ctx.Err() == nil {
 		log.Warningf("%+v", common.Wrap(e, "handlePkt"))
 	}
 }
 
-func (c *ControlPlane) obtainUdpEmitTask(src, dst netip.AddrPort, data []byte) *UdpTask[emitParam] {
+func obtainUdpEmitTask(src, dst netip.AddrPort, data []byte, c *ControlPlane) *UdpTask[emitParam] {
 	t := udpEmitTaskPool.Get().(*UdpTask[emitParam])
 	t.param.Src = src
 	t.param.Dst = dst
 	t.param.data = data
-	t.exec = c.udpEmitTaskFunc
+	t.param.c = c
+	t.exec = udpEmitTaskFunc
 	return t
 }
 
