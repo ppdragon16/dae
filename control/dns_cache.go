@@ -8,6 +8,8 @@ package control
 import (
 	"encoding/binary"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
@@ -20,11 +22,12 @@ const (
 	minClientTtl   = 5
 )
 
-type DnsCache struct {
+type dnsCache struct {
 	Data       []byte
-	TTLOffsets []int
+	TTLOffsets []uint16
+	_offsets   [8]uint16
 	FetchedAt  time.Time
-	IsNew      bool
+	IsNew      int32
 }
 
 // Parse ips from DNS resp answers.
@@ -45,7 +48,37 @@ func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
 	return ip, true
 }
 
-func CopyResponseFromCache(cache *DnsCache) ([]byte, bool) {
+type commonDnsCache[K comparable] struct {
+	cache *common.TimeWheelCache[K, *dnsCache]
+	pool  *sync.Pool
+}
+
+func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
+	c := &commonDnsCache[K]{
+		pool: &sync.Pool{
+			New: func() any { return &dnsCache{} },
+		},
+	}
+	c.cache = common.NewTimeWheelCache[K, *dnsCache](extendCacheDur, 5*time.Second, func(key K, value *dnsCache) {
+		common.DnsCacheSize.Dec()
+		value.Data = nil
+		value.TTLOffsets = nil
+		atomic.StoreInt32(&value.IsNew, 0)
+		c.pool.Put(value)
+	})
+	return c
+}
+
+func (c *commonDnsCache[K]) Get(cacheKey K) (resp []byte, expired bool, isNew bool) {
+	cache, ok := c.cache.Get(cacheKey)
+	if !ok {
+		return nil, false, false
+	}
+	resp, expired = copyResponseFromCache(cache)
+	return resp, expired, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
+}
+
+func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
 	respData := pool.GetBuffer(len(cache.Data))
 	copy(respData, cache.Data)
 
@@ -66,36 +99,10 @@ func CopyResponseFromCache(cache *DnsCache) ([]byte, bool) {
 	return respData, expired
 }
 
-type commonDnsCache[K comparable] struct {
-	cache *common.TimeWheelCache[K, *DnsCache]
-}
-
-func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
-	return &commonDnsCache[K]{
-		cache: common.NewTimeWheelCache[K, *DnsCache](extendCacheDur, 5*time.Second, func(key K, value *DnsCache) {
-			common.DnsCacheSize.Dec()
-		}),
-	}
-}
-
-func (c *commonDnsCache[K]) Get(cacheKey K) *DnsCache {
-	cache, ok := c.cache.Get(cacheKey)
-	if !ok {
-		return nil
-	}
-	if cache.IsNew {
-		// Keep DnsCache instance as immutable, so make a copy and modify.
-		copied := *cache
-		copied.IsNew = false
-		c.cache.Save(cacheKey, &copied)
-		common.DnsCacheSize.Inc()
-	}
-	return cache
-}
-
-func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixedTtl int) *DnsCache {
-	if len(rrs) == 0 {
-		return nil
+func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixedTtl int) {
+	lenRRs := len(rrs)
+	if lenRRs == 0 {
+		return
 	}
 	var maxTTL uint32
 	if fixedTtl > 0 {
@@ -111,26 +118,26 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixe
 		}
 	}
 	if maxTTL < minClientTtl {
-		return nil
+		return
 	}
 
-	ttlOffsets := make([]int, len(rrs))
+	newCache := c.pool.Get().(*dnsCache)
+	if lenRRs <= len(newCache._offsets) {
+		newCache.TTLOffsets = newCache._offsets[:lenRRs]
+	} else {
+		newCache.TTLOffsets = make([]uint16, lenRRs)
+	}
 	for i, info := range rrs {
-		ttlOffsets[i] = info.TTLOffset
+		newCache.TTLOffsets[i] = info.TTLOffset
 	}
-
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
+	newCache.Data = dataCopy
+	newCache.FetchedAt = time.Now()
+	atomic.StoreInt32(&newCache.IsNew, 1)
 
-	newCache := &DnsCache{
-		Data:       dataCopy,
-		TTLOffsets: ttlOffsets,
-		FetchedAt:  time.Now(),
-		IsNew:      true,
-	}
 	c.cache.Save(key, newCache)
 	common.DnsCacheSize.Inc()
-	return newCache
 }
 
 func (c *commonDnsCache[K]) Close() error {

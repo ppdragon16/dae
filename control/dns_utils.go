@@ -22,8 +22,8 @@ const (
 
 type RRInfo struct {
 	Type      uint16
-	RROffset  int    // 整个 RR 记录的起始位置（Name 之后，Type 开始的位置）
-	TTLOffset int    // TTL 字段的起始位置
+	RROffset  uint16 // 整个 RR 记录的起始位置（Name 之后，Type 开始的位置）
+	TTLOffset uint16 // TTL 字段的起始位置
 	TTL       uint32 // 原始 TTL
 }
 
@@ -285,8 +285,8 @@ func dnsExtractMetadata(data []byte) (infos []RRInfo, minTTL uint32) {
 
 		infos = append(infos, RRInfo{
 			Type:      rtype,
-			RROffset:  rrDataStart,
-			TTLOffset: ttlOff,
+			RROffset:  uint16(rrDataStart),
+			TTLOffset: uint16(ttlOff),
 			TTL:       ttl,
 		})
 
@@ -305,14 +305,14 @@ func getIPFromRR(data []byte, info *RRInfo) (netip.Addr, bool) {
 	// A 记录：Type=1, RdLen=4
 	if info.Type == 1 {
 		// RData 偏移量 = RROffset + Type(2) + Class(2) + TTL(4) + RdLen(2) = 10
-		rdataOff := info.RROffset + 10
+		rdataOff := int(info.RROffset) + 10
 		if rdataOff+4 <= len(data) {
 			return netip.AddrFrom4([4]byte(data[rdataOff : rdataOff+4])), true
 		}
 	}
 	// AAAA 记录：Type=28, RdLen=16
 	if info.Type == 28 {
-		rdataOff := info.RROffset + 10
+		rdataOff := int(info.RROffset) + 10
 		if rdataOff+16 <= len(data) {
 			return netip.AddrFrom16([16]byte(data[rdataOff : rdataOff+16])), true
 		}

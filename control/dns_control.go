@@ -624,8 +624,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
-		if cache := c.dnsCache.Get(cacheKey); cache != nil {
-			respData, expired := CopyResponseFromCache(cache)
+		if respData, expired, isNew := c.dnsCache.Get(cacheKey); respData != nil {
 			if expired {
 				// Refresh cache asynchronously.
 				go c.refreshDnsCache(obtainDnsRefreshParam(data, &cacheKey, upstream, dialArg))
@@ -638,7 +637,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 			// Use the caller's pooled dnsResp to avoid extra allocation.
 			dnsResp.respData = respData
 			dnsResp.fromPool = true
-			dnsResp.isNew = cache.IsNew
+			dnsResp.isNew = isNew
 			dnsResp.upstreamFrom = upstream
 			return nil
 		}
