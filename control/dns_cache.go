@@ -67,12 +67,12 @@ func CopyResponseFromCache(cache *DnsCache) ([]byte, bool) {
 }
 
 type commonDnsCache[K comparable] struct {
-	cache *common.CacheWithTTL[K, *DnsCache]
+	cache *common.TimeWheelCache[K, *DnsCache]
 }
 
 func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
 	return &commonDnsCache[K]{
-		cache: common.NewCacheWithTTL[K, *DnsCache](extendCacheDur, func(key K, value *DnsCache) {
+		cache: common.NewTimeWheelCache[K, *DnsCache](extendCacheDur, 5*time.Second, func(key K, value *DnsCache) {
 			common.DnsCacheSize.Dec()
 		}),
 	}
