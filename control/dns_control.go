@@ -76,7 +76,7 @@ type DnsController struct {
 	enableCache        bool
 	dnsCache           *commonDnsCache[dnsCacheKey]
 	dnsForwarderCache  sync.Map // map[dnsForwarderKey]DnsForwarder
-	requestSelectCache *common.CacheWithTTL[queryInfo, consts.DnsRequestOutboundIndex]
+	requestSelectCache *common.TimeWheelCache[queryInfo, consts.DnsRequestOutboundIndex]
 	// mu protects deadlineTimers
 	mu              sync.Mutex
 	deadlineTimers  map[string]map[netip.Addr]*time.Timer
@@ -120,7 +120,7 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		sniffVerifyMode:    option.SniffVerifyMode,
 		dnsForwarderCache:  sync.Map{},
 		dnsCache:           newCommonDnsCache[dnsCacheKey](),
-		requestSelectCache: common.NewCacheWithTTL[queryInfo, consts.DnsRequestOutboundIndex](6*time.Hour, nil),
+		requestSelectCache: common.NewTimeWheelCache[queryInfo, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
 		deadlineTimers:     make(map[string]map[netip.Addr]*time.Timer),
 	}, nil
 }
