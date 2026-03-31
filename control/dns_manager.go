@@ -226,6 +226,20 @@ func (m *DnsManager) IsClosed() bool {
 	return m.ctx.Err() != nil
 }
 
+var recvChannelPool = sync.Pool{
+	New: func() any {
+		return make(chan *dnsmessage.Msg, 1)
+	},
+}
+
+var resolveTimerPool = sync.Pool{
+	New: func() any {
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+		return timer
+	},
+}
+
 func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 	origMsgId := msg.Id
 	msg.Id = uint16(fastrand.Intn(math.MaxUint16))
@@ -247,20 +261,39 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 		return common.Wrap(err, "pack DNS packet")
 	}
 
-	recvCh := make(chan *dnsmessage.Msg, 1)
+	recvCh := recvChannelPool.Get().(chan *dnsmessage.Msg)
 	m.recvMap.Store(msg.Id, recvCh)
-	defer m.recvMap.Delete(msg.Id)
 
-	timer := time.NewTimer(dnsRetryInterval)
-	defer timer.Stop()
+	var timer *time.Timer
+	defer func() {
+		// Cleanup timer
+		if timer != nil {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			resolveTimerPool.Put(timer)
+		}
+		m.recvMap.Delete(msg.Id)
+		// Cleanup recvCh
+		select {
+		case <-recvCh:
+		default:
+		}
+		recvChannelPool.Put(recvCh)
+	}()
 
-	for i := range dnsRetryCount {
+	for range dnsRetryCount {
 		if _, err := m.conn.Write(data); err != nil {
 			return err
 		}
-		if i > 0 {
-			timer.Reset(dnsRetryInterval)
+		if timer == nil {
+			timer = resolveTimerPool.Get().(*time.Timer)
 		}
+		timer.Reset(dnsRetryInterval)
+
 		select {
 		case <-m.ctx.Done():
 			return net.ErrClosed
