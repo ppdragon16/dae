@@ -16,7 +16,6 @@ import (
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/netutils"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/dns"
@@ -82,7 +81,7 @@ type DnsController struct {
 	deadlineTimers  map[string]map[netip.Addr]*time.Timer
 	sniffVerifyMode consts.SniffVerifyMode
 
-	singleFlightGroup singleflight.Group
+	singleFlightGroup common.SingleFlight[dnsCacheKey]
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -194,10 +193,6 @@ var dnsResponseDataPool = sync.Pool{
 type dnsCacheKey struct {
 	queryInfo
 	outbound *outbound.DialerGroup
-}
-
-func (k dnsCacheKey) String() string {
-	return k.qname + string(k.qtype) + k.outbound.Name
 }
 
 func dnsQueryInfo(data []byte) (queryInfo queryInfo) {
@@ -671,7 +666,7 @@ func (c *DnsController) refreshDnsCache(p *dnsRefreshParam) {
 func (c *DnsController) singleFlightForwardDNS(
 	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (v []byte, leader bool, shared bool, err error) {
 	var _v any
-	_v, err, shared = c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
+	_v, err, shared = c.singleFlightGroup.Do(cacheKey, func() (any, error) {
 		leader = true
 		var forwarder DnsForwarder
 		key := dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument}
