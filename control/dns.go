@@ -22,7 +22,6 @@ import (
 	"github.com/daeuniverse/dae/common/netutils"
 	"github.com/daeuniverse/dae/component/dns"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
-	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	dnsmessage "github.com/miekg/dns"
@@ -575,7 +574,8 @@ func (d *DoTcpAndUdp) Close() (err error) {
 }
 
 type StaticForwarder struct {
-	getEntryFn func() (*config.DnsStaticEntry, bool)
+	name    string
+	routing *dns.Dns
 }
 
 func (s *StaticForwarder) ForwardDNS(msg *dnsmessage.Msg) error {
@@ -588,7 +588,7 @@ func (s *StaticForwarder) ForwardDNS(msg *dnsmessage.Msg) error {
 	qtype := q.Qtype
 
 	var answers []dnsmessage.RR
-	entry, ok := s.getEntryFn()
+	entry, ok := s.routing.GetStaticEntry(s.name)
 	if !ok {
 		return fmt.Errorf("failed to get static entry")
 	}

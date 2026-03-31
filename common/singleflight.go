@@ -7,12 +7,12 @@ import (
 )
 
 // call is an in-flight or completed singleflight.Do call
-type call struct {
+type call[V any] struct {
 	wg sync.WaitGroup
 
 	// These fields are written once before the WaitGroup is done
 	// and are only read after the WaitGroup is done.
-	val interface{}
+	val V
 	err error
 
 	// These fields are read and written with the singleflight
@@ -23,9 +23,9 @@ type call struct {
 
 // Group represents a class of work and forms a namespace in
 // which units of work can be executed with duplicate suppression.
-type SingleFlight[K comparable] struct {
-	mu sync.Mutex  // protects m
-	m  map[K]*call // lazily initialized
+type SingleFlight[K comparable, V any, P any] struct {
+	mu sync.Mutex     // protects m
+	m  map[K]*call[V] // lazily initialized
 }
 
 // Result holds the results of Do, so they can be passed
@@ -41,29 +41,30 @@ type Result struct {
 // time. If a duplicate comes in, the duplicate caller waits for the
 // original to complete and receives the same results.
 // The return value shared indicates whether v was given to multiple callers.
-func (g *SingleFlight[K]) Do(key K, fn func() (interface{}, error)) (v interface{}, err error, shared bool) {
+func (g *SingleFlight[K, V, P]) Do(key K, param P, fn func(P) (V, error)) (v V, err error, leader bool, shared bool) {
 	g.mu.Lock()
 	if g.m == nil {
-		g.m = make(map[K]*call)
+		g.m = make(map[K]*call[V])
 	}
 	if c, ok := g.m[key]; ok {
 		c.dups++
 		g.mu.Unlock()
 		c.wg.Wait()
 
-		return c.val, c.err, true
+		return c.val, c.err, false, true
 	}
-	c := new(call)
+	c := new(call[V])
 	c.wg.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
 
-	g.doCall(c, key, fn)
-	return c.val, c.err, c.dups > 0
+	g.doCall(c, key, param, fn)
+	dups := c.dups
+	return c.val, c.err, true, dups > 0
 }
 
 // doCall handles the single call for a key.
-func (g *SingleFlight[K]) doCall(c *call, key K, fn func() (interface{}, error)) {
+func (g *SingleFlight[K, V, P]) doCall(c *call[V], key K, param P, fn func(P) (V, error)) {
 	defer func() {
 		g.mu.Lock()
 		delete(g.m, key)
@@ -71,5 +72,5 @@ func (g *SingleFlight[K]) doCall(c *call, key K, fn func() (interface{}, error))
 		c.wg.Done()
 	}()
 
-	c.val, c.err = fn()
+	c.val, c.err = fn(param)
 }
