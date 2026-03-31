@@ -13,7 +13,6 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
-	"github.com/daeuniverse/outbound/pool"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -227,33 +226,72 @@ func (m *DnsManager) IsClosed() bool {
 	return m.ctx.Err() != nil
 }
 
+func writeData(conn net.Conn, data []byte, isStream bool) error {
+	if isStream {
+		var head [2]byte
+		binary.BigEndian.PutUint16(head[:], uint16(len(data)))
+		v := net.Buffers{head[:], data}
+		_, err := v.WriteTo(conn)
+		return err
+	} else {
+		_, err := conn.Write(data)
+		return err
+	}
+}
+
+var recvChannelPool = sync.Pool{
+	New: func() any {
+		return make(chan []byte, 1)
+	},
+}
+
+var resolveTimerPool = sync.Pool{
+	New: func() any {
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+		return timer
+	},
+}
+
 func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
 	origMsgId := dnsId(data)
 	newId := uint16(fastrand.Intn(math.MaxUint16))
 	dnsIdSet(data, newId)
-	defer func() { dnsIdSet(data, origMsgId) }()
-	dataToWrite := data
-	if m.stream {
-		dataToWrite = pool.GetBuffer(len(data) + 2)
-		defer pool.PutBuffer(dataToWrite)
-		binary.BigEndian.PutUint16(dataToWrite, uint16(len(data)))
-		copy(dataToWrite[2:], data)
-	}
 
-	recvCh := make(chan []byte, 1)
+	recvCh := recvChannelPool.Get().(chan []byte)
 	m.recvMap.Store(newId, recvCh)
-	defer m.recvMap.Delete(newId)
 
-	timer := time.NewTimer(dnsRetryInterval)
-	defer timer.Stop()
+	var timer *time.Timer
+	defer func() {
+		// Cleanup timer
+		if timer != nil {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			resolveTimerPool.Put(timer)
+		}
+		m.recvMap.Delete(newId)
+		// Cleanup recvCh
+		select {
+		case <-recvCh:
+		default:
+		}
+		recvChannelPool.Put(recvCh)
+		dnsIdSet(data, origMsgId)
+	}()
 
-	for i := range dnsRetryCount {
-		if _, err := m.conn.Write(dataToWrite); err != nil {
+	for range dnsRetryCount {
+		if err := writeData(m.conn, data, m.stream); err != nil {
 			return nil, err
 		}
-		if i > 0 {
-			timer.Reset(dnsRetryInterval)
+		if timer == nil {
+			timer = resolveTimerPool.Get().(*time.Timer)
 		}
+		timer.Reset(dnsRetryInterval)
+
 		select {
 		case <-m.ctx.Done():
 			return nil, net.ErrClosed
