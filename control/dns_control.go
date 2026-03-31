@@ -81,7 +81,7 @@ type DnsController struct {
 	deadlineTimers  map[string]map[netip.Addr]*time.Timer
 	sniffVerifyMode consts.SniffVerifyMode
 
-	singleFlightGroup common.SingleFlight[dnsCacheKey]
+	singleFlightGroup common.SingleFlight[dnsCacheKey, []byte, singleFlightParam]
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -164,6 +164,12 @@ var dialArgumentPool = sync.Pool{
 	New: func() any {
 		return &dialArgument{}
 	},
+}
+
+type singleFlightParam struct {
+	dnsForwarderKey
+	c    *DnsController
+	data []byte
 }
 
 type dnsForwarderKey struct {
@@ -598,12 +604,12 @@ var dnsRefreshParamPool = sync.Pool{
 	New: func() any { return &dnsRefreshParam{} },
 }
 
-func obtainDnsRefreshParam(data []byte, cacheKey *dnsCacheKey, upstream *dns.Upstream, dialArg *dialArgument) *dnsRefreshParam {
+func obtainDnsRefreshParam(data []byte, cacheKey dnsCacheKey, upstream *dns.Upstream, dialArg *dialArgument) *dnsRefreshParam {
 	p := dnsRefreshParamPool.Get().(*dnsRefreshParam)
 	dataCopy := pool.GetBuffer(len(data))
 	copy(dataCopy, data)
 	p.data = dataCopy
-	p.cacheKey = *cacheKey
+	p.cacheKey = cacheKey
 	p.upstream = upstream
 	p.dialArg = *dialArg
 	return p
@@ -622,7 +628,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 		if respData, expired, isNew := c.dnsCache.Get(cacheKey); respData != nil {
 			if expired {
 				// Refresh cache asynchronously.
-				go c.refreshDnsCache(obtainDnsRefreshParam(data, &cacheKey, upstream, dialArg))
+				go c.refreshDnsCache(obtainDnsRefreshParam(data, cacheKey, upstream, dialArg))
 			}
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
@@ -664,41 +670,42 @@ func (c *DnsController) refreshDnsCache(p *dnsRefreshParam) {
 }
 
 func (c *DnsController) singleFlightForwardDNS(
-	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (v []byte, leader bool, shared bool, err error) {
-	var _v any
-	_v, err, shared = c.singleFlightGroup.Do(cacheKey, func() (any, error) {
-		leader = true
+	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (r []byte, leader bool, shared bool, err error) {
+	param := singleFlightParam{dnsForwarderKey: dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument}, c: c, data: data}
+	r, err, leader, shared = c.singleFlightGroup.Do(cacheKey, param, func(p singleFlightParam) ([]byte, error) {
 		var forwarder DnsForwarder
-		key := dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument}
 		// get forwarder from cache
-		value, ok := c.dnsForwarderCache.Load(key)
+		value, ok := p.c.dnsForwarderCache.Load(p.dnsForwarderKey)
 		if ok {
 			forwarder = value.(DnsForwarder)
 		} else {
 			var err error
-			if upstream.Scheme == dns.UpstreamScheme_Static {
+			if p.upstream.Scheme == dns.UpstreamScheme_Static {
 				forwarder = &StaticForwarder{
-					getEntryFn: func() (*config.DnsStaticEntry, bool) {
-						return c.routing.GetStaticEntry(upstream.Hostname)
-					}}
+					name:    p.upstream.Hostname,
+					routing: p.c.routing,
+				}
 			} else {
-				forwarder, err = newDnsForwarder(upstream, *dialArgument)
+				forwarder, err = newDnsForwarder(&p.upstream, p.dialArgument)
 			}
 			if err != nil {
 				return nil, err
 			}
 			// Try to store the new forwarder, but use LoadOrStore to handle concurrent creation
-			actualValue, _ := c.dnsForwarderCache.LoadOrStore(key, forwarder)
+			actualValue, _ := p.c.dnsForwarderCache.LoadOrStore(p.dnsForwarderKey, forwarder)
 			forwarder = actualValue.(DnsForwarder)
 		}
 
-		r, err := forwarder.ForwardDNS(data)
-		if err != nil {
-			return nil, err
-		}
-
+		return forwarder.ForwardDNS(p.data)
+	})
+	if err != nil || r == nil {
+		return nil, false, false, err
+	}
+	if !dnsResponse(r) {
+		return nil, false, false, common.Errf("DNS message response flag is unset")
+	}
+	if leader {
 		rcode := dnsRcode(r)
-
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"qname": cacheKey.qname,
@@ -706,11 +713,6 @@ func (c *DnsController) singleFlightForwardDNS(
 				"rcode": rcode,
 				"ans":   FormatDnsRsc(r),
 			}).Debugf("Got DNS response")
-		}
-
-		// TODO: 细分日志
-		if !dnsResponse(r) {
-			return nil, common.Errf("DNS message response flag is unset")
 		}
 		if !isDnsResponseValid(r) {
 			if log.IsLevelEnabled(log.DebugLevel) {
@@ -721,11 +723,8 @@ func (c *DnsController) singleFlightForwardDNS(
 					"ans":   FormatDnsRsc(r),
 				}).Debugf("Not a valid DNS response")
 			}
-			return r, nil
-		}
-
-		// Skip cache for static entries to allow dynamic updates
-		if c.enableCache && upstream.Scheme != dns.UpstreamScheme_Static {
+		} else if c.enableCache && upstream.Scheme != dns.UpstreamScheme_Static {
+			// Skip cache for static entries to allow dynamic updates
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
 					"qname":    cacheKey.qname,
@@ -739,12 +738,8 @@ func (c *DnsController) singleFlightForwardDNS(
 			}
 			c.UpdateDnsCacheTtl(cacheKey, r, isBackground)
 		}
-		return r, nil
-	})
-	if _v != nil {
-		return _v.([]byte), leader, shared, err
 	}
-	return nil, false, false, err
+	return r, leader, shared, err
 }
 
 func (c *DnsController) GetStaticEntries() map[string]*config.DnsStaticEntry {
