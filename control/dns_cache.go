@@ -99,7 +99,7 @@ func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
 	return respData, expired
 }
 
-func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixedTtl int) {
+func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixedTtl int, isBackground bool) {
 	lenRRs := len(rrs)
 	if lenRRs == 0 {
 		return
@@ -130,9 +130,13 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixe
 	for i, info := range rrs {
 		newCache.TTLOffsets[i] = info.TTLOffset
 	}
-	dataCopy := make([]byte, len(data))
-	copy(dataCopy, data)
-	newCache.Data = dataCopy
+	if isBackground {
+		newCache.Data = data
+	} else {
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		newCache.Data = dataCopy
+	}
 	newCache.FetchedAt = time.Now()
 	atomic.StoreInt32(&newCache.IsNew, 1)
 

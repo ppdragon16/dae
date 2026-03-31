@@ -125,10 +125,10 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 	}, nil
 }
 
-func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, data []byte) {
+func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, data []byte, isBackground bool) {
 	infos, _ := dnsExtractMetadata(data)
 	fixedTtl, _ := c.fixedDomainTtl[cacheKey.qname]
-	c.dnsCache.UpdateAnswers(cacheKey, data, infos, fixedTtl)
+	c.dnsCache.UpdateAnswers(cacheKey, data, infos, fixedTtl, isBackground)
 }
 
 type dnsRequest struct {
@@ -643,7 +643,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 		}
 	}
 	// Pending for the same lookup.
-	respData, leader, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg)
+	respData, leader, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg, false)
 	dnsResp.isNew = leader
 	dnsResp.upstreamFrom = upstream
 	if respData != nil {
@@ -663,13 +663,13 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 
 func (c *DnsController) refreshDnsCache(p *dnsRefreshParam) {
 	defer recycleDnsRefreshParam(p)
-	if _, _, _, err := c.singleFlightForwardDNS(p.cacheKey, p.data, p.upstream, &p.dialArg); err != nil {
+	if _, _, _, err := c.singleFlightForwardDNS(p.cacheKey, p.data, p.upstream, &p.dialArg, true); err != nil {
 		log.Warnf("failed to refresh dns cache for %v: %+v", p.cacheKey, err)
 	}
 }
 
 func (c *DnsController) singleFlightForwardDNS(
-	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument) (v []byte, leader bool, shared bool, err error) {
+	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (v []byte, leader bool, shared bool, err error) {
 	var _v any
 	_v, err, shared = c.singleFlightGroup.Do(cacheKey.String(), func() (any, error) {
 		leader = true
@@ -742,7 +742,7 @@ func (c *DnsController) singleFlightForwardDNS(
 					"outbound": dialArgument.Outbound,
 				}).Debugf("Update DNS record cache")
 			}
-			c.UpdateDnsCacheTtl(cacheKey, r)
+			c.UpdateDnsCacheTtl(cacheKey, r, isBackground)
 		}
 		return r, nil
 	})
