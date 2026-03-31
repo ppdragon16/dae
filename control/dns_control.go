@@ -578,8 +578,8 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
-		if cache := c.dnsCache.Get(cacheKey); cache != nil {
-			originalMsgForExpiredFetch := FillMsgByCache(msg, cache)
+		if rr, fetchedAt, isNew := c.dnsCache.Get(cacheKey); rr != nil {
+			originalMsgForExpiredFetch := FillMsgByCache(msg, rr, fetchedAt)
 			if originalMsgForExpiredFetch != nil {
 				// Refresh cache asynchronously.
 				go c.refreshDnsCache(obtainDnsRefreshParam(originalMsgForExpiredFetch, &cacheKey, upstream, dialArg))
@@ -589,7 +589,7 @@ func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, di
 					"answer": msg.Answer,
 				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 			}
-			return cache.IsNew, nil
+			return isNew, nil
 		}
 	}
 	// Pending for the same lookup.

@@ -7,6 +7,8 @@ package control
 
 import (
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
@@ -18,10 +20,10 @@ const (
 	minClientTtl   = 5
 )
 
-type DnsCache struct {
+type dnsCache struct {
 	Answers   []dnsmessage.RR
 	FetchedAt time.Time
-	IsNew     bool
+	IsNew     int32
 }
 
 // Parse ips from DNS resp answers.
@@ -42,13 +44,13 @@ func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
 	return ip, true
 }
 
-func FillMsgByCache(msg *dnsmessage.Msg, cache *DnsCache) (originalMsgForExpiredFetch *dnsmessage.Msg) {
+func FillMsgByCache(msg *dnsmessage.Msg, rr []dnsmessage.RR, fetchedAt time.Time) (originalMsgForExpiredFetch *dnsmessage.Msg) {
 	// Ugly copying RR logic to avoid concurrent read/write TTL.
 	// TODO: Optimize this by byte-level copying?
 	m := &dnsmessage.Msg{}
 	ttls := make([]uint32, 0)
-	ttlDeduction := uint32(time.Since(cache.FetchedAt).Seconds())
-	for _, ans := range cache.Answers {
+	ttlDeduction := uint32(time.Since(fetchedAt).Seconds())
+	for _, ans := range rr {
 		rawTtl := ans.Header().Ttl
 		clientTtl := uint32(0)
 		if rawTtl > ttlDeduction {
@@ -86,35 +88,36 @@ func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
 }
 
 type commonDnsCache[K comparable] struct {
-	cache *common.TimeWheelCache[K, *DnsCache]
+	cache *common.TimeWheelCache[K, *dnsCache]
+	pool  *sync.Pool
 }
 
 func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
-	return &commonDnsCache[K]{
-		cache: common.NewTimeWheelCache[K, *DnsCache](extendCacheDur, 5*time.Second, func(key K, value *DnsCache) {
-			common.DnsCacheSize.Dec()
-		}),
+	c := &commonDnsCache[K]{
+		pool: &sync.Pool{
+			New: func() any { return &dnsCache{} },
+		},
 	}
+	c.cache = common.NewTimeWheelCache[K, *dnsCache](extendCacheDur, 5*time.Second, func(key K, value *dnsCache) {
+		common.DnsCacheSize.Dec()
+		value.Answers = nil
+		atomic.StoreInt32(&value.IsNew, 0)
+		c.pool.Put(value)
+	})
+	return c
 }
 
-func (c *commonDnsCache[K]) Get(cacheKey K) *DnsCache {
+func (c *commonDnsCache[K]) Get(cacheKey K) (rr []dnsmessage.RR, fetchedAt time.Time, isNew bool) {
 	cache, ok := c.cache.Get(cacheKey)
 	if !ok {
-		return nil
+		return nil, time.Time{}, false
 	}
-	if cache.IsNew {
-		// Keep DnsCache instance as immutable, so make a copy and modify.
-		copied := *cache
-		copied.IsNew = false
-		c.cache.Save(cacheKey, &copied)
-		common.DnsCacheSize.Inc()
-	}
-	return cache
+	return cache.Answers, cache.FetchedAt, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
 }
 
-func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedTtl int) *DnsCache {
+func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedTtl int) {
 	if len(answers) == 0 {
-		return nil
+		return
 	}
 
 	var maxTTL uint32
@@ -131,17 +134,16 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedT
 		}
 	}
 	if maxTTL < minClientTtl {
-		return nil
+		return
 	}
-	newCache := &DnsCache{
+	newCache := &dnsCache{
 		Answers:   answers,
 		FetchedAt: time.Now(),
-		IsNew:     true,
+		IsNew:     1,
 	}
 
 	c.cache.Save(key, newCache)
 	common.DnsCacheSize.Inc()
-	return newCache
 }
 
 func (c *commonDnsCache[K]) Close() error {
