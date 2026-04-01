@@ -14,7 +14,6 @@ const (
 type twcEntry[K comparable, V any] struct {
 	key        K
 	value      V
-	expiresAt  int64
 	roundCount uint32
 	slotIndex  uint32
 	prev, next *twcEntry[K, V]
@@ -96,20 +95,15 @@ func (c *TimeWheelCache[K, V]) wheelLoop() {
 }
 
 func (c *TimeWheelCache[K, V]) evictSlot(index uint32) {
-	now := time.Now().UnixNano()
 	curr := c.slots[index]
-
 	for curr != nil {
 		next := curr.next
 		if curr.roundCount <= 0 {
-			// 确保时间到期
-			if now >= curr.expiresAt {
-				c.removeEntry(curr)
-				if c.onRecycle != nil {
-					c.onRecycle(curr.key, curr.value)
-				}
-				c.releaseEntry(curr)
+			c.removeEntry(curr)
+			if c.onRecycle != nil {
+				c.onRecycle(curr.key, curr.value)
 			}
+			c.releaseEntry(curr)
 		} else {
 			curr.roundCount--
 		}
@@ -132,7 +126,6 @@ func (c *TimeWheelCache[K, V]) Save(key K, value V) {
 	entry := c.pool.Get().(*twcEntry[K, V])
 	entry.key = key
 	entry.value = value
-	entry.expiresAt = time.Now().Add(c.ttl).UnixNano()
 
 	totalTicks := uint32(c.ttl / c.tick)
 	entry.roundCount = totalTicks / c.slotSize
