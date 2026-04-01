@@ -92,8 +92,8 @@ type ControlPlane struct {
 	PrometheusRegistry *prometheus.Registry
 
 	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
-	dnsRouteCache         *common.CacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex]
-	dnsRoutingResultCache *common.CacheWithTTL[netip.Addr, *bpfRoutingResult]
+	dnsRouteCache         *common.TimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex]
+	dnsRoutingResultCache *common.TimeWheelCache[netip.Addr, *bpfRoutingResult]
 
 	udpTaskPool *UdpTaskPool[netip.AddrPort, emitParam]
 }
@@ -445,8 +445,8 @@ func NewControlPlane(
 		trafficLogger:          trafficLogger,
 		PrometheusRegistry:     prometheusRegistry,
 		outboundRedirects:      outboundRedirects,
-		dnsRouteCache:          common.NewCacheWithTTL[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, nil),
-		dnsRoutingResultCache:  common.NewCacheWithTTL[netip.Addr, *bpfRoutingResult](1*time.Hour, nil),
+		dnsRouteCache:          common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil),
+		dnsRoutingResultCache:  common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
 		udpTaskPool:            NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 	}
 	defer func() {
