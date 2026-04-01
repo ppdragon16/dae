@@ -60,7 +60,6 @@ func GetPrometheusLabels(outbound, subtag, dialer, network string) prometheus.La
 var (
 	ActiveConnections  *prometheus.GaugeVec
 	CoreIpDomainBitmap prometheus.Gauge
-	DeadlineTimers     prometheus.Gauge
 	DnsCacheSize       prometheus.Gauge
 	CheckLatency       *prometheus.GaugeVec
 	CheckMovingLatency *prometheus.GaugeVec
@@ -85,11 +84,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 	CoreIpDomainBitmap = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dae_ip_domain_bitmap",
-		},
-	)
-	DeadlineTimers = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "dae_deadline_timers",
 		},
 	)
 	DnsCacheSize = prometheus.NewGauge(
@@ -155,7 +149,6 @@ func InitPrometheus(registry *prometheus.Registry) {
 	)
 	registry.MustRegister(ActiveConnections)
 	registry.MustRegister(CoreIpDomainBitmap)
-	registry.MustRegister(DeadlineTimers)
 	registry.MustRegister(DnsCacheSize)
 	registry.MustRegister(CheckLatency)
 	registry.MustRegister(CheckMovingLatency)

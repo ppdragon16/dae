@@ -22,7 +22,7 @@ type twcEntry[K comparable, V any] struct {
 type TimeWheelCache[K comparable, V any] struct {
 	mu        sync.RWMutex
 	data      map[K]*twcEntry[K, V]
-	onRecycle func(key K, value V)
+	onRecycle func(key K, value V, replaced bool)
 
 	// 时间轮配置
 	slots    []*twcEntry[K, V]
@@ -37,7 +37,8 @@ type TimeWheelCache[K comparable, V any] struct {
 	pool   *sync.Pool
 }
 
-func NewTimeWheelCache[K comparable, V any](ttl time.Duration, tick time.Duration, onRecycle func(key K, value V)) *TimeWheelCache[K, V] {
+func NewTimeWheelCache[K comparable, V any](
+	ttl time.Duration, tick time.Duration, onRecycle func(key K, value V, replaced bool)) *TimeWheelCache[K, V] {
 	size := uint32(ttl / tick)
 	if size > maxSlotSize {
 		size = maxSlotSize
@@ -101,7 +102,7 @@ func (c *TimeWheelCache[K, V]) evictSlot(index uint32) {
 		if curr.roundCount <= 0 {
 			c.removeEntry(curr)
 			if c.onRecycle != nil {
-				c.onRecycle(curr.key, curr.value)
+				c.onRecycle(curr.key, curr.value, false)
 			}
 			c.releaseEntry(curr)
 		} else {
@@ -112,13 +113,17 @@ func (c *TimeWheelCache[K, V]) evictSlot(index uint32) {
 }
 
 func (c *TimeWheelCache[K, V]) Save(key K, value V) {
+	c.SaveWithTTL(key, value, c.ttl)
+}
+
+func (c *TimeWheelCache[K, V]) SaveWithTTL(key K, value V, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if old, ok := c.data[key]; ok {
 		c.removeEntry(old)
 		if c.onRecycle != nil {
-			c.onRecycle(key, old.value)
+			c.onRecycle(key, old.value, true)
 		}
 		c.releaseEntry(old)
 	}
@@ -127,7 +132,10 @@ func (c *TimeWheelCache[K, V]) Save(key K, value V) {
 	entry.key = key
 	entry.value = value
 
-	totalTicks := uint32(c.ttl / c.tick)
+	if ttl < c.tick {
+		ttl = c.tick
+	}
+	totalTicks := uint32(ttl / c.tick)
 	entry.roundCount = totalTicks / c.slotSize
 	// 使用位运算定位槽位
 	entry.slotIndex = (c.cursor + totalTicks) & c.slotMask

@@ -59,13 +59,14 @@ func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
 			New: func() any { return &dnsCache{} },
 		},
 	}
-	c.cache = common.NewTimeWheelCache[K, *dnsCache](extendCacheDur, 5*time.Second, func(key K, value *dnsCache) {
-		common.DnsCacheSize.Dec()
-		value.Data = nil
-		value.TTLOffsets = nil
-		atomic.StoreInt32(&value.IsNew, 0)
-		c.pool.Put(value)
-	})
+	c.cache = common.NewTimeWheelCache[K, *dnsCache](
+		extendCacheDur, 5*time.Second, func(key K, value *dnsCache, replaced bool) {
+			common.DnsCacheSize.Dec()
+			value.Data = nil
+			value.TTLOffsets = nil
+			atomic.StoreInt32(&value.IsNew, 0)
+			c.pool.Put(value)
+		})
 	return c
 }
 

@@ -900,7 +900,7 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 		return
 	}
 	fqdn := common.CanonicalName(domain)
-	if submap, ok := c.dnsController.deadlineTimers[fqdn]; ok {
+	if submap, ok := c.dnsController.lookupCache[fqdn]; ok {
 		// Successful sniff without DNS lookup record.
 		// In this case, the kernel may not handle domain match set, so re-route is required.
 		switch c.sniffVerifyMode {
