@@ -209,18 +209,17 @@ func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, di
 	if !ok {
 		return
 	}
-	labels := common.GetPrometheusLabels(s.dialerGroup.Name, dialer.Property.SubscriptionTag, dialer.Name, networkType.String())
-	latencyMs := float64(lastLatency.Milliseconds())
-	common.CheckLatency.With(labels).Set(latencyMs)
+	labels := [...]string{s.dialerGroup.Name, dialer.Property.SubscriptionTag, dialer.Name, networkType.String()}
+	common.Metrics.CheckLatency.With4(labels).Set(int64(lastLatency.Milliseconds()))
 
 	movingLatency := dialer.MovingAverage[s.dialerGroup]
 	if movingLatency > 0 {
-		common.CheckMovingLatency.With(labels).Set(float64(movingLatency.Milliseconds()))
+		common.Metrics.CheckMovingLatency.With4(labels).Set(int64(movingLatency.Milliseconds()))
 	}
 
 	selectLatency := s.getSortingLatency(dialer)
 	if selectLatency > 0 {
-		common.CheckSelectLatency.With(labels).Set(float64(selectLatency.Milliseconds()))
+		common.Metrics.CheckSelectLatency.With4(labels).Set(int64(selectLatency.Milliseconds()))
 	}
 
 	found := false
@@ -228,11 +227,11 @@ func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, di
 		if d == dialer {
 			found = true
 		}
-		lab := common.GetPrometheusLabels(s.dialerGroup.Name, d.Property.SubscriptionTag, d.Name, networkType.String())
-		common.DialerSelectIndex.With(lab).Set(float64(i))
+		lab := [...]string{s.dialerGroup.Name, d.Property.SubscriptionTag, d.Name, networkType.String()}
+		common.Metrics.DialerSelectIndex.With4(lab).Set(int64(i))
 	}
 	if !found {
-		common.DialerSelectIndex.With(labels).Set(999)
+		common.Metrics.DialerSelectIndex.With4(labels).Set(999)
 	}
 }
 

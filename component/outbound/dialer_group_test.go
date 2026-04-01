@@ -19,7 +19,6 @@ import (
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -28,7 +27,6 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	common.InitPrometheus(prometheus.NewRegistry())
 	m.Run()
 }
 
@@ -41,11 +39,15 @@ type mockDialer struct {
 	netproxy.Dialer
 }
 
-func (m *mockDialer) Alive() bool { return true }
-func (m *mockDialer) Name() string  { return "mock" }
+func (m *mockDialer) Alive() bool                                    { return true }
+func (m *mockDialer) Name() string                                   { return "mock" }
 func (m *mockDialer) Dial(network, address string) (net.Conn, error) { return nil, nil }
-func (m *mockDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) { return nil, nil }
-func (m *mockDialer) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) { return nil, nil }
+func (m *mockDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return nil, nil
+}
+func (m *mockDialer) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) {
+	return nil, nil
+}
 
 func newDirectDialer(option *dialer.GlobalOption, needAliveState bool) *dialer.Dialer {
 	d := dialer.NewDialer(&mockDialer{}, option, &dialer.Property{Property: D.Property{Name: "mock"}}, needAliveState)

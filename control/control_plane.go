@@ -42,7 +42,6 @@ import (
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
-	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/meek"
@@ -89,8 +88,7 @@ type ControlPlane struct {
 	tproxyPortProtect  bool
 	soMarkFromDae      uint32
 
-	trafficLogger      *TrafficLogger
-	PrometheusRegistry *prometheus.Registry
+	trafficLogger *TrafficLogger
 
 	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
 	dnsRouteCache         *common.TimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex]
@@ -231,8 +229,7 @@ func NewControlPlane(
 		}
 	}()
 
-	prometheusRegistry := prometheus.NewRegistry()
-	common.InitPrometheus(prometheusRegistry)
+	common.InitMetrics()
 
 	/// DialerGroups (outbounds).
 	if global.AllowInsecure {
@@ -284,7 +281,7 @@ func NewControlPlane(
 	grpc.CleanGlobalClientConnectionCache()
 	meek.CleanGlobalRoundTripperCache()
 
-	dialerSet := outbound.NewDialerSetFromLinks(option, prometheusRegistry, tagToNodeList)
+	dialerSet := outbound.NewDialerSetFromLinks(option, tagToNodeList)
 	groupNameRedirects := make(map[string]string)
 	for _, group := range groups {
 		// Handle redirect: if group has redirect config, ignore filter/policy and use direct dialer with fixed(0).
@@ -444,7 +441,6 @@ func NewControlPlane(
 		tproxyPortProtect:      global.TproxyPortProtect,
 		soMarkFromDae:          global.SoMarkFromDae,
 		trafficLogger:          trafficLogger,
-		PrometheusRegistry:     prometheusRegistry,
 		outboundRedirects:      outboundRedirects,
 		dnsRouteCache:          common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil),
 		dnsRoutingResultCache:  common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
@@ -1026,10 +1022,10 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			case <-tickerMem.C:
 				var ms runtime.MemStats
 				runtime.ReadMemStats(&ms)
-				common.StackInuse.Set(float64(ms.StackInuse) / 1024)
-				common.HeapInuse.Set(float64(ms.HeapInuse) / 1024)
-				common.HeapIdle.Set(float64(ms.HeapIdle) / 1024)
-				common.HeapReleased.Set(float64(ms.HeapReleased) / 1024)
+				common.Metrics.StackInuse.With0().Set(int64(ms.StackInuse) / 1024)
+				common.Metrics.HeapInuse.With0().Set(int64(ms.HeapInuse) / 1024)
+				common.Metrics.HeapIdle.With0().Set(int64(ms.HeapIdle) / 1024)
+				common.Metrics.HeapReleased.With0().Set(int64(ms.HeapReleased) / 1024)
 			case <-c.ctx.Done():
 				return
 			}

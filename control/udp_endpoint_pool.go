@@ -16,7 +16,6 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,8 +36,8 @@ type UdpEndpoint struct {
 	cancel context.CancelFunc
 
 	dialer         *dialer.Dialer
-	labels         prometheus.Labels
-	counterTraffic prometheus.Counter
+	labels         [4]string
+	counterTraffic *common.Series
 	sniffedDomain  string
 	receivedReply  bool
 }
@@ -63,8 +62,8 @@ func (ue *UdpEndpoint) run() {
 		deadlineTimer.Reset(newTimeout)
 	})
 
-	common.ActiveConnections.With(ue.labels).Inc()
-	defer common.ActiveConnections.With(ue.labels).Dec()
+	common.Metrics.ActiveConnections.With4(ue.labels).Inc()
+	defer common.Metrics.ActiveConnections.With4(ue.labels).Dec()
 	buf := pool.GetBuffer(2048)
 	defer pool.PutBuffer(buf)
 	var readFunc ReadPacketFunc
@@ -86,7 +85,7 @@ func (ue *UdpEndpoint) run() {
 			err = common.Wrap(e, "failed to ReadFromAddrPort")
 			break
 		}
-		ue.counterTraffic.Add(float64(n))
+		ue.counterTraffic.Add(int64(n))
 		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
 		// Only print routing for new connection to avoid the log exploded (Quic and BT).
 		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) {
@@ -113,7 +112,7 @@ func (ue *UdpEndpoint) run() {
 			if !ok {
 				log.Warnf("%+v", err)
 			} else if !netErr.Timeout() && ue.dialer.NeedAliveState() {
-				common.ErrorCount.With(ue.labels).Inc()
+				common.Metrics.ErrorCount.With4(ue.labels).Inc()
 				ue.dialer.ReportUnavailable()
 				log.Warnf("%+v", err)
 			}
@@ -131,7 +130,7 @@ func (ue *UdpEndpoint) WriteTo(b []byte, addr netip.AddrPort) (n int, err error)
 	} else {
 		n, err = ue.conn.WriteTo(b, net.UDPAddrFromAddrPort(addr))
 	}
-	ue.counterTraffic.Add(float64(n))
+	ue.counterTraffic.Add(int64(n))
 	return n, err
 }
 
