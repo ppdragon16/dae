@@ -23,7 +23,6 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -183,10 +182,10 @@ func chooseDialTarget(dst netip.AddrPort, domain string, override bool) (dialTar
 type TrafficLogConn struct {
 	net.Conn
 	onTraffic func(dir string, n int64)
-	counter   prometheus.Counter
+	counter   *common.Series
 }
 
-func NewTrafficLogConn(conn net.Conn, counter prometheus.Counter, onTraffic func(dir string, n int64)) *TrafficLogConn {
+func NewTrafficLogConn(conn net.Conn, counter *common.Series, onTraffic func(dir string, n int64)) *TrafficLogConn {
 	return &TrafficLogConn{
 		onTraffic: onTraffic,
 		Conn:      conn,
@@ -196,7 +195,7 @@ func NewTrafficLogConn(conn net.Conn, counter prometheus.Counter, onTraffic func
 
 func (tc *TrafficLogConn) Read(p []byte) (int, error) {
 	n, err := tc.Conn.Read(p)
-	tc.counter.Add(float64(n))
+	tc.counter.Add(int64(n))
 	if tc.onTraffic != nil {
 		tc.onTraffic("down", int64(n))
 	}
@@ -205,7 +204,7 @@ func (tc *TrafficLogConn) Read(p []byte) (int, error) {
 
 func (tc *TrafficLogConn) Write(p []byte) (int, error) {
 	n, err := tc.Conn.Write(p)
-	tc.counter.Add(float64(n))
+	tc.counter.Add(int64(n))
 	if tc.onTraffic != nil {
 		tc.onTraffic("up", int64(n))
 	}

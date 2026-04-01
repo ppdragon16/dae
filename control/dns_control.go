@@ -407,12 +407,13 @@ Dial:
 				if !ok || !dnsResponse(dnsResp.respData) {
 					return err
 				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
-					labels := common.GetPrometheusLabels(
+					labels := [...]string{
 						dialArgument.Outbound.Name,
 						dialArgument.Dialer.Property.SubscriptionTag,
 						dialArgument.Dialer.Name,
-						dialArgument.networkType.String())
-					common.ErrorCount.With(labels).Inc()
+						dialArgument.networkType.String(),
+					}
+					common.Metrics.ErrorCount.With4(labels).Inc()
 					dialArgument.Dialer.ReportUnavailable()
 					return err
 				}
@@ -560,7 +561,7 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, a
 		hash := lookupHash(qname, ip)
 		c.lookupCache[qname][ip] = hash
 		c.coreIpDomainCache.SaveWithTTL(hash, coreIpDomainCacheValue{qname: qname, ip: ip, bitmap: bitmap}, lookupTTL)
-		common.CoreIpDomainBitmap.Inc()
+		common.Metrics.CoreIpDomainBitmap.With0().Inc()
 	}
 	return nil
 }
@@ -570,7 +571,7 @@ func (c *DnsController) recycleLookupCache(qname string, ip netip.Addr, bitmap *
 	defer c.mu.Unlock()
 
 	if err := c.lookupCacheTimeout(ip, bitmap); err == nil {
-		common.CoreIpDomainBitmap.Dec()
+		common.Metrics.CoreIpDomainBitmap.With0().Dec()
 	}
 	delete(c.lookupCache[qname], ip)
 	if len(c.lookupCache[qname]) == 0 {

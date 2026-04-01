@@ -15,7 +15,6 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/dlclark/regexp2"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -55,20 +54,18 @@ func (n *NodeInfo) createDialerIfNeeded(option *dialer.GlobalOption, d netproxy.
 }
 
 type DialerSet struct {
-	option             *dialer.GlobalOption
-	prometheusRegistry prometheus.Registerer
-	nodeInfos          []*NodeInfo
-	nodeInfosMap       map[dialer.Property]*NodeInfo
-	nodeToTagMap       map[*dialer.Dialer]string // Only for created dialers
+	option       *dialer.GlobalOption
+	nodeInfos    []*NodeInfo
+	nodeInfosMap map[dialer.Property]*NodeInfo
+	nodeToTagMap map[*dialer.Dialer]string // Only for created dialers
 }
 
-func NewDialerSetFromLinks(option *dialer.GlobalOption, prometheusRegistry prometheus.Registerer, tagToNodeList map[string][]string) *DialerSet {
+func NewDialerSetFromLinks(option *dialer.GlobalOption, tagToNodeList map[string][]string) *DialerSet {
 	s := &DialerSet{
-		option:             option,
-		prometheusRegistry: prometheusRegistry,
-		nodeInfos:          make([]*NodeInfo, 0),
-		nodeInfosMap:       make(map[dialer.Property]*NodeInfo),
-		nodeToTagMap:       make(map[*dialer.Dialer]string),
+		option:       option,
+		nodeInfos:    make([]*NodeInfo, 0),
+		nodeInfosMap: make(map[dialer.Property]*NodeInfo),
+		nodeToTagMap: make(map[*dialer.Dialer]string),
 	}
 	for subscriptionTag, nodes := range tagToNodeList {
 		for _, node := range nodes {

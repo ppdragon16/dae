@@ -94,11 +94,12 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 		return nil, err
 	}
 	// labels will be recycled in ue's Close().
-	labels := common.GetPrometheusLabels(
+	labels := [...]string{
 		dialOption.Outbound.Name,
 		dialOption.Dialer.Property.SubscriptionTag,
 		dialOption.Dialer.Name,
-		networkType.String())
+		networkType.String(),
+	}
 
 	// Dial
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
@@ -126,7 +127,7 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 			if !ok {
 				return nil, err
 			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
-				common.ErrorCount.With(labels).Inc()
+				common.Metrics.ErrorCount.With4(labels).Inc()
 				dialOption.Dialer.ReportUnavailable()
 				return nil, err
 			}
@@ -142,7 +143,7 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 	ue.bonusTraffic = 1024 * 1024 // 1MB traffic will extend BonusNatTimeout
 	ue.dialer = dialOption.Dialer
 	ue.labels = labels
-	ue.counterTraffic = common.TrafficBytes.With(labels)
+	ue.counterTraffic = common.Metrics.TrafficBytes.With4(labels)
 	ue.sniffedDomain = sniffingResult.domain
 
 	LogDial(src, dst, ue.sniffedDomain, dialOption, networkType, routingResult)
@@ -204,7 +205,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 			if !ok {
 				return err
 			} else if !netErr.Timeout() && ue.dialer.NeedAliveState() {
-				common.ErrorCount.With(ue.labels).Inc()
+				common.Metrics.ErrorCount.With4(ue.labels).Inc()
 				ue.dialer.ReportUnavailable()
 				return err
 			}

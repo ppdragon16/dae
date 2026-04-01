@@ -145,11 +145,12 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	if err := c.RouteDialOption(src, dst, sniffedDomain, networkType, routingResult, dialOption); err != nil {
 		return err
 	}
-	labels := common.GetPrometheusLabels(
+	labels := [...]string{
 		dialOption.Outbound.Name,
 		dialOption.Dialer.Property.SubscriptionTag,
 		dialOption.Dialer.Name,
-		networkType.String())
+		networkType.String(),
+	}
 
 	// Dial
 	LogDial(src, dst, sniffedDomain, dialOption, networkType, routingResult)
@@ -181,7 +182,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 			if !ok {
 				return err
 			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
-				common.ErrorCount.With(labels).Inc()
+				common.Metrics.ErrorCount.With4(labels).Inc()
 				dialOption.Dialer.ReportUnavailable()
 				return err
 			}
@@ -189,7 +190,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		return nil
 	}
 
-	activeConnectionsCounter := common.ActiveConnections.With(labels)
+	activeConnectionsCounter := common.Metrics.ActiveConnections.With4(labels)
 	activeConnectionsCounter.Inc()
 	defer activeConnectionsCounter.Dec()
 
@@ -201,7 +202,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 			c.trafficLogger.Log(srcStr, dstStr, dir, n)
 		}
 	}
-	rLogConn := NewTrafficLogConn(rConn, common.TrafficBytes.With(labels), onTraffic)
+	rLogConn := NewTrafficLogConn(rConn, common.Metrics.TrafficBytes.With4(labels), onTraffic)
 	defer rLogConn.Close()
 
 	// Relay
@@ -222,7 +223,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 			if !ok {
 				return err
 			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
-				common.ErrorCount.With(labels).Inc()
+				common.Metrics.ErrorCount.With4(labels).Inc()
 				dialOption.Dialer.ReportUnavailable()
 				return err
 			}

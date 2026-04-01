@@ -61,7 +61,7 @@ func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
 	}
 	c.cache = common.NewTimeWheelCache[K, *dnsCache](
 		extendCacheDur, 5*time.Second, func(key K, value *dnsCache, replaced bool) {
-			common.DnsCacheSize.Dec()
+			common.Metrics.DnsCacheSize.With0().Dec()
 			value.Data = nil
 			value.TTLOffsets = nil
 			atomic.StoreInt32(&value.IsNew, 0)
@@ -150,7 +150,7 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, isBa
 	atomic.StoreInt32(&newCache.IsNew, 1)
 
 	c.cache.Save(key, newCache)
-	common.DnsCacheSize.Inc()
+	common.Metrics.DnsCacheSize.With0().Inc()
 }
 
 func (c *commonDnsCache[K]) Close() error {

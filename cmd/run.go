@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/protocol/direct"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	_ "net/http/pprof"
@@ -53,10 +51,10 @@ var (
 		"http://www.gstatic.com/generate_204",
 		"http://www.qualcomm.cn/generate_204",
 	}
-	std              = log.New()
-	pprofServer      *http.Server
-	prometheusServer *http.Server
-	commandServer    *http.Server
+	std           = log.New()
+	pprofServer   *http.Server
+	metricsServer *http.Server
+	commandServer *http.Server
 )
 
 func init() {
@@ -137,7 +135,7 @@ func Run(conf *config.Config, externGeoDataDirs []string) {
 		std.Fatalln(err)
 	}
 
-	startPrometheusServer(conf.Global.MetricsPort, c.PrometheusRegistry)
+	startMetricsServer(conf.Global.MetricsPort)
 	startCommandServer(conf.Global.CommandPort, c)
 
 	// Serve tproxy TCP/UDP server util signals.
@@ -284,7 +282,7 @@ loop:
 				oldC.Close()
 
 				startPprofServer(conf.Global.PprofPort)
-				startPrometheusServer(conf.Global.MetricsPort, c.PrometheusRegistry)
+				startMetricsServer(conf.Global.MetricsPort)
 				startCommandServer(conf.Global.CommandPort, c)
 			case syscall.SIGHUP:
 				// Ignore.
@@ -327,22 +325,38 @@ func startPprofServer(port uint16) {
 	runtime.SetMutexProfileFraction(1)
 }
 
-func startPrometheusServer(port uint16, prometheusRegistry *prometheus.Registry) {
-	if prometheusServer != nil {
-		prometheusServer.Shutdown(context.Background())
-		prometheusServer = nil
+func startMetricsServer(port uint16) {
+	// 1. 如果已有服务在运行，先平滑关闭
+	if metricsServer != nil {
+		// 实际生产中建议给 Shutdown 传一个带 Timeout 的 context
+		_ = metricsServer.Shutdown(context.Background())
+		metricsServer = nil
 	}
 
+	// 2. 如果端口为 0，则不启动
 	if port == 0 {
 		return
 	}
 
-	prometheusServer = &http.Server{
-		Addr: fmt.Sprintf(":%d", port),
-		Handler: promhttp.HandlerFor(prometheusRegistry, promhttp.HandlerOpts{
-			DisableCompression: true,
-		})}
-	go prometheusServer.ListenAndServe()
+	// 3. 创建极简的 HTTP Server
+	// 直接挂载我们自定义的零分配 Handler
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", common.MetricsHandler)
+
+	metricsServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: mux,
+		// 在高性能网络工具中，建议显式设置超时防止连接堆积
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	// 4. 异步启动
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			// 这里可以记录具体的启动错误，比如端口被占用
+		}
+	}()
 }
 
 func startCommandServer(port uint16, handler http.Handler) {
