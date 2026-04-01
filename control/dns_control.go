@@ -7,6 +7,7 @@ package control
 
 import (
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"net/netip"
@@ -61,6 +62,12 @@ type DnsControllerOption struct {
 	SniffVerifyMode    consts.SniffVerifyMode
 }
 
+type coreIpDomainCacheValue struct {
+	qname  string
+	ip     netip.Addr
+	bitmap *[32]uint32
+}
+
 type DnsController struct {
 	routing     *dns.Dns
 	qtypePrefer uint16
@@ -76,10 +83,11 @@ type DnsController struct {
 	dnsCache           *commonDnsCache[dnsCacheKey]
 	dnsForwarderCache  sync.Map // map[dnsForwarderKey]DnsForwarder
 	requestSelectCache *common.TimeWheelCache[queryInfo, consts.DnsRequestOutboundIndex]
-	// mu protects deadlineTimers
-	mu              sync.Mutex
-	deadlineTimers  map[string]map[netip.Addr]*time.Timer
-	sniffVerifyMode consts.SniffVerifyMode
+	// mu protects lookupCache
+	mu                sync.Mutex
+	lookupCache       map[string]map[netip.Addr]uint32
+	coreIpDomainCache *common.TimeWheelCache[uint32, coreIpDomainCacheValue]
+	sniffVerifyMode   consts.SniffVerifyMode
 
 	singleFlightGroup common.SingleFlight[dnsCacheKey, *dnsmessage.Msg, singleFlightParam]
 }
@@ -104,7 +112,7 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		return nil, err
 	}
 
-	return &DnsController{
+	c = &DnsController{
 		routing:     routing,
 		qtypePrefer: prefer,
 
@@ -120,8 +128,15 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsForwarderCache:  sync.Map{},
 		dnsCache:           newCommonDnsCache[dnsCacheKey](),
 		requestSelectCache: common.NewTimeWheelCache[queryInfo, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
-		deadlineTimers:     make(map[string]map[netip.Addr]*time.Timer),
-	}, nil
+		lookupCache:        make(map[string]map[netip.Addr]uint32),
+	}
+	c.coreIpDomainCache = common.NewTimeWheelCache[uint32, coreIpDomainCacheValue](
+		1*time.Hour, 5*time.Second, func(_ uint32, v coreIpDomainCacheValue, replaced bool) {
+			if !replaced {
+				c.recycleLookupCache(v.qname, v.ip, v.bitmap)
+			}
+		})
+	return c, nil
 }
 
 func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, answers []dnsmessage.RR) {
@@ -489,44 +504,52 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, a
 		return nil
 	}
 	lookupTTL := max(ttl, c.minSniffingTtl)
+	bitmap := (*[32]uint32)(domainBitmap)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	bitmap := (*[32]uint32)(domainBitmap)
 	for _, ip := range ips {
-		if _, ok := c.deadlineTimers[qname]; !ok {
-			c.deadlineTimers[qname] = make(map[netip.Addr]*time.Timer)
+		if _, ok := c.lookupCache[qname]; !ok {
+			c.lookupCache[qname] = make(map[netip.Addr]uint32)
 		}
-		if timer, ok := c.deadlineTimers[qname][ip]; ok {
-			timer.Reset(lookupTTL)
+		if h, ok := c.lookupCache[qname][ip]; ok {
+			c.coreIpDomainCache.SaveWithTTL(h, coreIpDomainCacheValue{qname: qname, ip: ip, bitmap: bitmap}, lookupTTL)
 			continue
 		}
-		if !allZero {
-			if err := c.newLookupCache(ip, bitmap); err != nil {
-				return err
-			}
-			common.CoreIpDomainBitmap.Inc()
+		if allZero {
+			continue
 		}
-		c.deadlineTimers[qname][ip] = time.AfterFunc(lookupTTL, func() {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			if !allZero {
-				if err := c.lookupCacheTimeout(ip, bitmap); err == nil {
-					common.CoreIpDomainBitmap.Dec()
-				}
-			}
-			if timer, ok := c.deadlineTimers[qname][ip]; ok {
-				timer.Stop()
-				delete(c.deadlineTimers[qname], ip)
-			}
-			if len(c.deadlineTimers[qname]) == 0 {
-				delete(c.deadlineTimers, qname)
-			}
-			common.DeadlineTimers.Dec()
-		})
-		common.DeadlineTimers.Inc()
+		if err := c.newLookupCache(ip, bitmap); err != nil {
+			return err
+		}
+		hash := lookupHash(qname, ip)
+		c.lookupCache[qname][ip] = hash
+		c.coreIpDomainCache.SaveWithTTL(hash, coreIpDomainCacheValue{qname: qname, ip: ip, bitmap: bitmap}, lookupTTL)
+		common.CoreIpDomainBitmap.Inc()
 	}
 	return nil
+}
+
+func (c *DnsController) recycleLookupCache(qname string, ip netip.Addr, bitmap *[32]uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.lookupCacheTimeout(ip, bitmap); err == nil {
+		common.CoreIpDomainBitmap.Dec()
+	}
+	delete(c.lookupCache[qname], ip)
+	if len(c.lookupCache[qname]) == 0 {
+		delete(c.lookupCache, qname)
+	}
+}
+
+// 使用简单的 hash 组合 qname 和 ip
+func lookupHash(qname string, ip netip.Addr) uint32 {
+	h := crc32.NewIEEE()
+	h.Write([]byte(qname))
+	h.Write(ip.AsSlice())
+	return h.Sum32()
 }
 
 func (c *DnsController) MaybeUpdateLookupCache(qname string, ips []netip.Addr, ttl time.Duration) error {
@@ -706,15 +729,9 @@ func (c *DnsController) Close() error {
 	c.requestSelectCache.Close()
 	c.dnsCache.Close()
 
-	// Clean up all deadline timers to prevent goroutine leaks
-	for _, ipTimers := range c.deadlineTimers {
-		for _, timer := range ipTimers {
-			if timer != nil {
-				timer.Stop()
-			}
-		}
-	}
-	c.deadlineTimers = make(map[string]map[netip.Addr]*time.Timer)
+	// Clean up cache & deadline timers.
+	c.coreIpDomainCache.Close()
+	c.lookupCache = make(map[string]map[netip.Addr]uint32)
 
 	// Close all DNS forwarders
 	c.dnsForwarderCache.Range(func(key, value any) bool {
