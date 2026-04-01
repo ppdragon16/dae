@@ -269,9 +269,11 @@ func (s *LatencyBasedSelector) NotifyStatusChange(d *dialer.Dialer) {
 				!s.dialerToAlive[oldDialer]:
 				s.networkIndexToDialer[i] = newDialer
 				s.logDialerSelection(oldDialer, newDialer, networkType)
-				oncePrintLatencies.Do(func() {
-					s.printLatencies(aliveDialers, networkType, log.Warnln)
-				})
+				if log.IsLevelEnabled(log.WarnLevel) {
+					oncePrintLatencies.Do(func() {
+						s.printLatencies(aliveDialers, networkType, log.Warnln)
+					})
+				}
 			default:
 				oldLatency := s.getSortingLatency(oldDialer)
 				newLatency := s.getSortingLatency(newDialer)
@@ -282,15 +284,14 @@ func (s *LatencyBasedSelector) NotifyStatusChange(d *dialer.Dialer) {
 					newPriority == oldPriority && hasLatency && newLatency < oldLatency-s.tolerance:
 					s.networkIndexToDialer[i] = newDialer
 					s.logDialerSelection(oldDialer, newDialer, networkType)
-					oncePrintLatencies.Do(func() {
-						s.printLatencies(aliveDialers, networkType, log.Warnln)
-					})
+					if log.IsLevelEnabled(log.WarnLevel) {
+						oncePrintLatencies.Do(func() {
+							s.printLatencies(aliveDialers, networkType, log.Warnln)
+						})
+					}
 				}
 			}
 		}
-		// oncePrintLatencies.Do(func() {
-		// 	s.printLatencies(aliveDialers, networkType, log.Infoln)
-		// })
 		s.handleAliveStateChange(newDialer != nil, networkType)
 	}
 }

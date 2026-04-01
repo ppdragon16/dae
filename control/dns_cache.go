@@ -99,37 +99,45 @@ func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
 	return respData, expired
 }
 
-func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, rrs []RRInfo, fixedTtl int, isBackground bool) {
-	lenRRs := len(rrs)
-	if lenRRs == 0 {
+func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, isBackground bool) {
+	it, ok := newDNSRRIterator(data)
+	if !ok {
 		return
 	}
-	var maxTTL uint32
-	if fixedTtl > 0 {
-		maxTTL = uint32(fixedTtl)
-		for _, rr := range rrs {
-			binary.BigEndian.PutUint32(data[rr.TTLOffset:rr.TTLOffset+4], maxTTL)
-		}
-	} else {
-		for _, rr := range rrs {
-			if rr.TTL > maxTTL {
-				maxTTL = rr.TTL
-			}
-		}
-	}
-	if maxTTL < minClientTtl {
+	lenRRs := it.remain
+	if lenRRs == 0 {
 		return
 	}
 
 	newCache := c.pool.Get().(*dnsCache)
 	if lenRRs <= len(newCache._offsets) {
-		newCache.TTLOffsets = newCache._offsets[:lenRRs]
+		newCache.TTLOffsets = newCache._offsets[:0]
 	} else {
-		newCache.TTLOffsets = make([]uint16, lenRRs)
+		newCache.TTLOffsets = make([]uint16, 0, lenRRs)
 	}
-	for i, info := range rrs {
-		newCache.TTLOffsets[i] = info.TTLOffset
+
+	var maxTTL uint32
+	if fixedTtl > 0 {
+		maxTTL = uint32(fixedTtl)
+		for off, ok := it.Next(); ok; off, ok = it.Next() {
+			newCache.TTLOffsets = append(newCache.TTLOffsets, uint16(off+4))
+			binary.BigEndian.PutUint32(data[off+4:off+8], maxTTL)
+		}
+	} else {
+		for off, ok := it.Next(); ok; off, ok = it.Next() {
+			newCache.TTLOffsets = append(newCache.TTLOffsets, uint16(off+4))
+			ttl := binary.BigEndian.Uint32(data[off+4 : off+8])
+			if ttl > maxTTL {
+				maxTTL = ttl
+			}
+		}
 	}
+	if maxTTL < minClientTtl {
+		newCache.TTLOffsets = nil
+		c.pool.Put(newCache)
+		return
+	}
+
 	if isBackground {
 		newCache.Data = data
 	} else {

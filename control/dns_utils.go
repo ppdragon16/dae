@@ -223,34 +223,57 @@ func isDnsResponseValid(resp []byte) bool {
 }
 
 func dnsAnswers(data []byte) (ips []netip.Addr, minTTL uint32) {
-	// 1. 第一步：扫描报文，获取所有 RR 的元数据索引和全局最小 TTL
-	// 这个函数负责了最繁重的域名跳过和偏移量计算工作
-	infos, minTTL := dnsExtractMetadata(data)
-	if len(infos) == 0 {
+	it, ok := newDNSRRIterator(data)
+	if !ok {
+		return nil, 0
+	}
+	lenRRs := it.remain
+	if lenRRs == 0 {
 		return nil, 0
 	}
 
-	// 2. 第二步：根据索引快速提取 IP 地址
-	// 由于有了 RROffset，我们现在可以"随机访问" RDATA 区
-	ips = make([]netip.Addr, 0, len(infos))
-	for _, info := range infos {
-		if ip, ok := getIPFromRR(data, &info); ok {
-			ips = append(ips, ip)
+	minTTL = ^uint32(0)
+	ips = make([]netip.Addr, 0, lenRRs)
+	for off, ok := it.Next(); ok; off, ok = it.Next() {
+		ttl := binary.BigEndian.Uint32(data[off+4 : off+8])
+		if ttl < minTTL {
+			minTTL = ttl
+		}
+		rtype := binary.BigEndian.Uint16(data[off : off+2])
+		// A 记录：Type=1, RdLen=4
+		if rtype == 1 {
+			// RData 偏移量 = RROffset + Type(2) + Class(2) + TTL(4) + RdLen(2) = 10
+			rdataOff := int(off) + 10
+			if rdataOff+4 <= len(data) {
+				ips = append(ips, netip.AddrFrom4([4]byte(data[rdataOff:rdataOff+4])))
+			}
+		}
+		// AAAA 记录：Type=28, RdLen=16
+		if rtype == 28 {
+			rdataOff := int(off) + 10
+			if rdataOff+16 <= len(data) {
+				ips = append(ips, netip.AddrFrom16([16]byte(data[rdataOff:rdataOff+16])))
+			}
 		}
 	}
-
 	return ips, minTTL
 }
 
-func dnsExtractMetadata(data []byte) (infos []RRInfo, minTTL uint32) {
+type dnsRRIterator struct {
+	data   []byte
+	off    int
+	remain int
+}
+
+func newDNSRRIterator(data []byte) (dnsRRIterator, bool) {
 	if len(data) < 12 {
-		return nil, 0
+		return dnsRRIterator{}, false
 	}
 
 	qdCount := int(binary.BigEndian.Uint16(data[4:6]))
 	anCount := int(binary.BigEndian.Uint16(data[6:8]))
 	if anCount == 0 {
-		return nil, 0
+		return dnsRRIterator{}, false
 	}
 
 	// 1. 跳过 Question 区
@@ -258,66 +281,43 @@ func dnsExtractMetadata(data []byte) (infos []RRInfo, minTTL uint32) {
 	for i := 0; i < qdCount; i++ {
 		nextOff, err := dnsSkipDomain(data, off)
 		if err != nil {
-			return nil, 0
+			return dnsRRIterator{}, false
 		}
-		off = nextOff + 4
+		off = nextOff + 4 // Skip Type(2) + Class(2)
 	}
 
-	// 2. 遍历 Answer 区
-	infos = make([]RRInfo, 0, anCount)
-	minTTL = ^uint32(0)
-
-	for i := 0; i < anCount; i++ {
-		// 记录 Name 之后的起始位置，即 RR 核心数据的开始
-		rrDataStart, err := dnsSkipDomain(data, off)
-		if err != nil {
-			break
-		}
-
-		if rrDataStart+10 > len(data) {
-			break
-		}
-
-		rtype := binary.BigEndian.Uint16(data[rrDataStart : rrDataStart+2])
-		ttlOff := rrDataStart + 4
-		ttl := binary.BigEndian.Uint32(data[ttlOff : ttlOff+4])
-		rdLen := int(binary.BigEndian.Uint16(data[rrDataStart+8 : rrDataStart+10]))
-
-		infos = append(infos, RRInfo{
-			Type:      rtype,
-			RROffset:  uint16(rrDataStart),
-			TTLOffset: uint16(ttlOff),
-			TTL:       ttl,
-		})
-
-		if ttl < minTTL {
-			minTTL = ttl
-		}
-
-		// 下一个 RR 的起始位置 = 当前核心数据开始 + 固定头(10) + RData长度
-		off = rrDataStart + 10 + rdLen
-	}
-
-	return infos, minTTL
+	return dnsRRIterator{
+		data:   data,
+		off:    off,
+		remain: anCount,
+	}, true
 }
 
-func getIPFromRR(data []byte, info *RRInfo) (netip.Addr, bool) {
-	// A 记录：Type=1, RdLen=4
-	if info.Type == 1 {
-		// RData 偏移量 = RROffset + Type(2) + Class(2) + TTL(4) + RdLen(2) = 10
-		rdataOff := int(info.RROffset) + 10
-		if rdataOff+4 <= len(data) {
-			return netip.AddrFrom4([4]byte(data[rdataOff : rdataOff+4])), true
-		}
+func (it *dnsRRIterator) Next() (uint16, bool) {
+	if it.remain <= 0 || it.off >= len(it.data) {
+		return 0, false
 	}
-	// AAAA 记录：Type=28, RdLen=16
-	if info.Type == 28 {
-		rdataOff := int(info.RROffset) + 10
-		if rdataOff+16 <= len(data) {
-			return netip.AddrFrom16([16]byte(data[rdataOff : rdataOff+16])), true
-		}
+
+	// 跳过 Name 字段
+	rrDataStart, err := dnsSkipDomain(it.data, it.off)
+	if err != nil {
+		it.remain = 0
+		return 0, false
 	}
-	return netip.Addr{}, false
+
+	// 校验边界: Type(2) + Class(2) + TTL(4) + RDLen(2) = 10 bytes
+	if rrDataStart+10 > len(it.data) {
+		it.remain = 0
+		return 0, false
+	}
+
+	rdLen := int(binary.BigEndian.Uint16(it.data[rrDataStart+8 : rrDataStart+10]))
+
+	// 更新 offset 指向下一个 RR，并减少计数
+	it.off = rrDataStart + 10 + rdLen
+	it.remain--
+
+	return uint16(rrDataStart), true
 }
 
 func dnsSwitchQtype(data []byte) {

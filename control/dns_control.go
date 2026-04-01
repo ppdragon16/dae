@@ -124,12 +124,6 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 	}, nil
 }
 
-func (c *DnsController) UpdateDnsCacheTtl(cacheKey dnsCacheKey, data []byte, isBackground bool) {
-	infos, _ := dnsExtractMetadata(data)
-	fixedTtl, _ := c.fixedDomainTtl[cacheKey.qname]
-	c.dnsCache.UpdateAnswers(cacheKey, data, infos, fixedTtl, isBackground)
-}
-
 type dnsRequest struct {
 	AddrPortPair
 	routingResult *bpfRoutingResult
@@ -736,7 +730,7 @@ func (c *DnsController) singleFlightForwardDNS(
 					"outbound": dialArgument.Outbound,
 				}).Debugf("Update DNS record cache")
 			}
-			c.UpdateDnsCacheTtl(cacheKey, r, isBackground)
+			c.dnsCache.UpdateAnswers(cacheKey, r, c.fixedDomainTtl[cacheKey.qname], isBackground)
 		}
 	}
 	return r, leader, shared, err
