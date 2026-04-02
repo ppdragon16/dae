@@ -13,6 +13,7 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
+	"github.com/daeuniverse/outbound/pool"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -181,12 +182,15 @@ func (m *DnsManager) read() (data []byte, err error) {
 			return nil, AsDebug(err, "failed to read tcp DNS resp payload")
 		}
 	} else {
-		data = make([]byte, consts.EthernetMtu)
+		buf := pool.GetBuffer(consts.EthernetMtu)
 		var n int
-		if n, err = m.conn.Read(data); err != nil {
+		if n, err = m.conn.Read(buf); err != nil {
+			pool.PutBuffer(buf)
 			return nil, AsDebug(err, "failed to read udp DNS resp payload")
 		}
-		data = data[:n]
+		data = make([]byte, n)
+		copy(data, buf[:n])
+		pool.PutBuffer(buf)
 	}
 	return data, nil
 }
