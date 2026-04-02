@@ -62,8 +62,9 @@ func (ue *UdpEndpoint) run() {
 		deadlineTimer.Reset(newTimeout)
 	})
 
-	common.Metrics.ActiveConnections.With4(ue.labels).Inc()
-	defer common.Metrics.ActiveConnections.With4(ue.labels).Dec()
+	activeConnectionCounter := common.Metrics.ActiveConnections.With4(ue.labels)
+	activeConnectionCounter.Inc()
+	defer activeConnectionCounter.Dec()
 	buf := pool.GetBuffer(2048)
 	defer pool.PutBuffer(buf)
 	var readFunc ReadPacketFunc

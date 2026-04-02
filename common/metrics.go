@@ -1,6 +1,7 @@
 package common
 
 import (
+	"hash/maphash"
 	"io"
 	"net/http"
 	"strconv"
@@ -37,6 +38,8 @@ type Gauge struct {
 	series sync.Map // map[string]*Series
 }
 
+var metricSeed = maphash.MakeSeed()
+
 // NewGauge 构造函数：预锁定定制标签键名
 func NewGauge(name string, labelKeys ...string) *Gauge {
 	registryMu.Lock()
@@ -59,51 +62,81 @@ func NewGauge(name string, labelKeys ...string) *Gauge {
 // --- 强类型 With 接口：彻底规避 ...string 产生的切片逃逸 ---
 
 func (g *Gauge) With0() *Series {
-	return g.getOrCreate("", "", "", "", "", "")
+	if s, ok := g.series.Load(uint64(0)); ok {
+		return s.(*Series)
+	}
+	return g.createSlow(0, "", "", "", "")
 }
 
 func (g *Gauge) With1(v1 string) *Series {
-	return g.getOrCreate("", v1, "", "", "", "")
-}
-
-func (g *Gauge) With2(v [2]string) *Series {
-	return g.getOrCreate("", v[0], v[1], "", "", "")
-}
-
-func (g *Gauge) With3(v [3]string) *Series {
-	return g.getOrCreate("", v[0], v[1], v[2], "", "")
-}
-
-func (g *Gauge) With4(v [4]string) *Series {
-	return g.getOrCreate("", v[0], v[1], v[2], v[3], "")
-}
-
-func (g *Gauge) With5(v [5]string) *Series {
-	return g.getOrCreate("", v[0], v[1], v[2], v[3], v[4])
-}
-
-// getOrCreate 核心逻辑：显式参数传递，彻底规避切片逃逸
-func (g *Gauge) getOrCreate(dummy, v1, v2, v3, v4, v5 string) *Series {
-	// 1. 快速路径：利用 Go 1.25 编译器对字符串连续拼接的优化
-	// 这里的拼接在 map lookup 时通常会被内联优化，不产生堆分配
-	key := v1 + "\x00" + v2 + "\x00" + v3 + "\x00" + v4 + "\x00" + v5
+	var h maphash.Hash
+	h.SetSeed(metricSeed)
+	h.WriteString(v1)
+	key := h.Sum64()
 
 	if s, ok := g.series.Load(key); ok {
 		return s.(*Series)
 	}
+	return g.createSlow(key, v1, "", "", "")
+}
 
+func (g *Gauge) With2(v [2]string) *Series {
+	var h maphash.Hash
+	h.SetSeed(metricSeed)
+	h.WriteString(v[0])
+	h.WriteString(v[1])
+	key := h.Sum64()
+
+	if s, ok := g.series.Load(key); ok {
+		return s.(*Series)
+	}
+	return g.createSlow(key, v[0], v[1], "", "")
+}
+
+func (g *Gauge) With3(v [3]string) *Series {
+	var h maphash.Hash
+	h.Reset()
+	h.SetSeed(metricSeed)
+	h.WriteString(v[0])
+	h.WriteString(v[1])
+	h.WriteString(v[2])
+	key := h.Sum64()
+
+	if s, ok := g.series.Load(key); ok {
+		return s.(*Series)
+	}
+	return g.createSlow(key, v[0], v[1], v[2], "")
+}
+
+func (g *Gauge) With4(v [4]string) *Series {
+	var h maphash.Hash
+	h.SetSeed(metricSeed)
+	h.WriteString(v[0])
+	h.WriteString(v[1])
+	h.WriteString(v[2])
+	h.WriteString(v[3])
+	key := h.Sum64()
+
+	if s, ok := g.series.Load(key); ok {
+		return s.(*Series)
+	}
+	return g.createSlow(key, v[0], v[1], v[2], v[3])
+}
+
+// getOrCreate 核心逻辑：显式参数传递，彻底规避切片逃逸
+func (g *Gauge) createSlow(key uint64, v1, v2, v3, v4 string) *Series {
 	// 2. 慢路径：创建新 Series (仅在每个标签组合第一次出现时运行)
-	// 预估容量：指标名 + 5对标签键值 + 标点符号，128字节通常足够
+	// 预估容量：指标名 + 4对标签键值 + 标点符号，128字节通常足够
 	buf := make([]byte, 0, 128)
 	buf = append(buf, g.name...)
 
 	numKeys := len(g.labelKeys)
-	if numKeys > 5 {
-		numKeys = 5
+	if numKeys > 4 {
+		numKeys = 4
 	}
 	if numKeys > 0 {
 		buf = append(buf, '{')
-		vals := [5]string{v1, v2, v3, v4, v5}
+		vals := [4]string{v1, v2, v3, v4}
 
 		for i := 0; i < numKeys; i++ {
 			buf = append(buf, g.labelKeys[i]...)
