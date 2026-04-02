@@ -20,6 +20,9 @@ const (
 	minClientTtl   = 5
 )
 
+// HashKey 128位双哈希，理论冲突概率为 1/2^128，无需二次校验
+type HashKey [2]uint64
+
 type dnsCache struct {
 	Answers   []dnsmessage.RR
 	FetchedAt time.Time
@@ -87,19 +90,19 @@ func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
 	return false
 }
 
-type commonDnsCache[K comparable] struct {
-	cache *common.TimeWheelCache[K, *dnsCache]
+type commonDnsCache struct {
+	cache *common.TimeWheelCache[HashKey, *dnsCache]
 	pool  *sync.Pool
 }
 
-func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
-	c := &commonDnsCache[K]{
+func newCommonDnsCache() *commonDnsCache {
+	c := &commonDnsCache{
 		pool: &sync.Pool{
 			New: func() any { return &dnsCache{} },
 		},
 	}
-	c.cache = common.NewTimeWheelCache[K, *dnsCache](
-		extendCacheDur, 5*time.Second, func(key K, value *dnsCache, replaced bool) {
+	c.cache = common.NewTimeWheelCache[HashKey, *dnsCache](
+		extendCacheDur, 5*time.Second, func(key HashKey, value *dnsCache, replaced bool) {
 			common.Metrics.DnsCacheSize.With0().Dec()
 			value.Answers = nil
 			atomic.StoreInt32(&value.IsNew, 0)
@@ -108,7 +111,7 @@ func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
 	return c
 }
 
-func (c *commonDnsCache[K]) Get(cacheKey K) (rr []dnsmessage.RR, fetchedAt time.Time, isNew bool) {
+func (c *commonDnsCache) Get(cacheKey HashKey) (rr []dnsmessage.RR, fetchedAt time.Time, isNew bool) {
 	cache, ok := c.cache.Get(cacheKey)
 	if !ok {
 		return nil, time.Time{}, false
@@ -116,9 +119,9 @@ func (c *commonDnsCache[K]) Get(cacheKey K) (rr []dnsmessage.RR, fetchedAt time.
 	return cache.Answers, cache.FetchedAt, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
 }
 
-func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedTtl int) {
+func (c *commonDnsCache) NewCache(answers []dnsmessage.RR, fixedTtl int) *dnsCache {
 	if len(answers) == 0 {
-		return
+		return nil
 	}
 
 	var maxTTL uint32
@@ -135,19 +138,22 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, answers []dnsmessage.RR, fixedT
 		}
 	}
 	if maxTTL < minClientTtl {
-		return
+		return nil
 	}
 	newCache := &dnsCache{
 		Answers:   answers,
 		FetchedAt: time.Now(),
 		IsNew:     1,
 	}
+	return newCache
+}
 
+func (c *commonDnsCache) Save(key HashKey, newCache *dnsCache) {
 	c.cache.Save(key, newCache)
 	common.Metrics.DnsCacheSize.With0().Inc()
 }
 
-func (c *commonDnsCache[K]) Close() error {
+func (c *commonDnsCache) Close() error {
 	c.cache.Close()
 	return nil
 }
