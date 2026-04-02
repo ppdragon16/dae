@@ -100,7 +100,7 @@ func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
 	return respData, expired
 }
 
-func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, isBackground bool) {
+func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, directSave bool) {
 	it, ok := newDNSRRIterator(data)
 	if !ok {
 		return
@@ -139,7 +139,7 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, isBa
 		return
 	}
 
-	if isBackground {
+	if directSave {
 		newCache.Data = data
 	} else {
 		dataCopy := make([]byte, len(data))

@@ -754,7 +754,8 @@ func (c *DnsController) singleFlightForwardDNS(
 					"outbound": dialArgument.Outbound,
 				}).Debugf("Update DNS record cache")
 			}
-			c.dnsCache.UpdateAnswers(cacheKey, r, c.fixedDomainTtl[cacheKey.qname], isBackground)
+			// Direct hold r in cache when shared, because it will be copied before sending back to clients.
+			c.dnsCache.UpdateAnswers(cacheKey, r, c.fixedDomainTtl[cacheKey.qname], isBackground || shared)
 		}
 	}
 	return r, leader, shared, err
