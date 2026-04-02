@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -741,8 +742,7 @@ func (c *DnsController) singleFlightForwardDNS(
 					"ans":   FormatDnsRsc(r),
 				}).Debugf("Not a valid DNS response")
 			}
-		} else if c.enableCache && upstream.Scheme != dns.UpstreamScheme_Static {
-			// Skip cache for static entries to allow dynamic updates
+		} else if c.enableCache && shouldSaveToCache(upstream, cacheKey.qname) {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
 					"qname":    cacheKey.qname,
@@ -759,6 +759,36 @@ func (c *DnsController) singleFlightForwardDNS(
 		}
 	}
 	return r, leader, shared, err
+}
+
+func shouldSaveToCache(upstream *dns.Upstream, qname string) bool {
+	// Skip cache for static entries to allow dynamic updates
+	if upstream.Scheme == dns.UpstreamScheme_Static {
+		return false
+	}
+	if len(qname) <= 24 {
+		return true
+	}
+	subLen := strings.IndexByte(qname, '.')
+	if subLen <= 0 {
+		return false
+	}
+	if subLen < 10 {
+		return true
+	}
+
+	var score int
+	for i := 0; i < subLen; i++ {
+		c := qname[i]
+		if (c >= '0' && c <= '9') || c == '-' {
+			score++
+		}
+	}
+
+	if subLen <= 16 {
+		return score*2 <= subLen
+	}
+	return score*3 <= subLen
 }
 
 func (c *DnsController) GetStaticEntries() map[string]*config.DnsStaticEntry {

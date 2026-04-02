@@ -20,6 +20,7 @@ import (
 const (
 	extendCacheDur = 1 * time.Hour
 	minClientTtl   = 5
+	minSaveTtl     = 15
 )
 
 type dnsCache struct {
@@ -126,6 +127,10 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, dire
 		}
 	} else {
 		for off, ok := it.Next(); ok; off, ok = it.Next() {
+			rtype := binary.BigEndian.Uint16(it.data[off : off+2])
+			if rtype != 1 && rtype != 28 {
+				continue
+			}
 			newCache.TTLOffsets = append(newCache.TTLOffsets, uint16(off+4))
 			ttl := binary.BigEndian.Uint32(data[off+4 : off+8])
 			if ttl > maxTTL {
@@ -133,7 +138,7 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, dire
 			}
 		}
 	}
-	if maxTTL < minClientTtl {
+	if maxTTL < minSaveTtl {
 		newCache.TTLOffsets = nil
 		c.pool.Put(newCache)
 		return
