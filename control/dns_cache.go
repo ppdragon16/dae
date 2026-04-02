@@ -7,14 +7,12 @@ package control
 
 import (
 	"encoding/binary"
-	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/outbound/pool"
-	dnsmessage "github.com/miekg/dns"
 )
 
 const (
@@ -22,6 +20,9 @@ const (
 	minClientTtl   = 5
 	minSaveTtl     = 15
 )
+
+// HashKey 128位双哈希，理论冲突概率为 1/2^128，无需二次校验
+type HashKey [2]uint64
 
 type dnsCache struct {
 	Data       []byte
@@ -31,37 +32,19 @@ type dnsCache struct {
 	IsNew      int32
 }
 
-// Parse ips from DNS resp answers.
-func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
-	var (
-		ip netip.Addr
-		ok bool
-	)
-	switch body := rr.(type) {
-	case *dnsmessage.A:
-		ip, ok = netip.AddrFromSlice(body.A)
-	case *dnsmessage.AAAA:
-		ip, ok = netip.AddrFromSlice(body.AAAA)
-	}
-	if !ok || ip.IsUnspecified() {
-		return ip, false
-	}
-	return ip, true
-}
-
-type commonDnsCache[K comparable] struct {
-	cache *common.TimeWheelCache[K, *dnsCache]
+type commonDnsCache struct {
+	cache *common.TimeWheelCache[HashKey, *dnsCache]
 	pool  *sync.Pool
 }
 
-func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
-	c := &commonDnsCache[K]{
+func NewCommonDnsCache() *commonDnsCache {
+	c := &commonDnsCache{
 		pool: &sync.Pool{
 			New: func() any { return &dnsCache{} },
 		},
 	}
-	c.cache = common.NewTimeWheelCache[K, *dnsCache](
-		extendCacheDur, 5*time.Second, func(key K, value *dnsCache, replaced bool) {
+	c.cache = common.NewTimeWheelCache[HashKey, *dnsCache](
+		extendCacheDur, 5*time.Second, func(key HashKey, value *dnsCache, replaced bool) {
 			common.Metrics.DnsCacheSize.With0().Dec()
 			value.Data = nil
 			value.TTLOffsets = nil
@@ -71,8 +54,8 @@ func newCommonDnsCache[K comparable]() *commonDnsCache[K] {
 	return c
 }
 
-func (c *commonDnsCache[K]) Get(cacheKey K) (resp []byte, expired bool, isNew bool) {
-	cache, ok := c.cache.Get(cacheKey)
+func (c *commonDnsCache) Get(key HashKey) (resp []byte, expired bool, isNew bool) {
+	cache, ok := c.cache.Get(key)
 	if !ok {
 		return nil, false, false
 	}
@@ -101,14 +84,14 @@ func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
 	return respData, expired
 }
 
-func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, directSave bool) {
+func (c *commonDnsCache) NewCache(data []byte, fixedTtl int, directSave bool) *dnsCache {
 	it, ok := newDNSRRIterator(data)
 	if !ok {
-		return
+		return nil
 	}
 	lenRRs := it.remain
 	if lenRRs == 0 {
-		return
+		return nil
 	}
 
 	newCache := c.pool.Get().(*dnsCache)
@@ -127,11 +110,11 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, dire
 		}
 	} else {
 		for off, ok := it.Next(); ok; off, ok = it.Next() {
+			newCache.TTLOffsets = append(newCache.TTLOffsets, uint16(off+4))
 			rtype := binary.BigEndian.Uint16(it.data[off : off+2])
 			if rtype != 1 && rtype != 28 {
 				continue
 			}
-			newCache.TTLOffsets = append(newCache.TTLOffsets, uint16(off+4))
 			ttl := binary.BigEndian.Uint32(data[off+4 : off+8])
 			if ttl > maxTTL {
 				maxTTL = ttl
@@ -141,7 +124,7 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, dire
 	if maxTTL < minSaveTtl {
 		newCache.TTLOffsets = nil
 		c.pool.Put(newCache)
-		return
+		return nil
 	}
 
 	if directSave {
@@ -153,12 +136,15 @@ func (c *commonDnsCache[K]) UpdateAnswers(key K, data []byte, fixedTtl int, dire
 	}
 	newCache.FetchedAt = time.Now()
 	atomic.StoreInt32(&newCache.IsNew, 1)
+	return newCache
+}
 
+func (c *commonDnsCache) Save(key HashKey, newCache *dnsCache) {
 	c.cache.Save(key, newCache)
 	common.Metrics.DnsCacheSize.With0().Inc()
 }
 
-func (c *commonDnsCache[K]) Close() error {
+func (c *commonDnsCache) Close() error {
 	c.cache.Close()
 	return nil
 }

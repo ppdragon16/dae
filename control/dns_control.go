@@ -9,12 +9,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"hash/maphash"
 	"io"
 	"math"
 	"net/netip"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/netutils"
@@ -81,9 +83,10 @@ type DnsController struct {
 	fixedDomainTtl     map[string]int
 	minSniffingTtl     time.Duration
 	enableCache        bool
-	dnsCache           *commonDnsCache[dnsCacheKey]
+	dnsCache           *commonDnsCache
+	dnsCacheHashSeed   maphash.Seed
 	dnsForwarderCache  sync.Map // map[dnsForwarderKey]DnsForwarder
-	requestSelectCache *common.TimeWheelCache[queryInfo, consts.DnsRequestOutboundIndex]
+	requestSelectCache *common.TimeWheelCache[HashKey, consts.DnsRequestOutboundIndex]
 	// mu protects lookupCache
 	mu                sync.Mutex
 	lookupCache       map[string]map[netip.Addr]uint32
@@ -127,8 +130,9 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		enableCache:        option.EnableCache,
 		sniffVerifyMode:    option.SniffVerifyMode,
 		dnsForwarderCache:  sync.Map{},
-		dnsCache:           newCommonDnsCache[dnsCacheKey](),
-		requestSelectCache: common.NewTimeWheelCache[queryInfo, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
+		dnsCache:           NewCommonDnsCache(),
+		dnsCacheHashSeed:   maphash.MakeSeed(),
+		requestSelectCache: common.NewTimeWheelCache[HashKey, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
 		lookupCache:        make(map[string]map[netip.Addr]uint32),
 	}
 	c.coreIpDomainCache = common.NewTimeWheelCache[uint32, coreIpDomainCacheValue](
@@ -209,6 +213,28 @@ var dnsResponseDataPool = sync.Pool{
 type dnsCacheKey struct {
 	queryInfo
 	outbound *outbound.DialerGroup
+}
+
+func (c *DnsController) GetHashKey(d dnsCacheKey) HashKey {
+	// 1. 获取字符串的基础哈希（汇编加速）
+	h1 := maphash.String(c.dnsCacheHashSeed, d.qname)
+
+	// 2. 混入 qtype 和 outbound 指针
+	// 建议：使用异或配合位移，减少冲突概率
+	h1 ^= uint64(d.qtype) << 32
+	if d.outbound != nil {
+		h1 ^= uint64(uintptr(unsafe.Pointer(d.outbound)))
+	}
+
+	// 3. 生成 h2：使用完整的 fmix64 确保 h2 的随机性
+	// 这样即便 h1 的低位发生剧烈变化，h2 也能扩散到高位
+	h2 := h1 ^ (h1 >> 33)
+	h2 *= 0xff51afd7ed558ccd
+	h2 ^= h2 >> 33
+	h2 *= 0xc4ceb9fe1a85ec53
+	h2 ^= h2 >> 33
+
+	return HashKey{h1, h2}
 }
 
 func dnsQueryInfo(data []byte) (queryInfo queryInfo) {
@@ -339,13 +365,14 @@ func (c *DnsController) handleDNSRequest(
 ) error {
 	var err error
 	// Route Requset
-	RequestIndex, queryInfo, ok := c.requestSelectCache.GetWithKey(queryInfo)
+	hashKey := c.GetHashKey(dnsCacheKey{queryInfo: queryInfo, outbound: nil})
+	RequestIndex, ok := c.requestSelectCache.Get(hashKey)
 	if !ok {
 		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
 		if err != nil {
 			return err
 		}
-		c.requestSelectCache.Save(queryInfo, RequestIndex)
+		c.requestSelectCache.Save(hashKey, RequestIndex)
 	}
 
 	if RequestIndex == consts.DnsRequestOutboundIndex_Reject {
@@ -644,7 +671,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
-		if respData, expired, isNew := c.dnsCache.Get(cacheKey); respData != nil {
+		if respData, expired, isNew := c.dnsCache.Get(c.GetHashKey(cacheKey)); respData != nil {
 			if expired {
 				// Refresh cache asynchronously.
 				go c.refreshDnsCache(obtainDnsRefreshParam(data, cacheKey, upstream, dialArg))
@@ -755,7 +782,9 @@ func (c *DnsController) singleFlightForwardDNS(
 				}).Debugf("Update DNS record cache")
 			}
 			// Direct hold r in cache when shared, because it will be copied before sending back to clients.
-			c.dnsCache.UpdateAnswers(cacheKey, r, c.fixedDomainTtl[cacheKey.qname], isBackground || shared)
+			if newCache := c.dnsCache.NewCache(r, c.fixedDomainTtl[cacheKey.qname], isBackground || shared); newCache != nil {
+				c.dnsCache.Save(c.GetHashKey(cacheKey), newCache)
+			}
 		}
 	}
 	return r, leader, shared, err
