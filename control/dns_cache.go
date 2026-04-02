@@ -18,6 +18,7 @@ import (
 const (
 	extendCacheDur = 1 * time.Hour
 	minClientTtl   = 5
+	minSaveTtl     = 15
 )
 
 // HashKey 128位双哈希，理论冲突概率为 1/2^128，无需二次校验
@@ -132,12 +133,16 @@ func (c *commonDnsCache) NewCache(answers []dnsmessage.RR, fixedTtl int) *dnsCac
 		}
 	} else {
 		for _, ans := range answers {
+			rtype := ans.Header().Rrtype
+			if rtype != dnsmessage.TypeA && rtype != dnsmessage.TypeAAAA {
+				continue
+			}
 			if ttl := ans.Header().Ttl; ttl > maxTTL {
 				maxTTL = ttl
 			}
 		}
 	}
-	if maxTTL < minClientTtl {
+	if maxTTL < minSaveTtl {
 		return nil
 	}
 	newCache := &dnsCache{
