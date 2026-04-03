@@ -896,21 +896,28 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 		return
 	}
 	fqdn := common.CanonicalName(domain)
-	if submap, ok := c.dnsController.lookupCache[fqdn]; ok {
+	qHash := c.dnsController.QnameHash(fqdn)
+	var hasIpForDomain, isDstInIps bool
+	c.dnsController.mu.Lock()
+	if n, ok := c.dnsController.lookupCache[qHash]; ok && n > 0 {
+		hasIpForDomain = true
+		_, isDstInIps = c.dnsController.coreIpDomainCache.Get(QnameIpHash(qHash, dst.Addr()))
+	}
+	c.dnsController.mu.Unlock()
+
+	if hasIpForDomain {
 		// Successful sniff without DNS lookup record.
 		// In this case, the kernel may not handle domain match set, so re-route is required.
 		switch c.sniffVerifyMode {
 		case consts.SniffVerifyMode_None, consts.SniffVerifyMode_Loose:
 			verified = true
 			shouldRerouteFunc = func() bool {
-				_, validIP := submap[dst.Addr()]
-				return !validIP
+				return !isDstInIps
 			}
 		case consts.SniffVerifyMode_Strict:
-			_, validIP := submap[dst.Addr()]
-			verified = validIP
+			verified = isDstInIps
 			shouldRerouteFunc = func() bool {
-				return !validIP
+				return !isDstInIps
 			}
 		}
 	} else {

@@ -8,7 +8,6 @@ package control
 import (
 	"encoding/binary"
 	"fmt"
-	"hash/crc32"
 	"hash/maphash"
 	"io"
 	"math"
@@ -66,7 +65,7 @@ type DnsControllerOption struct {
 }
 
 type coreIpDomainCacheValue struct {
-	qname  string
+	qHash  HashKey
 	ip     netip.Addr
 	bitmap *[32]uint32
 }
@@ -89,11 +88,11 @@ type DnsController struct {
 	requestSelectCache *common.TimeWheelCache[HashKey, consts.DnsRequestOutboundIndex]
 	// mu protects lookupCache
 	mu                sync.Mutex
-	lookupCache       map[string]map[netip.Addr]uint32
-	coreIpDomainCache *common.TimeWheelCache[uint32, coreIpDomainCacheValue]
+	lookupCache       map[HashKey]uint16                                      // Key: Hash by qname
+	coreIpDomainCache *common.TimeWheelCache[HashKey, coreIpDomainCacheValue] // Key: Hash by qname + ip
 	sniffVerifyMode   consts.SniffVerifyMode
 
-	singleFlightGroup common.SingleFlight[dnsCacheKey, []byte, singleFlightParam]
+	singleFlightGroup common.SingleFlight[HashKey, []byte, singleFlightParam] // Key: Hash by qname + ip + *outbound
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -133,12 +132,12 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsCache:           NewCommonDnsCache(),
 		dnsCacheHashSeed:   maphash.MakeSeed(),
 		requestSelectCache: common.NewTimeWheelCache[HashKey, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
-		lookupCache:        make(map[string]map[netip.Addr]uint32),
+		lookupCache:        make(map[HashKey]uint16),
 	}
-	c.coreIpDomainCache = common.NewTimeWheelCache[uint32, coreIpDomainCacheValue](
-		1*time.Hour, 5*time.Second, func(_ uint32, v coreIpDomainCacheValue, replaced bool) {
+	c.coreIpDomainCache = common.NewTimeWheelCache[HashKey, coreIpDomainCacheValue](
+		1*time.Hour, 5*time.Second, func(_ HashKey, v coreIpDomainCacheValue, replaced bool) {
 			if !replaced {
-				c.recycleLookupCache(v.qname, v.ip, v.bitmap)
+				c.recycleLookupCache(v.qHash, v.ip, v.bitmap)
 			}
 		})
 	return c, nil
@@ -225,6 +224,18 @@ func (c *DnsController) GetHashKey(d dnsCacheKey) HashKey {
 	if d.outbound != nil {
 		h1 ^= uint64(uintptr(unsafe.Pointer(d.outbound)))
 	}
+	return HashKey(h1)
+}
+
+func (c *DnsController) QnameHash(qname string) HashKey {
+	return HashKey(maphash.String(c.dnsCacheHashSeed, qname))
+}
+
+func QnameIpHash(qhash HashKey, ip netip.Addr) HashKey {
+	h1 := uint64(qhash)
+	addr := ip.As16()
+	h1 ^= binary.LittleEndian.Uint64(addr[0:8])
+	h1 ^= binary.LittleEndian.Uint64(addr[8:16])
 	return HashKey(h1)
 }
 
@@ -560,51 +571,60 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, a
 	lookupTTL := max(ttl, c.minSniffingTtl)
 	bitmap := (*[32]uint32)(domainBitmap)
 
+	qHash := c.QnameHash(qname)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if _, ok := c.lookupCache[qHash]; !ok {
+		c.lookupCache[qHash] = 0
+	}
+
 	for _, ip := range ips {
-		if _, ok := c.lookupCache[qname]; !ok {
-			c.lookupCache[qname] = make(map[netip.Addr]uint32)
-		}
-		if h, ok := c.lookupCache[qname][ip]; ok {
-			c.coreIpDomainCache.SaveWithTTL(h, coreIpDomainCacheValue{qname: qname, ip: ip, bitmap: bitmap}, lookupTTL)
+		hashKey := QnameIpHash(qHash, ip)
+		if _, ok := c.coreIpDomainCache.Get(hashKey); ok {
+			// Just update ttl, no need to update ebpf map.
+			c.coreIpDomainCache.SaveWithTTL(hashKey, coreIpDomainCacheValue{qHash: qHash, ip: ip, bitmap: bitmap}, lookupTTL)
 			continue
 		}
 		// allZero could be true when SniffVerifyMode is 'loose'. It means no need to update ebpf map, but still need to
 		// update lookup cache because VerifySniff needs to know domain-ip existence.
 		if !allZero {
-			if err := c.newLookupCache(ip, bitmap); err != nil {
-				return err
-			}
+			go newLookupCacheAsync(c, ip, bitmap)
 		}
-		hash := lookupHash(qname, ip)
-		c.lookupCache[qname][ip] = hash
-		c.coreIpDomainCache.SaveWithTTL(hash, coreIpDomainCacheValue{qname: qname, ip: ip, bitmap: bitmap}, lookupTTL)
+		c.lookupCache[qHash]++
+		c.coreIpDomainCache.SaveWithTTL(hashKey, coreIpDomainCacheValue{qHash: qHash, ip: ip, bitmap: bitmap}, lookupTTL)
 		common.Metrics.CoreIpDomainBitmap.With0().Inc()
 	}
 	return nil
 }
 
-func (c *DnsController) recycleLookupCache(qname string, ip netip.Addr, bitmap *[32]uint32) {
+func (c *DnsController) recycleLookupCache(qHash HashKey, ip netip.Addr, bitmap *[32]uint32) {
+	go lookupCacheTimeoutAsync(c, ip, bitmap)
+	common.Metrics.CoreIpDomainBitmap.With0().Dec()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err := c.lookupCacheTimeout(ip, bitmap); err == nil {
-		common.Metrics.CoreIpDomainBitmap.With0().Dec()
-	}
-	delete(c.lookupCache[qname], ip)
-	if len(c.lookupCache[qname]) == 0 {
-		delete(c.lookupCache, qname)
+	if n, ok := c.lookupCache[qHash]; ok {
+		if n > 1 {
+			c.lookupCache[qHash] = n - 1
+			return
+		}
+		delete(c.lookupCache, qHash)
 	}
 }
 
-// 使用简单的 hash 组合 qname 和 ip
-func lookupHash(qname string, ip netip.Addr) uint32 {
-	h := crc32.NewIEEE()
-	h.Write([]byte(qname))
-	h.Write(ip.AsSlice())
-	return h.Sum32()
+func newLookupCacheAsync(c *DnsController, ip netip.Addr, domainBitmap *[32]uint32) {
+	if err := c.newLookupCache(ip, domainBitmap); err != nil {
+		log.Errorf("failed to update lookup cache to ebpf for ip %v: %v", ip, err)
+	}
+}
+
+func lookupCacheTimeoutAsync(c *DnsController, ip netip.Addr, domainBitmap *[32]uint32) {
+	if err := c.lookupCacheTimeout(ip, domainBitmap); err != nil {
+		log.Errorf("failed to delete lookup cache from ebpf for ip %v: %v", ip, err)
+	}
 }
 
 func (c *DnsController) MaybeUpdateLookupCache(qname string, ips []netip.Addr, ttl time.Duration) error {
@@ -710,7 +730,8 @@ func (c *DnsController) refreshDnsCache(p *dnsRefreshParam) {
 func (c *DnsController) singleFlightForwardDNS(
 	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (r []byte, leader bool, shared bool, err error) {
 	param := singleFlightParam{dnsForwarderKey: dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument}, c: c, data: data}
-	r, err, leader, shared = c.singleFlightGroup.Do(cacheKey, param, func(p singleFlightParam) ([]byte, error) {
+	hashKey := c.GetHashKey(cacheKey)
+	r, err, leader, shared = c.singleFlightGroup.Do(hashKey, param, func(p singleFlightParam) ([]byte, error) {
 		var forwarder DnsForwarder
 		// get forwarder from cache
 		value, ok := p.c.dnsForwarderCache.Load(p.dnsForwarderKey)
@@ -775,7 +796,7 @@ func (c *DnsController) singleFlightForwardDNS(
 			}
 			// Direct hold r in cache when shared, because it will be copied before sending back to clients.
 			if newCache := c.dnsCache.NewCache(r, c.fixedDomainTtl[cacheKey.qname], isBackground || shared); newCache != nil {
-				c.dnsCache.Save(c.GetHashKey(cacheKey), newCache)
+				c.dnsCache.Save(hashKey, newCache)
 			}
 		}
 	}
@@ -833,7 +854,7 @@ func (c *DnsController) Close() error {
 
 	// Clean up cache & deadline timers.
 	c.coreIpDomainCache.Close()
-	c.lookupCache = make(map[string]map[netip.Addr]uint32)
+	c.lookupCache = make(map[HashKey]uint16)
 
 	// Close all DNS forwarders
 	c.dnsForwarderCache.Range(func(key, value any) bool {
