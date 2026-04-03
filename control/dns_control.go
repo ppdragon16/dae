@@ -571,11 +571,12 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, a
 			c.coreIpDomainCache.SaveWithTTL(h, coreIpDomainCacheValue{qname: qname, ip: ip, bitmap: bitmap}, lookupTTL)
 			continue
 		}
-		if allZero {
-			continue
-		}
-		if err := c.newLookupCache(ip, bitmap); err != nil {
-			return err
+		// allZero could be true when SniffVerifyMode is 'loose'. It means no need to update ebpf map, but still need to
+		// update lookup cache because VerifySniff needs to know domain-ip existence.
+		if !allZero {
+			if err := c.newLookupCache(ip, bitmap); err != nil {
+				return err
+			}
 		}
 		hash := lookupHash(qname, ip)
 		c.lookupCache[qname][ip] = hash
