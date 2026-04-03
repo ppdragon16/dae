@@ -21,8 +21,8 @@ const (
 	minSaveTtl     = 15
 )
 
-// HashKey 128位双哈希，理论冲突概率为 1/2^128，无需二次校验
-type HashKey [2]uint64
+// 64位哈希，理论冲突概率为 1/2^64，不绝对安全但是够用
+type HashKey uint64
 
 type dnsCache struct {
 	Answers   []dnsmessage.RR

@@ -218,16 +218,7 @@ func (c *DnsController) GetHashKey(d dnsCacheKey) HashKey {
 	if d.outbound != nil {
 		h1 ^= uint64(uintptr(unsafe.Pointer(d.outbound)))
 	}
-
-	// 3. 生成 h2：使用完整的 fmix64 确保 h2 的随机性
-	// 这样即便 h1 的低位发生剧烈变化，h2 也能扩散到高位
-	h2 := h1 ^ (h1 >> 33)
-	h2 *= 0xff51afd7ed558ccd
-	h2 ^= h2 >> 33
-	h2 *= 0xc4ceb9fe1a85ec53
-	h2 ^= h2 >> 33
-
-	return HashKey{h1, h2}
+	return HashKey(h1)
 }
 
 func (c *DnsController) prepareQueryInfo(dnsMessage *dnsmessage.Msg) (queryInfo queryInfo) {
