@@ -128,7 +128,8 @@ func AsTrace(err error, format string, args ...any) error {
 
 type DnsManager struct {
 	conn    net.Conn
-	recvMap sync.Map // map[uint32]chan *dnsmessage.Msg
+	mu      sync.Mutex
+	recvMap map[uint16]chan *dnsmessage.Msg
 	ctx     context.Context
 	cancel  context.CancelFunc
 
@@ -139,11 +140,12 @@ type DnsManager struct {
 func NewDnsManager(conn net.Conn, stream bool, dialer string) *DnsManager {
 	ctx, cancel := context.WithCancel(context.TODO())
 	m := &DnsManager{
-		conn:   conn,
-		ctx:    ctx,
-		cancel: cancel,
-		stream: stream,
-		dialer: dialer,
+		conn:    conn,
+		recvMap: make(map[uint16]chan *dnsmessage.Msg),
+		ctx:     ctx,
+		cancel:  cancel,
+		stream:  stream,
+		dialer:  dialer,
 	}
 	go m.run()
 	return m
@@ -201,7 +203,9 @@ func (m *DnsManager) feed(data []byte) {
 		log.Warnf("Failed to unpack dns resp, stream: %v, err: %v, data: %v", m.stream, err, data)
 		return
 	}
-	conn, ok := m.recvMap.Load(msg.Id)
+	m.mu.Lock()
+	ch, ok := m.recvMap[msg.Id]
+	m.mu.Unlock()
 	if !ok {
 		log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
 		// Ignore message from unknown session
@@ -209,7 +213,7 @@ func (m *DnsManager) feed(data []byte) {
 	}
 
 	select {
-	case conn.(chan *dnsmessage.Msg) <- &msg:
+	case ch <- &msg:
 		// OK
 	default:
 		log.Debugf("Drop dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
@@ -262,7 +266,9 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 	}
 
 	recvCh := recvChannelPool.Get().(chan *dnsmessage.Msg)
-	m.recvMap.Store(msg.Id, recvCh)
+	m.mu.Lock()
+	m.recvMap[msg.Id] = recvCh
+	m.mu.Unlock()
 
 	var timer *time.Timer
 	defer func() {
@@ -276,7 +282,9 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 			}
 			resolveTimerPool.Put(timer)
 		}
-		m.recvMap.Delete(msg.Id)
+		m.mu.Lock()
+		delete(m.recvMap, msg.Id)
+		m.mu.Unlock()
 		// Cleanup recvCh
 		select {
 		case <-recvCh:
