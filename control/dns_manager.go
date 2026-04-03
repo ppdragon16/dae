@@ -127,7 +127,8 @@ func AsTrace(err error, format string, args ...any) error {
 
 type DnsManager struct {
 	conn    net.Conn
-	recvMap sync.Map // map[uint32]chan *dnsmessage.Msg
+	mu      sync.Mutex
+	recvMap map[uint16]chan []byte
 	ctx     context.Context
 	cancel  context.CancelFunc
 
@@ -138,11 +139,12 @@ type DnsManager struct {
 func NewDnsManager(conn net.Conn, stream bool, dialer string) *DnsManager {
 	ctx, cancel := context.WithCancel(context.TODO())
 	m := &DnsManager{
-		conn:   conn,
-		ctx:    ctx,
-		cancel: cancel,
-		stream: stream,
-		dialer: dialer,
+		conn:    conn,
+		recvMap: make(map[uint16]chan []byte),
+		ctx:     ctx,
+		cancel:  cancel,
+		stream:  stream,
+		dialer:  dialer,
 	}
 	go m.run()
 	return m
@@ -201,7 +203,9 @@ func (m *DnsManager) feed(data []byte) {
 		return
 	}
 	id := dnsId(data)
-	conn, ok := m.recvMap.Load(id)
+	m.mu.Lock()
+	ch, ok := m.recvMap[id]
+	m.mu.Unlock()
 	if !ok {
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, id)
@@ -211,7 +215,7 @@ func (m *DnsManager) feed(data []byte) {
 	}
 
 	select {
-	case conn.(chan []byte) <- data:
+	case ch <- data:
 		// OK
 	default:
 		if log.IsLevelEnabled(log.DebugLevel) {
@@ -263,7 +267,9 @@ func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
 	dnsIdSet(data, newId)
 
 	recvCh := recvChannelPool.Get().(chan []byte)
-	m.recvMap.Store(newId, recvCh)
+	m.mu.Lock()
+	m.recvMap[newId] = recvCh
+	m.mu.Unlock()
 
 	var timer *time.Timer
 	defer func() {
@@ -277,7 +283,9 @@ func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
 			}
 			resolveTimerPool.Put(timer)
 		}
-		m.recvMap.Delete(newId)
+		m.mu.Lock()
+		delete(m.recvMap, newId)
+		m.mu.Unlock()
 		// Cleanup recvCh
 		select {
 		case <-recvCh:
