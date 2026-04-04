@@ -66,13 +66,14 @@ func QtypeToString(qtype uint16) string {
 	return str
 }
 
-func dnsDomain(data []byte, startOffset int) (string, int, error) {
+// dnsDomain 解析 DNS 域名，转为小写并写入 stringBuf，返回写入后的切片和下一个字段的偏移量
+func dnsDomain(data []byte, startOffset int) (qname string, nextOff int, err error) {
+	var stringBuf [256]byte
 	off := startOffset
 	jumped := false
-	nextOff := 0 // 用于记录逻辑上的“下一个字段”的起始位置
+	nextOff = 0
 	jumpCount := 0
-
-	var labels []string
+	res := stringBuf[:0]
 
 	for {
 		if off >= len(data) {
@@ -81,20 +82,16 @@ func dnsDomain(data []byte, startOffset int) (string, int, error) {
 
 		length := int(data[off])
 
-		// 1. 检查是否为指针 (0xC0)
+		// 1. 处理指针压缩 (0xC0)
 		if length&0xC0 == 0xC0 {
 			if off+1 >= len(data) {
 				return "", 0, errors.New("invalid pointer")
 			}
-
-			// 指针地址由当前字节的低 6 位和下一个字节组成 (共 14 位)
 			pointer := int(length&0x3F)<<8 | int(data[off+1])
-
 			if !jumped {
-				nextOff = off + 2 // 第一次跳转前，记录下 Question 字段后面该从哪读
+				nextOff = off + 2
 				jumped = true
 			}
-
 			off = pointer
 			jumpCount++
 			if jumpCount > maxJumpCount {
@@ -103,28 +100,41 @@ func dnsDomain(data []byte, startOffset int) (string, int, error) {
 			continue
 		}
 
-		// 2. 检查是否为结束符 (0x00)
+		// 2. 结束符 (0x00)
 		if length == 0 {
 			off++
 			break
 		}
 
-		// 3. 普通标签解析
+		// 3. 标签解析，转小写，加圆点
 		off++
 		if off+length > len(data) {
 			return "", 0, errors.New("label length exceeds packet size")
 		}
+		if len(res)+length+1 > cap(res) {
+			return "", 0, errors.New("qname length exceeds buffer size")
+		}
 
-		labels = append(labels, string(data[off:off+length]))
+		for i := 0; i < length; i++ {
+			char := data[off+i]
+			if char >= 'A' && char <= 'Z' {
+				char += 'a' - 'A'
+			}
+			res = append(res, char)
+		}
+		res = append(res, '.')
 		off += length
 	}
 
-	// 计算返回的偏移量
 	if !jumped {
 		nextOff = off
 	}
 
-	return strings.Join(labels, "."), nextOff, nil
+	// 处理 Root Domain 情况（直接返回 "."）
+	if len(res) == 0 {
+		return ".", nextOff, nil
+	}
+	return string(res), nextOff, nil
 }
 
 func dnsSkipDomain(data []byte, off int) (int, error) {
@@ -328,7 +338,7 @@ func dnsSwitchQtype(data []byte) {
 
 	// 1. 定位 QTYPE 的位置
 	// 我们需要跳过 Header(12字节) 和 变长的 QNAME
-	_, nextOff, err := dnsDomain(data, 12)
+	nextOff, err := dnsSkipDomain(data, 12)
 	if err != nil {
 		return
 	}

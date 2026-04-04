@@ -245,7 +245,7 @@ func dnsQueryInfo(data []byte) (queryInfo queryInfo) {
 			qtype := binary.BigEndian.Uint16(data[off : off+2])
 			qclass := binary.BigEndian.Uint16(data[off+2 : off+4])
 			if qclass == uint16(dnsmessage.ClassINET) {
-				queryInfo.qname = common.CanonicalName(qname)
+				queryInfo.qname = qname
 				queryInfo.qtype = qtype
 			}
 		}

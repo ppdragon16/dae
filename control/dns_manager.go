@@ -315,7 +315,9 @@ func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
 		}
 	}
 
-	qInfo := dnsQueryInfo(data)
-	log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qInfo.qname, qInfo.qtype)
+	if log.IsLevelEnabled(log.WarnLevel) {
+		qInfo := dnsQueryInfo(data)
+		log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qInfo.qname, qInfo.qtype)
+	}
 	return nil, context.DeadlineExceeded
 }
