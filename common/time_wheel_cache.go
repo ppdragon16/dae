@@ -60,7 +60,7 @@ func NewTimeWheelCache[K comparable, V any](
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &TimeWheelCache[K, V]{
-		data:      make(map[K]*twcEntry[K, V]),
+		data:      make(map[K]*twcEntry[K, V], size*2), // pre-alloc
 		slots:     make([]*twcEntry[K, V], size),
 		slotSize:  size,
 		slotMask:  size - 1, // 预计算掩码
