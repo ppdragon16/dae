@@ -181,8 +181,10 @@ var dialArgumentPool = sync.Pool{
 
 type singleFlightParam struct {
 	dnsForwarderKey
-	c    *DnsController
-	data []byte
+	c            *DnsController
+	data         []byte
+	qi           queryInfo
+	isBackground bool
 }
 
 type dnsForwarderKey struct {
@@ -209,20 +211,15 @@ var dnsResponseDataPool = sync.Pool{
 	},
 }
 
-type dnsCacheKey struct {
-	queryInfo
-	outbound *outbound.DialerGroup
-}
-
-func (c *DnsController) GetHashKey(d dnsCacheKey) HashKey {
+func (c *DnsController) GetHashKey(qname string, qtype uint16, outbound *outbound.DialerGroup) HashKey {
 	// 1. 获取字符串的基础哈希（汇编加速）
-	h1 := maphash.String(c.dnsCacheHashSeed, d.qname)
+	h1 := maphash.String(c.dnsCacheHashSeed, qname)
 
 	// 2. 混入 qtype 和 outbound 指针
 	// 建议：使用异或配合位移，减少冲突概率
-	h1 ^= uint64(d.qtype) << 32
-	if d.outbound != nil {
-		h1 ^= uint64(uintptr(unsafe.Pointer(d.outbound)))
+	h1 ^= uint64(qtype) << 32
+	if outbound != nil {
+		h1 ^= uint64(uintptr(unsafe.Pointer(outbound)))
 	}
 	return HashKey(h1)
 }
@@ -276,6 +273,7 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 		if dnsResp.respData != nil && dnsResp.fromPool {
 			pool.PutBuffer(dnsResp.respData)
 		}
+		*dnsResp = dnsResponseData{}
 		dnsResponseDataPool.Put(dnsResp)
 	}()
 
@@ -367,7 +365,7 @@ func (c *DnsController) handleDNSRequest(
 ) error {
 	var err error
 	// Route Requset
-	hashKey := c.GetHashKey(dnsCacheKey{queryInfo: queryInfo, outbound: nil})
+	hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, nil)
 	RequestIndex, ok := c.requestSelectCache.Get(hashKey)
 	if !ok {
 		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
@@ -653,7 +651,7 @@ func (c *DnsController) reject(data []byte) {
 
 type dnsRefreshParam struct {
 	data     []byte
-	cacheKey dnsCacheKey
+	qi       queryInfo
 	upstream *dns.Upstream
 	dialArg  dialArgument
 }
@@ -662,12 +660,12 @@ var dnsRefreshParamPool = sync.Pool{
 	New: func() any { return &dnsRefreshParam{} },
 }
 
-func obtainDnsRefreshParam(data []byte, cacheKey dnsCacheKey, upstream *dns.Upstream, dialArg *dialArgument) *dnsRefreshParam {
+func obtainDnsRefreshParam(data []byte, qi queryInfo, upstream *dns.Upstream, dialArg *dialArgument) *dnsRefreshParam {
 	p := dnsRefreshParamPool.Get().(*dnsRefreshParam)
 	dataCopy := pool.GetBuffer(len(data))
 	copy(dataCopy, data)
 	p.data = dataCopy
-	p.cacheKey = cacheKey
+	p.qi = qi
 	p.upstream = upstream
 	p.dialArg = *dialArg
 	return p
@@ -676,17 +674,24 @@ func obtainDnsRefreshParam(data []byte, cacheKey dnsCacheKey, upstream *dns.Upst
 func recycleDnsRefreshParam(p *dnsRefreshParam) {
 	pool.PutBuffer(p.data)
 	p.data = nil
+	p.upstream = nil
+	p.qi = queryInfo{}
+	p.dialArg = dialArgument{}
 	dnsRefreshParamPool.Put(p)
 }
 
 func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
-	cacheKey := dnsCacheKey{queryInfo: queryInfo, outbound: dialArg.Outbound}
 	// Lookup Cache
 	if c.enableCache {
-		if respData, expired, isNew := c.dnsCache.Get(c.GetHashKey(cacheKey)); respData != nil {
+		if respData, expired, isNew := c.dnsCache.Get(c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound)); respData != nil {
 			if expired {
 				// Refresh cache asynchronously.
-				go c.refreshDnsCache(obtainDnsRefreshParam(data, cacheKey, upstream, dialArg))
+				go func(c *DnsController, p *dnsRefreshParam) {
+					defer recycleDnsRefreshParam(p)
+					if _, _, _, err := c.singleFlightForwardDNS(p.qi, p.data, p.upstream, &p.dialArg, true); err != nil {
+						log.Warnf("failed to refresh dns cache for %v: %+v", p.qi, err)
+					}
+				}(c, obtainDnsRefreshParam(data, queryInfo, upstream, dialArg))
 			}
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
@@ -698,11 +703,12 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 			dnsResp.fromPool = true
 			dnsResp.isNew = isNew
 			dnsResp.upstreamFrom = upstream
+			dnsIdSet(dnsResp.respData, dnsId(data))
 			return nil
 		}
 	}
 	// Pending for the same lookup.
-	respData, leader, shared, err := c.singleFlightForwardDNS(cacheKey, data, upstream, dialArg, false)
+	respData, leader, shared, err := c.singleFlightForwardDNS(queryInfo, data, upstream, dialArg, false)
 	dnsResp.isNew = leader
 	dnsResp.upstreamFrom = upstream
 	if respData != nil {
@@ -720,55 +726,58 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 	return err
 }
 
-func (c *DnsController) refreshDnsCache(p *dnsRefreshParam) {
-	defer recycleDnsRefreshParam(p)
-	if _, _, _, err := c.singleFlightForwardDNS(p.cacheKey, p.data, p.upstream, &p.dialArg, true); err != nil {
-		log.Warnf("failed to refresh dns cache for %v: %+v", p.cacheKey, err)
-	}
-}
-
 func (c *DnsController) singleFlightForwardDNS(
-	cacheKey dnsCacheKey, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (r []byte, leader bool, shared bool, err error) {
-	param := singleFlightParam{dnsForwarderKey: dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument}, c: c, data: data}
-	hashKey := c.GetHashKey(cacheKey)
+	qi queryInfo, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (r []byte, leader bool, shared bool, err error) {
+	hashKey := c.GetHashKey(qi.qname, qi.qtype, dialArgument.Outbound)
+	param := singleFlightParam{
+		dnsForwarderKey: dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument},
+		c:               c,
+		data:            data,
+		qi:              qi,
+		isBackground:    isBackground,
+	}
 	r, err, leader, shared = c.singleFlightGroup.Do(hashKey, param, func(p singleFlightParam) ([]byte, error) {
-		var forwarder DnsForwarder
+		forwarderKey := p.dnsForwarderKey
+		upstream := forwarderKey.upstream
+		dialArgument := forwarderKey.dialArgument
+		c := p.c
+		data := p.data
+		qname := p.qi.qname
+		qtype := p.qi.qtype
+		isBackground := p.isBackground
+
 		// get forwarder from cache
-		value, ok := p.c.dnsForwarderCache.Load(p.dnsForwarderKey)
+		var forwarder DnsForwarder
+		value, ok := c.dnsForwarderCache.Load(forwarderKey)
 		if ok {
 			forwarder = value.(DnsForwarder)
 		} else {
 			var err error
-			if p.upstream.Scheme == dns.UpstreamScheme_Static {
+			if upstream.Scheme == dns.UpstreamScheme_Static {
 				forwarder = &StaticForwarder{
-					name:    p.upstream.Hostname,
-					routing: p.c.routing,
+					name:    upstream.Hostname,
+					routing: c.routing,
 				}
 			} else {
-				forwarder, err = newDnsForwarder(&p.upstream, p.dialArgument)
+				forwarder, err = newDnsForwarder(&upstream, dialArgument)
 			}
 			if err != nil {
 				return nil, err
 			}
 			// Try to store the new forwarder, but use LoadOrStore to handle concurrent creation
-			actualValue, _ := p.c.dnsForwarderCache.LoadOrStore(p.dnsForwarderKey, forwarder)
+			actualValue, _ := c.dnsForwarderCache.LoadOrStore(forwarderKey, forwarder)
 			forwarder = actualValue.(DnsForwarder)
 		}
 
-		return forwarder.ForwardDNS(p.data)
-	})
-	if err != nil || r == nil {
-		return nil, false, false, err
-	}
-	if !dnsResponse(r) {
-		return nil, false, false, common.Errf("DNS message response flag is unset")
-	}
-	if leader {
+		r, err := forwarder.ForwardDNS(data)
+		if err != nil {
+			return nil, err
+		}
 		rcode := dnsRcode(r)
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
-				"qname": cacheKey.qname,
-				"qtype": cacheKey.qtype,
+				"qname": qname,
+				"qtype": qtype,
 				"rcode": rcode,
 				"ans":   FormatDnsRsc(r),
 			}).Debugf("Got DNS response")
@@ -776,17 +785,17 @@ func (c *DnsController) singleFlightForwardDNS(
 		if !isDnsResponseValid(r) {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
-					"qname": cacheKey.qname,
-					"qtype": cacheKey.qtype,
+					"qname": qname,
+					"qtype": qtype,
 					"rcode": rcode,
 					"ans":   FormatDnsRsc(r),
 				}).Debugf("Not a valid DNS response")
 			}
-		} else if c.enableCache && shouldSaveToCache(upstream, cacheKey.qname) {
+		} else if c.enableCache && shouldSaveToCache(&upstream, qname) {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
-					"qname":    cacheKey.qname,
-					"qtype":    cacheKey.qtype,
+					"qname":    qname,
+					"qtype":    qtype,
 					"rcode":    rcode,
 					"ans":      FormatDnsRsc(r),
 					"upstream": upstream,
@@ -794,11 +803,17 @@ func (c *DnsController) singleFlightForwardDNS(
 					"outbound": dialArgument.Outbound,
 				}).Debugf("Update DNS record cache")
 			}
-			// Direct hold r in cache when shared, because it will be copied before sending back to clients.
-			if newCache := c.dnsCache.NewCache(r, c.fixedDomainTtl[cacheKey.qname], isBackground || shared); newCache != nil {
-				c.dnsCache.Save(hashKey, newCache)
-			}
+			key := c.GetHashKey(qname, qtype, dialArgument.Outbound)
+			fixedTtl := c.fixedDomainTtl[qname]
+			c.dnsCache.Save(key, r, fixedTtl, isBackground)
 		}
+		return r, nil
+	})
+	if err != nil || r == nil {
+		return nil, false, false, err
+	}
+	if !dnsResponse(r) {
+		return nil, false, false, common.Errf("DNS message response flag is unset")
 	}
 	return r, leader, shared, err
 }

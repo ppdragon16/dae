@@ -7,7 +7,6 @@ package control
 
 import (
 	"encoding/binary"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,29 +26,20 @@ type HashKey uint64
 type dnsCache struct {
 	Data       []byte
 	TTLOffsets []uint16
-	_offsets   [8]uint16
 	FetchedAt  time.Time
 	IsNew      int32
 }
 
 type commonDnsCache struct {
 	cache *common.TimeWheelCache[HashKey, *dnsCache]
-	pool  *sync.Pool
 }
 
 func NewCommonDnsCache() *commonDnsCache {
-	c := &commonDnsCache{
-		pool: &sync.Pool{
-			New: func() any { return &dnsCache{} },
-		},
-	}
+	c := &commonDnsCache{}
 	c.cache = common.NewTimeWheelCache[HashKey, *dnsCache](
 		extendCacheDur, 5*time.Second, func(key HashKey, value *dnsCache, replaced bool) {
 			common.Metrics.DnsCacheSize.With0().Dec()
-			value.Data = nil
-			value.TTLOffsets = nil
 			atomic.StoreInt32(&value.IsNew, 0)
-			c.pool.Put(value)
 		})
 	return c
 }
@@ -84,33 +74,27 @@ func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
 	return respData, expired
 }
 
-func (c *commonDnsCache) NewCache(data []byte, fixedTtl int, directSave bool) *dnsCache {
+func (c *commonDnsCache) Save(key HashKey, data []byte, fixedTtl int, directSave bool) {
 	it, ok := newDNSRRIterator(data)
 	if !ok {
-		return nil
+		return
 	}
 	lenRRs := it.remain
 	if lenRRs == 0 {
-		return nil
+		return
 	}
 
-	newCache := c.pool.Get().(*dnsCache)
-	if lenRRs <= len(newCache._offsets) {
-		newCache.TTLOffsets = newCache._offsets[:0]
-	} else {
-		newCache.TTLOffsets = make([]uint16, 0, lenRRs)
-	}
-
+	ttlOffsets := make([]uint16, 0, lenRRs)
 	var maxTTL uint32
 	if fixedTtl > 0 {
 		maxTTL = uint32(fixedTtl)
 		for off, ok := it.Next(); ok; off, ok = it.Next() {
-			newCache.TTLOffsets = append(newCache.TTLOffsets, uint16(off+4))
+			ttlOffsets = append(ttlOffsets, uint16(off+4))
 			binary.BigEndian.PutUint32(data[off+4:off+8], maxTTL)
 		}
 	} else {
 		for off, ok := it.Next(); ok; off, ok = it.Next() {
-			newCache.TTLOffsets = append(newCache.TTLOffsets, uint16(off+4))
+			ttlOffsets = append(ttlOffsets, uint16(off+4))
 			rtype := binary.BigEndian.Uint16(it.data[off : off+2])
 			if rtype != 1 && rtype != 28 {
 				continue
@@ -122,10 +106,13 @@ func (c *commonDnsCache) NewCache(data []byte, fixedTtl int, directSave bool) *d
 		}
 	}
 	if maxTTL < minSaveTtl {
-		newCache.TTLOffsets = nil
-		c.pool.Put(newCache)
-		return nil
+		return
 	}
+
+	newCache := &dnsCache{}
+	newCache.TTLOffsets = ttlOffsets
+	newCache.FetchedAt = time.Now()
+	atomic.StoreInt32(&newCache.IsNew, 1)
 
 	if directSave {
 		newCache.Data = data
@@ -134,12 +121,7 @@ func (c *commonDnsCache) NewCache(data []byte, fixedTtl int, directSave bool) *d
 		copy(dataCopy, data)
 		newCache.Data = dataCopy
 	}
-	newCache.FetchedAt = time.Now()
-	atomic.StoreInt32(&newCache.IsNew, 1)
-	return newCache
-}
 
-func (c *commonDnsCache) Save(key HashKey, newCache *dnsCache) {
 	c.cache.Save(key, newCache)
 	common.Metrics.DnsCacheSize.With0().Inc()
 }
