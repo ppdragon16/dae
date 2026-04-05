@@ -7,7 +7,6 @@ package control
 
 import (
 	"net/netip"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -93,21 +92,14 @@ func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
 
 type commonDnsCache struct {
 	cache *common.TimeWheelCache[HashKey, *dnsCache]
-	pool  *sync.Pool
 }
 
 func newCommonDnsCache() *commonDnsCache {
-	c := &commonDnsCache{
-		pool: &sync.Pool{
-			New: func() any { return &dnsCache{} },
-		},
-	}
+	c := &commonDnsCache{}
 	c.cache = common.NewTimeWheelCache[HashKey, *dnsCache](
 		extendCacheDur, 5*time.Second, func(key HashKey, value *dnsCache, replaced bool) {
 			common.Metrics.DnsCacheSize.With0().Dec()
-			value.Answers = nil
 			atomic.StoreInt32(&value.IsNew, 0)
-			c.pool.Put(value)
 		})
 	return c
 }
@@ -120,9 +112,9 @@ func (c *commonDnsCache) Get(cacheKey HashKey) (rr []dnsmessage.RR, fetchedAt ti
 	return cache.Answers, cache.FetchedAt, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
 }
 
-func (c *commonDnsCache) NewCache(answers []dnsmessage.RR, fixedTtl int) *dnsCache {
+func (c *commonDnsCache) Save(key HashKey, answers []dnsmessage.RR, fixedTtl int) {
 	if len(answers) == 0 {
-		return nil
+		return
 	}
 
 	var maxTTL uint32
@@ -143,17 +135,14 @@ func (c *commonDnsCache) NewCache(answers []dnsmessage.RR, fixedTtl int) *dnsCac
 		}
 	}
 	if maxTTL < minSaveTtl {
-		return nil
+		return
 	}
 	newCache := &dnsCache{
 		Answers:   answers,
 		FetchedAt: time.Now(),
 		IsNew:     1,
 	}
-	return newCache
-}
 
-func (c *commonDnsCache) Save(key HashKey, newCache *dnsCache) {
 	c.cache.Save(key, newCache)
 	common.Metrics.DnsCacheSize.With0().Inc()
 }
