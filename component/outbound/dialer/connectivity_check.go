@@ -247,32 +247,20 @@ func (d *Dialer) createCheckOptions() []*CheckOption {
 		// 优先 TCP, 因为 TCP 可以避免长时间占用 NAT 端口
 		// TODO: UDP?
 		{
-			networkType: &common.NetworkType{
-				L4Proto:   consts.L4ProtoStr_TCP,
-				IpVersion: consts.IpVersionStr_6,
-			},
-			CheckFunc: checkFunc(d, server6, "tcp", newMsgData()),
+			networkType: common.NETWORK_TCP6,
+			CheckFunc:   checkFunc(d, server6, "tcp", newMsgData()),
 		},
 		{
-			networkType: &common.NetworkType{
-				L4Proto:   consts.L4ProtoStr_TCP,
-				IpVersion: consts.IpVersionStr_4,
-			},
-			CheckFunc: checkFunc(d, server4, "tcp", newMsgData()),
+			networkType: common.NETWORK_TCP4,
+			CheckFunc:   checkFunc(d, server4, "tcp", newMsgData()),
 		},
 		{
-			networkType: &common.NetworkType{
-				L4Proto:   consts.L4ProtoStr_UDP,
-				IpVersion: consts.IpVersionStr_6,
-			},
-			CheckFunc: checkFunc(d, server6, "udp", newMsgData()),
+			networkType: common.NETWORK_UDP6,
+			CheckFunc:   checkFunc(d, server6, "udp", newMsgData()),
 		},
 		{
-			networkType: &common.NetworkType{
-				L4Proto:   consts.L4ProtoStr_UDP,
-				IpVersion: consts.IpVersionStr_4,
-			},
-			CheckFunc: checkFunc(d, server4, "udp", newMsgData()),
+			networkType: common.NETWORK_UDP4,
+			CheckFunc:   checkFunc(d, server4, "udp", newMsgData()),
 		},
 	}
 }

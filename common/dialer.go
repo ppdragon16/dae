@@ -51,6 +51,13 @@ var allNetworkTypes = []*NetworkType{
 	{L4Proto: consts.L4ProtoStr_UDP, IpVersion: consts.IpVersionStr_6, str: "udp6"},
 }
 
+var (
+	NETWORK_TCP4 = allNetworkTypes[0]
+	NETWORK_TCP6 = allNetworkTypes[1]
+	NETWORK_UDP4 = allNetworkTypes[2]
+	NETWORK_UDP6 = allNetworkTypes[3]
+)
+
 var unkIpNetworkTypes = []*NetworkType{
 	{L4Proto: consts.L4ProtoStr_UDP, str: "udp"},
 	{L4Proto: consts.L4ProtoStr_TCP, str: "tcp"},
