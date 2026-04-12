@@ -424,6 +424,9 @@ func (d *DoTcpOrUdp) forwardDnsWithContext(ctx context.Context, data []byte) ([]
 	resp, err := mgr.Resolve(ctx, data)
 	if errors.Is(err, net.ErrClosed) {
 		mgr.Close()
+	} else if netErr, ok := IsNetError(err); ok && !netErr.Timeout() {
+		// Close dns managers & timer in case of network errors (should be from writting data), e.g. WAN IP changed.
+		d.Close()
 	}
 	return resp, err
 }
@@ -455,6 +458,7 @@ func (d *DoTcpOrUdp) Close() (err error) {
 		d.timer = nil
 	}
 	d.timerMu.Unlock()
+	atomic.StoreInt32(&d.active, 0)
 	return d.closeDnsManagers()
 }
 
