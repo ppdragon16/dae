@@ -104,12 +104,8 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 	// Dial
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
-	// Do not overwrite target.
-	// This fixes a problem that quic connection to google servers.
-	// Reproduce:
-	// docker run --rm --name curl-http3 ymuski/curl-http3 curl --http3 -o /dev/null -v -L https://i.ytimg.com
 	dst := ueKey.Dst
-	udpConn, err := dialOption.Dialer.ListenPacket(ctx, dst.String())
+	udpConn, err := dialOption.Dialer.ListenPacket(ctx, dialOption.DialTarget)
 	if err != nil {
 		netErr, ok := IsNetError(err)
 		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
