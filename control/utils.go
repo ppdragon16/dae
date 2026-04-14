@@ -105,7 +105,13 @@ func (c *ControlPlane) RouteDialOption(
 		outboundIndex = redirected
 	}
 	outbound := c.outbounds[outboundIndex]
-	dialTarget, dialIp := chooseDialTarget(dst, domain, verified && c.dialTargetOverride && outboundIndex != consts.OutboundDirect)
+	shouldOverride := verified && c.dialTargetOverride
+	// Notes: no need to override target for direct.
+	shouldOverride = shouldOverride && outboundIndex != consts.OutboundDirect
+	// Don't override for udp, this fixes a problem that quic connection to google servers.
+	// Reproduce: docker run --rm --name curl-http3 ymuski/curl-http3 curl --http3 -o /dev/null -v -L https://i.ytimg.com
+	shouldOverride = shouldOverride && networkType.L4Proto != consts.L4ProtoStr_UDP
+	dialTarget, dialIp := chooseDialTarget(dst, domain, shouldOverride)
 	dialer, fallback, err := outbound.SelectFallbackIpVersion(networkType, dialIp)
 	fallbackDialer := false
 	if err != nil {
