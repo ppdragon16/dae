@@ -223,6 +223,7 @@ func (o *DatReaderOptimizer) loadGeoSite(filename string, code string) (params [
 			})
 		}
 	}
+	log.Infof("loaded %d entries from geosite file '%s', code: '%s'", len(params), filename, code)
 	return params, nil
 }
 
@@ -252,6 +253,7 @@ func (o *DatReaderOptimizer) loadGeoIp(filename string, code string) (params []*
 			Val: netip.PrefixFrom(ip, int(item.Prefix)).String(),
 		})
 	}
+	log.Infof("loaded %d entries from geoip file '%s', code: '%s'", len(params), filename, code)
 	return params, nil
 }
 
@@ -282,6 +284,7 @@ func (o *DatReaderOptimizer) loadMMDB(filename string, field string, value strin
 					})
 				}
 				o.mmdbCachesMutex.RUnlock()
+				log.Infof("loaded %d entries from mmdb cache, field: '%s', value: '%s'", len(params), field, value)
 				return params, nil
 			}
 		}
@@ -309,9 +312,14 @@ func (o *DatReaderOptimizer) loadMMDB(filename string, field string, value strin
 	}
 
 	// 构建该字段的完整缓存
+	pathParts := strings.Split(field, "/")
+	pathAny := make([]any, len(pathParts))
+	for i, p := range pathParts {
+		pathAny[i] = p
+	}
 	for result := range db.Networks() {
 		var v string
-		err := result.DecodePath(&v, field)
+		err := result.DecodePath(&v, pathAny...)
 
 		if err != nil {
 			return nil, err
@@ -336,7 +344,7 @@ func (o *DatReaderOptimizer) loadMMDB(filename string, field string, value strin
 			o.mmdbCaches[filePath].fieldCache[field][v] = append(o.mmdbCaches[filePath].fieldCache[field][v], subnet)
 		}
 	}
-
+	log.Infof("loaded %d entries from mmdb file '%s', field: '%s', value: '%s'", len(params), filename, field, value)
 	return params, nil
 }
 
