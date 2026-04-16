@@ -150,7 +150,6 @@ func NewControlPlane(
 			consts.BasicFeatureVersion.String())
 	}
 
-	wg := common.NewTimedWaitGroup()
 	var deferFuncs []func() error
 
 	/// Allow the current process to lock memory for eBPF resources.
@@ -368,7 +367,7 @@ func NewControlPlane(
 		}
 		for _, d := range g.Dialers {
 			// We only activate check of nodes that have a group.
-			d.ActivateCheck(wg)
+			d.ActivateCheck()
 		}
 	}
 	deferFuncs = append(deferFuncs, dialerSet.Close)
@@ -520,7 +519,38 @@ func NewControlPlane(
 		}
 	}
 
-	wg.Wait()
+	// Wait for that all of the referenced outbounds have tcp4 dialer alive.
+	outBoundsToWait := make(map[consts.OutboundIndex]bool)
+	for _, rule := range builder.rules {
+		outbound := consts.OutboundIndex(rule.Outbound)
+		if outbound >= consts.OutboundUserDefinedMin &&
+			outbound <= consts.OutboundUserDefinedMax {
+			if outbound2, isRedirect := outboundRedirects[outbound]; isRedirect {
+				outbound = outbound2
+			}
+			outBoundsToWait[outbound] = true
+		}
+	}
+	retryCount := 0
+	for retryCount < 30 {
+		for _, g := range outbounds {
+			outboundIndex := consts.OutboundIndex(outboundName2Id[g.Name])
+			if _, ok := outBoundsToWait[outboundIndex]; !ok {
+				continue
+			}
+			if _, err := g.Select(common.NETWORK_TCP4); err == nil {
+				delete(outBoundsToWait, outboundIndex)
+			}
+		}
+		if len(outBoundsToWait) == 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+		retryCount++
+	}
+	if len(outBoundsToWait) > 0 {
+		log.Warnf("Outbounds failed to become ready: %v", outBoundsToWait)
+	}
 
 	log.Infof("Initialization is completed. Start to Proxying...")
 	for i, g := range outbounds {

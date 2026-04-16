@@ -265,7 +265,7 @@ func (d *Dialer) createCheckOptions() []*CheckOption {
 	}
 }
 
-func (d *Dialer) ActivateCheck(wg *common.TimedWaitGroup) {
+func (d *Dialer) ActivateCheck() {
 	if len(d.registeredDialerGroups) == 0 {
 		return
 	}
@@ -277,12 +277,9 @@ func (d *Dialer) ActivateCheck(wg *common.TimedWaitGroup) {
 
 	CheckOpts := d.createCheckOptions()
 
-	id := wg.Add(30*time.Second, "initial check for "+d.Name)
-
 	go func() {
 		// at startup, check all network types to determine which are supported
 		checkOpt := d.runInitialCheck(CheckOpts)
-		wg.Done(id)
 		if checkOpt == nil {
 			return
 		}
