@@ -455,7 +455,7 @@ func NewControlPlane(
 		LocationFinder:          locationFinder,
 		UpstreamReadyCallback:   plane.cacheDnsUpstream,
 		UpstreamResolverNetwork: "udp",
-	})
+	}, outboundName2Id)
 	if err != nil {
 		return nil, err
 	}
@@ -1351,23 +1351,25 @@ func (c *ControlPlane) chooseBestDnsDialer(
 		default:
 			return common.Errf("unexpected ipversion: %v", ver)
 		}
-		var outboundIndex consts.OutboundIndex
-		var ok bool
-		if routeKey.upstream != nil {
-			outboundIndex, ok = c.dnsRouteCache.Get(routeKey)
-		}
-		if !ok {
-			var err error
-			// TODO: Mark
-			outboundIndex, _, _, err = c.Route(req.Src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
-			if err != nil {
-				return err
-			}
-			if int(outboundIndex) >= len(c.outbounds) {
-				return common.Errf("bad outbound index: %v", outboundIndex)
-			}
+		outboundIndex := dnsUpstream.Outbound
+		if outboundIndex < consts.OutboundUserDefinedMin || outboundIndex > consts.OutboundUserDefinedMax {
+			var ok bool
 			if routeKey.upstream != nil {
-				c.dnsRouteCache.Save(routeKey, outboundIndex)
+				outboundIndex, ok = c.dnsRouteCache.Get(routeKey)
+			}
+			if !ok {
+				var err error
+				// TODO: Mark
+				outboundIndex, _, _, err = c.Route(req.Src, netip.AddrPortFrom(dAddr, dnsUpstream.Port), dnsUpstream.Hostname, proto.ToL4ProtoType(), req.routingResult)
+				if err != nil {
+					return err
+				}
+				if int(outboundIndex) >= len(c.outbounds) {
+					return common.Errf("bad outbound index: %v", outboundIndex)
+				}
+				if routeKey.upstream != nil {
+					c.dnsRouteCache.Save(routeKey, outboundIndex)
+				}
 			}
 		}
 		// Handles outbound redirects

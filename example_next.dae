@@ -101,6 +101,8 @@ dns {
       qtype(ptr, https) -> reject
       qname(suffix:.lan, suffix:telemetry.coder.com, regex:'mcdn\.bilivideo\.(com|cn)$', suffix:szbdyd.com) -> reject
       qname(regex:'^(ssl|www)\.gstatic\.com', regex:'(fonts|update)\.googleapis\.com$') -> cn_dns
+      # Go upstream 'proxy_dns' via outbound 'ai'
+      qname(keyword:gemini, keyword:aistudio, keyword:generativelanguage, keyword:chatgpt, keyword:openai) -> proxy_dns(via: ai)
       qname(geosite:gfw, regex:'google|cloudflare') -> proxy_dns
       fallback: cn_dns
     }

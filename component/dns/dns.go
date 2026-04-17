@@ -37,7 +37,7 @@ type NewOption struct {
 	UpstreamResolverNetwork string
 }
 
-func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
+func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *Dns, err error) {
 	s = &Dns{
 		upstream2Index: map[*Upstream]int{
 			nil: int(consts.DnsRequestOutboundIndex_AsIs),
@@ -49,65 +49,84 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 		entry := v
 		s.staticEntries[k] = &entry
 	}
-	// Initialize upstream name to id map.
-	upstreamName2Id := map[string]uint8{}
-	// Add static entries as virtual upstreams.
-	// Each static entry becomes an upstream with scheme "static".
+	// Collects a set of predefined upstream names for later verification.
+	predefinedUpstreamNames := make(map[string]*url.URL)
 	for name := range dns.Static {
-		staticUrl, err := url.Parse("static://" + name)
+		// Add static entries as virtual upstreams.
+		// Each static entry becomes an upstream with scheme "static".
+		u, err := url.Parse("static://" + name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse static URL: %w", err)
 		}
-		r := &UpstreamResolver{
-			Raw:     staticUrl,
-			Network: opt.UpstreamResolverNetwork,
-			FinishInitCallback: func(i int) func(raw *url.URL, upstream *Upstream) {
-				return func(raw *url.URL, upstream *Upstream) {
-					opt.UpstreamReadyCallback(upstream)
-					s.upstream2IndexMu.Lock()
-					s.upstream2Index[upstream] = i
-					s.upstream2IndexMu.Unlock()
-				}
-			}(len(s.upstream)),
-			mu:       sync.Mutex{},
-			upstream: nil,
-		}
-		upstreamName2Id[name] = uint8(len(s.upstream))
-		s.upstream = append(s.upstream, r)
+		predefinedUpstreamNames[name] = u
 	}
-	// Parse upstream.
-	for i, upstreamRaw := range dns.Upstream {
-		if i >= int(consts.DnsRequestOutboundIndex_UserDefinedMax) ||
-			i >= int(consts.DnsResponseOutboundIndex_UserDefinedMax) {
-			return nil, fmt.Errorf("too many upstreams")
-		}
-
-		tag, link := common.GetTagFromLinkLikePlaintext(string(upstreamRaw))
-		if tag == "" {
+	for _, upstreamRaw := range dns.Upstream {
+		name, link := common.GetTagFromLinkLikePlaintext(string(upstreamRaw))
+		if name == "" {
 			return nil, fmt.Errorf("%w: '%v' has no tag", ErrBadUpstreamFormat, upstreamRaw)
 		}
-		var u *url.URL
-		u, err = url.Parse(link)
+		u, err := url.Parse(link)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrBadUpstreamFormat, err)
 		}
+		predefinedUpstreamNames[name] = u
+	}
+	// Initialize upstream name to id map.
+	upstreamName2Id := map[string]uint8{}
+	for _, rule := range dns.Routing.Request.Rules {
+		var urlKey string
+		var rawURL *url.URL
+		var ok bool
+		var outboundIdx uint8
+		outboundIdx = 0xFF
+		upstreamName := rule.Outbound.Name
+		// Example: ... -> static(nas)
+		if upstreamName == "static" {
+			upstreamName = rule.Outbound.Params[0].Val
+			urlKey = upstreamName
+		} else if len(rule.Outbound.Params) == 1 && rule.Outbound.Params[0].Key == consts.OutboundParam_Via {
+			// Virtual upstreams for outbound bindings (e.g., ... -> proxy_dns(via: sg)).
+			// Check if there are params with key "via" (indicates outbound binding like proxy_dns(via: sg))
+			outboundName := rule.Outbound.Params[0].Val
+			// Look up outbound index
+			outboundIdx, ok = outboundName2Id[outboundName]
+			if !ok {
+				return nil, fmt.Errorf("outbound %q not found", outboundName)
+			}
+			urlKey = upstreamName
+			upstreamName = upstreamName + "(" + outboundName + ")"
+		} else {
+			urlKey = upstreamName
+		}
+		if urlKey == "asis" || urlKey == "reject" {
+			continue
+		}
+		if rawURL, ok = predefinedUpstreamNames[urlKey]; !ok {
+			return nil, fmt.Errorf("Undefined upstream name in dns routing rules: %s", upstreamName)
+		}
+		currentUpstreamIndex := len(s.upstream)
+		if currentUpstreamIndex >= int(consts.OutboundUserDefinedMax) {
+			return nil, fmt.Errorf("Too many upstreams")
+		}
 		r := &UpstreamResolver{
-			Raw:     u,
+			Raw:     rawURL,
 			Network: opt.UpstreamResolverNetwork,
-			FinishInitCallback: func(i int) func(raw *url.URL, upstream *Upstream) {
+			FinishInitCallback: func(i int, outbound uint8) func(raw *url.URL, upstream *Upstream) {
 				return func(raw *url.URL, upstream *Upstream) {
+					upstream.Outbound = consts.OutboundIndex(outbound)
 					opt.UpstreamReadyCallback(upstream)
 					s.upstream2IndexMu.Lock()
 					s.upstream2Index[upstream] = i
 					s.upstream2IndexMu.Unlock()
 				}
-			}(i),
+			}(len(s.upstream), outboundIdx),
 			mu:       sync.Mutex{},
 			upstream: nil,
 		}
-		upstreamName2Id[tag] = uint8(len(s.upstream))
+		upstreamName2Id[upstreamName] = uint8(len(s.upstream))
 		s.upstream = append(s.upstream, r)
 	}
+
 	// Optimize routings.
 	if dns.Routing.Request.Rules, err = routing.ApplyRulesOptimizers(dns.Routing.Request.Rules,
 		&routing.DatReaderOptimizer{LocationFinder: opt.LocationFinder},
@@ -123,6 +142,7 @@ func New(dns *config.Dns, opt *NewOption) (s *Dns, err error) {
 	); err != nil {
 		return nil, err
 	}
+
 	// Parse request routing.
 	reqMatcherBuilder, err := NewRequestMatcherBuilder(dns.Routing.Request.Rules, upstreamName2Id, dns.Routing.Request.Fallback)
 	if err != nil {

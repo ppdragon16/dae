@@ -32,4 +32,5 @@ const (
 	Function_Static   = "static"
 
 	OutboundParam_Mark = "mark"
+	OutboundParam_Via  = "via"
 )

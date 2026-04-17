@@ -99,7 +99,8 @@ type Upstream struct {
 	Port     uint16
 	Path     string
 	netutils.Ip46
-	IsAsIs bool
+	IsAsIs   bool
+	Outbound consts.OutboundIndex // 0xFF = unspecified (use traffic routing)
 }
 
 // TODO: Sync with outbound

@@ -125,6 +125,9 @@ func ParseOutbound(rawOutbound *config_parser.Function) (outbound *Outbound, err
 				return nil, fmt.Errorf("failed to parse mark: %v", err)
 			}
 			outbound.Mark = uint32(_mark)
+		case consts.OutboundParam_Via:
+			// DNS upstream binding: proxy_dns(via: sg) -> outbound.Name = "proxy_dns(sg)"
+			outbound.Name = rawOutbound.Name + "(" + p.Val + ")"
 		case "":
 			if p.Val == "must" {
 				outbound.Must = true
