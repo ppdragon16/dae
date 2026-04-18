@@ -323,6 +323,9 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 			return
 		case <-d.checkCh:
 			for i := 0; i < RetryCount; i++ {
+				if i > 0 {
+					time.Sleep(RetryInterval)
+				}
 				if !d.Alive() {
 					d.NotifyStatusChange()
 					if err := d.Connect(); err != nil {
@@ -334,7 +337,11 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 				if ok {
 					break
 				}
-				time.Sleep(RetryInterval)
+			}
+			// Cleanup channel to avoid consecutive checks.
+			select {
+			case <-d.checkCh:
+			default:
 			}
 		}
 	}
