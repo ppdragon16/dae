@@ -128,6 +128,15 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 		s.upstream = append(s.upstream, r)
 	}
 
+	// Process fallback upstreams that may not be referenced in any rule.
+	// This ensures fallback upstreams are also registered in upstreamName2Id.
+	if err = processFallbackUpstream(dns.Routing.Request.Fallback, predefinedUpstreamNames, outboundName2Id, upstreamName2Id, s, opt); err != nil {
+		return nil, err
+	}
+	if err = processFallbackUpstream(dns.Routing.Response.Fallback, predefinedUpstreamNames, outboundName2Id, upstreamName2Id, s, opt); err != nil {
+		return nil, err
+	}
+
 	// Optimize routings.
 	if dns.Routing.Request.Rules, err = routing.ApplyRulesOptimizers(dns.Routing.Request.Rules,
 		&routing.DatReaderOptimizer{LocationFinder: opt.LocationFinder},
@@ -164,6 +173,85 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 		return nil, fmt.Errorf("failed to build DNS response routing: %w", err)
 	}
 	return s, nil
+}
+
+// processFallbackUpstream ensures that upstreams referenced in fallback are registered
+// in upstreamName2Id even if they are not used in any routing rule.
+func processFallbackUpstream(fallback config.FunctionOrString, predefinedUpstreamNames map[string]*url.URL, outboundName2Id map[string]uint8, upstreamName2Id map[string]uint8, s *Dns, opt *NewOption) error {
+	if fallback == nil {
+		return nil
+	}
+
+	f := config.FunctionOrStringToFunction(fallback)
+	if f == nil {
+		return nil
+	}
+
+	upstreamName := f.Name
+	var urlKey string
+	var outboundIdx uint8 = 0xFF
+
+	// Handle static entries
+	if upstreamName == "static" {
+		if len(f.Params) != 1 {
+			return fmt.Errorf("'static' upstream takes only one parameter")
+		}
+		upstreamName = f.Params[0].Val
+		urlKey = upstreamName
+	} else if len(f.Params) == 1 && f.Params[0].Key == consts.OutboundParam_Via {
+		// Handle proxy_dns(via: sg) format
+		outboundName := f.Params[0].Val
+		var ok bool
+		outboundIdx, ok = outboundName2Id[outboundName]
+		if !ok {
+			return fmt.Errorf("outbound %q not found", outboundName)
+		}
+		urlKey = upstreamName
+		upstreamName = upstreamName + "(" + outboundName + ")"
+	} else {
+		urlKey = upstreamName
+	}
+
+	// Skip special upstreams
+	if urlKey == "asis" || urlKey == "reject" || urlKey == "accept" {
+		return nil
+	}
+
+	// Check if already registered
+	if _, ok := upstreamName2Id[upstreamName]; ok {
+		return nil
+	}
+
+	// Look up the upstream URL
+	rawURL, ok := predefinedUpstreamNames[urlKey]
+	if !ok {
+		return fmt.Errorf("Undefined upstream name in dns routing fallback: %s", upstreamName)
+	}
+
+	// Register the upstream
+	if len(s.upstream) >= int(consts.OutboundUserDefinedMax) {
+		return fmt.Errorf("Too many upstreams")
+	}
+
+	r := &UpstreamResolver{
+		Raw:     rawURL,
+		Network: opt.UpstreamResolverNetwork,
+		FinishInitCallback: func(i int, outbound uint8) func(raw *url.URL, upstream *Upstream) {
+			return func(raw *url.URL, upstream *Upstream) {
+				upstream.Outbound = consts.OutboundIndex(outbound)
+				opt.UpstreamReadyCallback(upstream)
+				s.upstream2IndexMu.Lock()
+				s.upstream2Index[upstream] = i
+				s.upstream2IndexMu.Unlock()
+			}
+		}(len(s.upstream), outboundIdx),
+		mu:       sync.Mutex{},
+		upstream: nil,
+	}
+	upstreamName2Id[upstreamName] = uint8(len(s.upstream))
+	s.upstream = append(s.upstream, r)
+
+	return nil
 }
 
 func (s *Dns) CheckUpstreamsFormat() error {
