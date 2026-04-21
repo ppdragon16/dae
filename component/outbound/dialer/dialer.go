@@ -8,6 +8,7 @@ package dialer
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 	"unsafe"
@@ -50,6 +51,11 @@ type Dialer struct {
 	cancel   context.CancelFunc
 
 	checkActivated bool
+
+	// activeConns tracks connections created by this dialer for aborting when
+	// the dialer is marked as not alive.
+	activeConns   sync.Map
+	activeConnsMu sync.Mutex
 }
 type GlobalOption struct {
 	D.ExtraOption
@@ -126,4 +132,29 @@ func (d *Dialer) Close() error {
 	}
 	d.tickerMu.Unlock()
 	return nil
+}
+
+// RegisterConn registers a connection created by this dialer.
+func (d *Dialer) RegisterConn(conn net.Conn) {
+	d.activeConnsMu.Lock()
+	defer d.activeConnsMu.Unlock()
+	d.activeConns.Store(conn, struct{}{})
+}
+
+// UnregisterConn unregisters a connection from this dialer.
+func (d *Dialer) UnregisterConn(conn net.Conn) {
+	d.activeConnsMu.Lock()
+	defer d.activeConnsMu.Unlock()
+	d.activeConns.Delete(conn)
+}
+
+// AbortIfNotAlive closes all connections if the dialer is marked as not alive.
+func (d *Dialer) AbortConns() {
+	d.activeConnsMu.Lock()
+	defer d.activeConnsMu.Unlock()
+	d.activeConns.Range(func(key, _ any) bool {
+		key.(net.Conn).Close()
+		return true
+	})
+	d.activeConns.Clear()
 }
