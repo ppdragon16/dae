@@ -435,7 +435,7 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 				maxTimeoutPenalty = p
 			}
 		}
-		if latency > maxTimeoutPenalty {
+		if latency > maxTimeoutPenalty && maxTimeoutPenalty > 0 {
 			ok = false
 		}
 	}
@@ -443,7 +443,10 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 	d.alive = ok
 	for g := range d.registeredDialerGroups {
 		if !ok {
-			latency = g.GetTimeoutPenalty()
+			penalty := g.GetTimeoutPenalty()
+			if penalty > 0 {
+				latency = penalty
+			}
 		}
 		alpha := g.GetEmaAlpha()
 		if d.MovingAverage[g] == 0 {
