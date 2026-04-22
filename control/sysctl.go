@@ -113,3 +113,11 @@ func (s *SysctlManager) set(path string, value string, watch bool) (err error) {
 	}
 	return os.WriteFile(path, []byte(value), 0644)
 }
+
+func (s *SysctlManager) Close() error {
+	return s.watcher.Close()
+}
+
+func GetSysctlManager() *SysctlManager {
+	return sysctl
+}

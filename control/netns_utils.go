@@ -82,6 +82,16 @@ func (ns *DaeNetns) Setup() (err error) {
 func (ns *DaeNetns) Close() (err error) {
 	DeleteNamedNetns(NsName)
 	DeleteLink(HostVethName)
+	if ns.hostNs.IsOpen() {
+		if closeErr := ns.hostNs.Close(); closeErr != nil {
+			err = closeErr
+		}
+	}
+	if ns.daeNs.IsOpen() {
+		if closeErr := ns.daeNs.Close(); closeErr != nil {
+			err = closeErr
+		}
+	}
 	return
 }
 

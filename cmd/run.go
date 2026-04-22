@@ -305,6 +305,9 @@ func exit(c *control.ControlPlane) {
 	if err := control.GetDaeNetns().Close(); err != nil {
 		std.Errorf("%+v", common.Wrap(err, "failed to close netns"))
 	}
+	if err := control.GetSysctlManager().Close(); err != nil {
+		std.Errorf("%+v", common.Wrap(err, "failed to close sysctl manager"))
+	}
 	if e := c.Close(); e != nil {
 		std.Errorf("%+v", common.Wrap(e, "failed to close control plane"))
 	}
