@@ -205,6 +205,11 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		return nil
 	}
 
+	// Register rConn to the dialer so that it can be closed when the dialer
+	// is marked as not alive during connectivity check.
+	dialOption.Dialer.RegisterConn(rConn)
+	defer dialOption.Dialer.UnregisterConn(rConn)
+
 	activeConnectionsCounter := common.Metrics.ActiveConnections.With4(labels)
 	activeConnectionsCounter.Inc()
 	defer activeConnectionsCounter.Dec()

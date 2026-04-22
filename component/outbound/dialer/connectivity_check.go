@@ -430,6 +430,17 @@ func (d *Dialer) ReportUnavailable() {
 }
 
 func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.NetworkType, err error) {
+	if ok {
+		maxTimeoutPenalty := time.Duration(0)
+		for g := range d.registeredDialerGroups {
+			if p := g.GetTimeoutPenalty(); p > maxTimeoutPenalty {
+				maxTimeoutPenalty = p
+			}
+		}
+		if latency > maxTimeoutPenalty {
+			ok = false
+		}
+	}
 	oldAlive := d.alive
 	d.alive = ok
 	for g := range d.registeredDialerGroups {
@@ -494,6 +505,11 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 	}
 	// Notify all registered groups once after all statistics are updated
 	d.NotifyStatusChange()
+
+	// Dialer just became not alive; abort all connections.
+	if oldAlive && !ok {
+		d.AbortConns()
+	}
 }
 
 func (d *Dialer) Check(opts *CheckOption) (ok bool, latency time.Duration, err error) {
