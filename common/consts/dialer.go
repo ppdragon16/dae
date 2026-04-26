@@ -6,7 +6,6 @@
 package consts
 
 import (
-	"net/netip"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -69,24 +68,4 @@ func (v IpVersionStr) ToIpVersion() uint8 {
 		return 6
 	}
 	panic("unsupported ipversion")
-}
-
-func (v IpVersionStr) ToIpVersionType() IpVersionType {
-	switch v {
-	case IpVersionStr_4:
-		return IpVersion_4
-	case IpVersionStr_6:
-		return IpVersion_6
-	}
-	panic("unsupported ipversion")
-}
-
-func IpVersionStrFromAddr(addr netip.Addr) (ipversion IpVersionStr) {
-	switch {
-	case addr.Is4() || addr.Is4In6():
-		ipversion = IpVersionStr_4
-	case addr.Is6():
-		ipversion = IpVersionStr_6
-	}
-	return
 }

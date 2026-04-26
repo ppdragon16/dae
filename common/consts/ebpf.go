@@ -136,16 +136,6 @@ func IpVersionFromAddr(addr netip.Addr) (ipversion IpVersionType) {
 	return
 }
 
-func (v IpVersionType) ToIpVersionStr() IpVersionStr {
-	switch v {
-	case IpVersion_4:
-		return IpVersionStr_4
-	case IpVersion_6:
-		return IpVersionStr_6
-	}
-	panic("unsupported ipversion")
-}
-
 var (
 	BasicFeatureVersion = internal.Version{5, 2, 0}
 	// Deprecated: Ftrace does not support arm64 yet (Linux 6.2).
