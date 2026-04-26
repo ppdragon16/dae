@@ -36,6 +36,14 @@ type NetworkType struct {
 	str       string
 }
 
+func (t *NetworkType) GetAnotherIpVersion() *NetworkType {
+	index := NetworkTypeToIndex(t)
+	if index%2 == 0 {
+		return IndexToNetworkType(index + 1)
+	}
+	return IndexToNetworkType(index - 1)
+}
+
 func (t *NetworkType) String() string {
 	return t.str
 }

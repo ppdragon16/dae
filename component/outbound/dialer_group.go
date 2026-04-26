@@ -102,8 +102,7 @@ func (g *DialerGroup) GetSelectionPolicy() (policy consts.DialerSelectionPolicy)
 func (g *DialerGroup) SelectFallbackIpVersion(networkType *common.NetworkType, strictIpVersion bool) (dialer *dialer.Dialer, fallback bool, err error) {
 	dialer, err = g.Select(networkType)
 	if !strictIpVersion && errors.Is(err, ErrNoAliveDialer) {
-		networkType.IpVersion = (consts.IpVersion_X - networkType.IpVersion.ToIpVersionType()).ToIpVersionStr()
-		dialer, err = g.Select(networkType)
+		dialer, err = g.Select(networkType.GetAnotherIpVersion())
 		fallback = true
 	}
 	return
