@@ -1217,18 +1217,6 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 		return TC_ACT_PIPE;
 	}
 
-	if (l4proto == IPPROTO_UDP) {
-		struct udp_conn_state *conn_state =
-			refresh_udp_conn_state_timer(&tuples.five, false);
-		if (!conn_state)
-			return TC_ACT_SHOT;
-		if (conn_state->is_wan_ingress_direction) {
-			// Replay (outbound) of an inbound flow
-			// => direct.
-			return TC_ACT_PIPE;
-		}
-	}
-
 	// New Connection.
 	// Fill route_params.
 	struct route_params params = { 0 };
@@ -1313,6 +1301,14 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 		bpf_printk("GO OUTBOUND_DIRECT");
 #endif
+		if (l4proto == IPPROTO_UDP) {
+			struct udp_conn_state *conn_state =
+				refresh_udp_conn_state_timer(&tuples.five, false);
+			if (!conn_state)
+				return TC_ACT_SHOT;
+			if (conn_state->is_wan_ingress_direction)
+				return TC_ACT_PIPE;
+		}
 		goto direct;
 	case OUTBOUND_BLOCK:
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
