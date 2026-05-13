@@ -40,6 +40,7 @@ require (
 	github.com/awnumar/memcall v0.5.0 // indirect
 	github.com/awnumar/memguard v0.23.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dgryski/go-metro v0.0.0-20250106013310-edb8663e5e33 // indirect
 	github.com/dsnet/compress v0.0.2-0.20210315054119-f66993602bf5 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
@@ -47,6 +48,7 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/pprof v0.0.0-20251114195745-4902fdda35c8 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/compress v1.18.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
@@ -61,6 +63,7 @@ require (
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/samber/lo v1.52.0 // indirect
 	github.com/samber/oops v1.19.4 // indirect
+	github.com/seiflotfy/cuckoofilter v0.0.0-20240715131351-a2f2c23f1771 // indirect
 	github.com/tklauser/go-sysconf v0.3.15 // indirect
 	github.com/tklauser/numcpus v0.10.0 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
@@ -103,7 +106,7 @@ require (
 )
 
 // replace github.com/daeuniverse/outbound => ../outbound
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-20260328050948-40c02def7738
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-20260513092824-1203e33c81ee
 
 // replace github.com/daeuniverse/quic-go => ../quic-go
 
