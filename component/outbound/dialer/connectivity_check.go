@@ -279,7 +279,14 @@ func (d *Dialer) ActivateCheck() {
 
 	go func() {
 		// at startup, check all network types to determine which are supported
-		checkOpt := d.runInitialCheck(CheckOpts)
+		var checkOpt *CheckOption
+		for range 3 {
+			checkOpt = d.runInitialCheck(CheckOpts)
+			if checkOpt != nil {
+				break
+			}
+			time.Sleep(5 * time.Second)
+		}
 		if checkOpt == nil {
 			return
 		}
