@@ -105,8 +105,9 @@ require (
 	golang.org/x/text v0.31.0 // indirect
 )
 
-// replace github.com/daeuniverse/outbound => ../outbound
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-20260515122238-6efbbe4dbb95
+//replace github.com/daeuniverse/outbound => ../outbound
+
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-20260517050146-0660d32943dc
 
 replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-20260515134711-e529b8fe8069
 
