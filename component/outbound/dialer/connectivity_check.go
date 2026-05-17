@@ -296,6 +296,26 @@ func (d *Dialer) ActivateCheck() {
 	}()
 }
 
+func (d *Dialer) ReactivateCheck() {
+	if len(d.registeredDialerGroups) == 0 || !d.needAliveState {
+		return
+	}
+	if d.checkActivated {
+		hasActiveConn := false
+		d.activeConns.Range(func(key, value any) bool {
+			hasActiveConn = true
+			return false
+		})
+		if hasActiveConn {
+			return
+		}
+		d.stopCheck()
+		d.checkActivated = false
+		d.checkCtx, d.checkCancel = context.WithCancel(context.Background())
+	}
+	d.ActivateCheck()
+}
+
 func (d *Dialer) startCheckTicker() {
 	// Sleep to avoid avalanche.
 	time.Sleep(time.Duration(fastrand.Int63n(int64(d.CheckInterval))))
@@ -304,7 +324,7 @@ func (d *Dialer) startCheckTicker() {
 	d.tickerMu.Unlock()
 	for {
 		select {
-		case <-d.ctx.Done():
+		case <-d.checkCtx.Done():
 			return
 		case t := <-d.ticker.C:
 			d.checkCh <- t
@@ -315,7 +335,7 @@ func (d *Dialer) startCheckTicker() {
 // Manually start check.
 func (d *Dialer) NotifyCheck() {
 	select {
-	case <-d.ctx.Done():
+	case <-d.checkCtx.Done():
 		return
 	// If fail to push elem to chan, the check is in process.
 	case d.checkCh <- time.Now():
@@ -326,7 +346,7 @@ func (d *Dialer) NotifyCheck() {
 func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 	for {
 		select {
-		case <-d.ctx.Done():
+		case <-d.checkCtx.Done():
 			return
 		case <-d.checkCh:
 			for i := 0; i < RetryCount; i++ {

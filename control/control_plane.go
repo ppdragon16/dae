@@ -1549,7 +1549,7 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	c.inuseDialers = make([]*dialer.Dialer, 0, len(newInuse))
 	for d := range newInuse {
 		c.inuseDialers = append(c.inuseDialers, d)
-		d.ActivateCheck()
+		d.ReactivateCheck()
 	}
 
 	runtime.GC()

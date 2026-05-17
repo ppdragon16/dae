@@ -44,11 +44,11 @@ type Dialer struct {
 	mu                     sync.Mutex
 	registeredDialerGroups map[DialerGroup]int
 
-	tickerMu sync.Mutex
-	ticker   *time.Ticker
-	checkCh  chan time.Time
-	ctx      context.Context
-	cancel   context.CancelFunc
+	tickerMu    sync.Mutex
+	ticker      *time.Ticker
+	checkCh     chan time.Time
+	checkCtx    context.Context
+	checkCancel context.CancelFunc
 
 	checkActivated bool
 
@@ -94,7 +94,7 @@ func NewGlobalOption(global *config.Global) *GlobalOption {
 
 // NewDialer is for register in general.
 func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property, needAliveState bool) *Dialer {
-	ctx, cancel := context.WithCancel(context.Background())
+	checkCtx, checkCancel := context.WithCancel(context.Background())
 	d := &Dialer{
 		GlobalOption:           option,
 		Dialer:                 dialer,
@@ -107,8 +107,8 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 		tickerMu:               sync.Mutex{},
 		ticker:                 nil,
 		checkCh:                make(chan time.Time, 1),
-		ctx:                    ctx,
-		cancel:                 cancel,
+		checkCtx:               checkCtx,
+		checkCancel:            checkCancel,
 	}
 	log.WithField("dialer", d.Name).
 		WithField("p", unsafe.Pointer(d)).
@@ -124,13 +124,18 @@ func (d *Dialer) Clone() *Dialer {
 	return NewDialer(d.Dialer, d.GlobalOption, d.Property, d.needAliveState)
 }
 
-func (d *Dialer) Close() error {
-	d.cancel()
+func (d *Dialer) stopCheck() {
+	d.checkCancel()
 	d.tickerMu.Lock()
 	if d.ticker != nil {
 		d.ticker.Stop()
+		d.ticker = nil
 	}
 	d.tickerMu.Unlock()
+}
+
+func (d *Dialer) Close() error {
+	d.stopCheck()
 	return nil
 }
 
