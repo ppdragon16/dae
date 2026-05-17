@@ -32,6 +32,7 @@ import (
 	"github.com/daeuniverse/dae/common/assets"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
+	"github.com/daeuniverse/dae/common/subscription"
 	"github.com/daeuniverse/dae/component/dns"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
@@ -41,6 +42,7 @@ import (
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
+	"github.com/daeuniverse/outbound/protocol/direct"
 	dnsmessage "github.com/miekg/dns"
 
 	"github.com/daeuniverse/outbound/transport/grpc"
@@ -95,6 +97,13 @@ type ControlPlane struct {
 	dnsRoutingResultCache *common.TimeWheelCache[netip.Addr, *bpfRoutingResult]
 
 	udpTaskPool *UdpTaskPool[netip.AddrPort, emitParam]
+
+	// Subscription update support.
+	cfgFile         string
+	subscriptionDir string
+	config          *config.Config
+	inuseDialers    []*dialer.Dialer
+	muUpdateSub     sync.Mutex
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -370,7 +379,12 @@ func NewControlPlane(
 			d.ActivateCheck()
 		}
 	}
-	deferFuncs = append(deferFuncs, dialerSet.Close)
+
+	// Collect all in-use dialers from groups for shutdown cleanup.
+	inuseDialers := make([]*dialer.Dialer, 0)
+	for _, g := range outbounds {
+		inuseDialers = append(inuseDialers, g.Dialers...)
+	}
 
 	/// Routing.
 	// Apply rules optimizers.
@@ -445,6 +459,7 @@ func NewControlPlane(
 		dnsRoutingResultCache:  common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
 		udpTaskPool:            NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 	}
+	plane.inuseDialers = inuseDialers
 	defer func() {
 		if err != nil {
 			cancel()
@@ -899,6 +914,13 @@ func (c *ControlPlane) EjectBpf() *bpfObjects {
 }
 func (c *ControlPlane) InjectBpf(bpf *bpfObjects) {
 	c.core.InjectBpf(bpf)
+}
+
+// SetConfigState stores config-derived state for subscription updates.
+func (c *ControlPlane) SetConfigState(cfgFile, subscriptionDir string, conf *config.Config) {
+	c.cfgFile = cfgFile
+	c.subscriptionDir = subscriptionDir
+	c.config = conf
 }
 
 func (c *ControlPlane) cacheDnsUpstream(dnsUpstream *dns.Upstream) {
@@ -1411,6 +1433,125 @@ func (c *ControlPlane) chooseBestDnsDialer(
 	return nil
 }
 
+// UpdateSubscriptions re-fetches subscriptions and hot-swaps dialers
+// in existing DialerGroups without rebuilding routing or BPF state.
+func (c *ControlPlane) UpdateSubscriptions() error {
+	c.muUpdateSub.Lock()
+	defer c.muUpdateSub.Unlock()
+
+	if c.config == nil {
+		return fmt.Errorf("control plane not initialized for subscription updates")
+	}
+
+	log.Warnln("[update-sub] Starting subscription update...")
+
+	// Phase 1: Re-resolve subscriptions.
+	client := http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return direct.Direct.DialContext(ctx, "tcp", addr)
+			},
+		},
+		Timeout: 30 * time.Second,
+	}
+	nodeStrs := make([]string, len(c.config.Node))
+	for i, n := range c.config.Node {
+		nodeStrs[i] = string(n)
+	}
+	subStrs := make([]string, len(c.config.Subscription))
+	for i, s := range c.config.Subscription {
+		subStrs[i] = string(s)
+	}
+	newTagToNodeList := subscription.ResolveAllSubscriptions(&client, c.subscriptionDir, nodeStrs, subStrs)
+	if len(newTagToNodeList) == 0 {
+		return fmt.Errorf("no nodes resolved from any subscription")
+	}
+
+	// Phase 2: Build new DialerSet from fresh data.
+	option := dialer.NewGlobalOption(&c.config.Global)
+	newDialerSet := outbound.NewDialerSetFromLinks(option, newTagToNodeList)
+
+	// Phase 3: For each user-defined outbound group, re-filter and swap dialers.
+
+	groupCfgIdx := 0
+	for i := int(consts.OutboundUserDefinedMin); i < len(c.outbounds); i++ {
+		group := c.outbounds[i]
+
+		if groupCfgIdx >= len(c.config.Group) {
+			log.Warnf("[update-sub] Group index %d exceeds config groups; skipping %s", groupCfgIdx, group.Name)
+			groupCfgIdx++
+			continue
+		}
+		groupCfg := c.config.Group[groupCfgIdx]
+		groupCfgIdx++
+
+		// Skip redirect groups — they don't have subscription nodes.
+		if len(groupCfg.Redirect) > 0 && groupCfg.Name != groupCfg.Redirect {
+			continue
+		}
+
+		// Re-filter nodes using the stored group config against fresh nodes.
+		newDialers, newAnnos, err := newDialerSet.FilterAndAnnotate(
+			groupCfg.Filter, groupCfg.FilterAnnotation, groupCfg.NextHop)
+		if err != nil {
+			return fmt.Errorf("group %q: %w", group.Name, err)
+		}
+
+		// Apply group-level option override if any.
+		var groupOpt *dialer.GlobalOption
+		if groupCfg.UdpCheckDns != nil || groupCfg.CheckInterval != 0 || groupCfg.CheckTolerance != 0 {
+			groupOpt, err = ParseGroupOverrideOption(groupCfg, c.config.Global)
+			if err != nil {
+				return fmt.Errorf("group %q: %w", group.Name, err)
+			}
+		}
+		if groupOpt != nil {
+			for j, d := range newDialers {
+				cloned := d.Clone()
+				cloned.GlobalOption = groupOpt
+				newDialers[j] = cloned
+			}
+		}
+
+		// Log updated node list.
+		log.Infof("[update-sub] Group %q updated node list:", group.Name)
+		for _, d := range newDialers {
+			log.Infoln("\t" + d.Name)
+		}
+		if len(newDialers) == 0 {
+			log.Infoln("\t<Empty>")
+		}
+
+		// Hot-swap dialers in the group.
+		group.ReplaceDialers(newDialers, newAnnos)
+	}
+
+	// Phase 4: Cleanup.
+	// Build current in-use set from all group dialers.
+	newInuse := make(map[*dialer.Dialer]bool)
+	for _, g := range c.outbounds {
+		for _, d := range g.Dialers {
+			newInuse[d] = true
+		}
+	}
+	// Close orphaned old dialers (in c.inuseDialers but not in any group).
+	for _, d := range c.inuseDialers {
+		if !newInuse[d] {
+			d.Close()
+		}
+	}
+	// Update the in-use dialer list and activate checks.
+	c.inuseDialers = make([]*dialer.Dialer, 0, len(newInuse))
+	for d := range newInuse {
+		c.inuseDialers = append(c.inuseDialers, d)
+		d.ActivateCheck()
+	}
+
+	runtime.GC()
+	log.Warnln("[update-sub] Subscription update completed successfully")
+	return nil
+}
+
 func (c *ControlPlane) AbortConnections() (err error) {
 	var errs []error
 	c.inConnections.Range(func(key, value any) bool {
@@ -1435,6 +1576,22 @@ func (c *ControlPlane) Close() (err error) {
 			}
 		}
 	}
+	for _, d := range c.inuseDialers {
+		if e := d.Close(); e != nil {
+			if err != nil {
+				err = common.Errf("%w; %v", err, e)
+			} else {
+				err = e
+			}
+		}
+	}
 	c.cancel()
-	return c.core.Close()
+	if e := c.core.Close(); e != nil {
+		if err != nil {
+			err = common.Errf("%w; %v", err, e)
+		} else {
+			err = e
+		}
+	}
+	return
 }

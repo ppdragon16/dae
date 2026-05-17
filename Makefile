@@ -34,9 +34,9 @@ date=$(shell git log -1 --format="%cd" --date=short | sed s/-//g)
 count=$(shell git rev-list --count HEAD)
 commit=$(shell git rev-parse --short HEAD)
 ifeq ($(wildcard .git/.),)
-	VERSION ?= unstable-0.nogit
+	VERSION ?= next-ppdn-0.nogit
 else
-	VERSION ?= unstable-$(date).r$(count).$(commit)
+	VERSION ?= next-ppdn-$(date).r$(count).$(commit)
 endif
 
 BUILD_ARGS := -trimpath -ldflags "-s -w -X github.com/daeuniverse/dae/cmd.Version=$(VERSION) -X github.com/daeuniverse/dae/common/consts.MaxMatchSetLen_=$(MAX_MATCH_SET_LEN)" $(BUILD_ARGS)

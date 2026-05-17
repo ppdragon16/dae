@@ -18,27 +18,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func readSignalProgressFile() (code byte, content string, err error) {
-	b, err := os.ReadFile(SignalProgressFilePath)
-	if err != nil {
-		return 0, "", err
-	}
-	var firstLine string
-	firstLine, content, _ = strings.Cut(string(b), "\n")
-	if len(firstLine) != 1 {
-		return 0, "", fmt.Errorf("unexpected format: %v", string(b))
-	}
-	code = firstLine[0]
-	return code, content, nil
-}
-
 var (
-	abort     bool
-	reloadCmd = &cobra.Command{
-		Use:   "reload [pid]",
-		Short: "To reload config file without interrupt connections.",
+	updateSubCmd = &cobra.Command{
+		Use:   "update-sub [pid]",
+		Short: "Re-fetch subscriptions and update dialers without full reload.",
 		Run: func(cmd *cobra.Command, args []string) {
-            internal.AutoSu()
+			internal.AutoSu()
+
+			// Determine PID.
 			if len(args) == 0 {
 				_pid, err := os.ReadFile(PidFilePath)
 				if err != nil {
@@ -52,29 +39,27 @@ var (
 				cmd.Help()
 				os.Exit(1)
 			}
-			if abort {
-				if f, err := os.Create(AbortFile); err == nil {
-					f.Close()
-				}
-			}
+
 			// Read the first line of SignalProgressFilePath.
 			code, _, err := readSignalProgressFile()
 			if err == nil && code != consts.ReloadDone && code != consts.ReloadError &&
-			code != consts.UpdateSubDone && code != consts.UpdateSubError {
+				code != consts.UpdateSubDone && code != consts.UpdateSubError {
 				// In progress.
-				fmt.Printf("%v shows another reload operation is in progress.\n", SignalProgressFilePath)
+				fmt.Printf("%v shows another operation is in progress.\n", SignalProgressFilePath)
 				return
 			}
-			// Set the progress as ReloadSend.
-			os.WriteFile(SignalProgressFilePath, []byte{consts.ReloadSend}, 0644)
-			// Send signal.
-			if err = syscall.Kill(pid, syscall.SIGUSR1); err != nil {
+
+			// Set the progress as UpdateSubSend.
+			os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateSubSend}, 0644)
+
+			// Send SIGHUP to trigger subscription update.
+			if err = syscall.Kill(pid, syscall.SIGHUP); err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}
 			time.Sleep(500 * time.Millisecond)
 			code, _, _ = readSignalProgressFile()
-			if code == consts.ReloadSend {
+			if code == consts.UpdateSubSend {
 				// Old version dae is running.
 				goto fallback
 			}
@@ -83,10 +68,9 @@ var (
 				time.Sleep(200 * time.Millisecond)
 				code, content, err := readSignalProgressFile()
 				if err != nil {
-					// Unexpecetd case.
 					goto fallback
 				}
-				if code == consts.ReloadDone || code == consts.ReloadError {
+				if code == consts.UpdateSubDone || code == consts.UpdateSubError {
 					fmt.Println(content)
 					return
 				}
@@ -98,6 +82,5 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(reloadCmd)
-	reloadCmd.PersistentFlags().BoolVarP(&abort, "abort", "a", false, "Abort established connections.")
+	rootCmd.AddCommand(updateSubCmd)
 }

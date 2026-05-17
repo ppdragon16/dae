@@ -135,6 +135,13 @@ func Run(conf *config.Config, externGeoDataDirs []string) {
 		std.Fatalln(err)
 	}
 
+	// Store config state for subscription updates.
+	subscriptionDir := os.Getenv("DAE_LOCATION_SUBSCRIPTION")
+	if subscriptionDir == "" {
+		subscriptionDir = filepath.Dir(cfgFile)
+	}
+	c.SetConfigState(cfgFile, subscriptionDir, conf)
+
 	startMetricsServer(conf.Global.MetricsPort)
 	startCommandServer(conf.Global.CommandPort, c)
 
@@ -275,6 +282,13 @@ loop:
 				c = newC
 				conf = newConf
 
+				// Store config state for subscription updates.
+				subscriptionDir := os.Getenv("DAE_LOCATION_SUBSCRIPTION")
+				if subscriptionDir == "" {
+					subscriptionDir = filepath.Dir(cfgFile)
+				}
+				c.SetConfigState(cfgFile, subscriptionDir, conf)
+
 				// Ready to close.
 				if abortConnections {
 					oldC.AbortConnections()
@@ -285,8 +299,19 @@ loop:
 				startMetricsServer(conf.Global.MetricsPort)
 				startCommandServer(conf.Global.CommandPort, c)
 			case syscall.SIGHUP:
-				// Ignore.
-				continue
+				// Subscription update.
+				std.Warnln("[update-sub] Received update-sub signal")
+				_ = os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateSubProcessing}, 0644)
+				go func() {
+					if err := c.UpdateSubscriptions(); err != nil {
+						std.WithFields(log.Fields{
+							"err": err,
+						}).Errorln("[update-sub] Failed to update subscriptions")
+						_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateSubError}, []byte("\n"+err.Error())...), 0644)
+					} else {
+						_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateSubDone}, []byte("\nOK")...), 0644)
+					}
+				}()
 			default:
 				std.Infof("Received signal: %v", sig.String())
 				break loop
@@ -377,19 +402,10 @@ func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []s
 	// Deep copy to prevent modification.
 	conf = deepcopy.Copy(conf).(*config.Config)
 
-	/// Get tag -> nodeList mapping.
-	tagToNodeList := map[string][]string{}
-	if len(conf.Node) > 0 {
-		for _, node := range conf.Node {
-			tagToNodeList[""] = append(tagToNodeList[""], string(node))
-		}
-	}
-
 	/// Init Direct Dialers.
 	direct.InitDirectDialers(conf.Global.FallbackResolver, conf.Global.Mptcp, int(conf.Global.SoMarkFromDae))
 
 	// Resolve subscriptions to nodes.
-	resolvingfailed := false
 	if !conf.Global.DisableWaitingNetwork {
 		epo := 5 * time.Second
 		client := http.Client{
@@ -437,16 +453,15 @@ func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []s
 	if subscriptionDir == "" {
 		subscriptionDir = filepath.Dir(cfgFile)
 	}
-	for _, sub := range conf.Subscription {
-		tag, nodes, err := subscription.ResolveSubscription(&client, subscriptionDir, string(sub))
-		if err != nil {
-			log.Warnf(`failed to resolve subscription "%v": %v`, sub, err)
-			resolvingfailed = true
-		}
-		if len(nodes) > 0 {
-			tagToNodeList[tag] = append(tagToNodeList[tag], nodes...)
-		}
+	nodeStrs := make([]string, len(conf.Node))
+	for i, n := range conf.Node {
+		nodeStrs[i] = string(n)
 	}
+	subStrs := make([]string, len(conf.Subscription))
+	for i, s := range conf.Subscription {
+		subStrs[i] = string(s)
+	}
+	tagToNodeList := subscription.ResolveAllSubscriptions(&client, subscriptionDir, nodeStrs, subStrs)
 
 	// Delete all files in persist.d that are not in tagToNodeList
 	files, err := os.ReadDir(filepath.Join(subscriptionDir, "persist.d"))
@@ -464,7 +479,7 @@ func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []s
 	}
 
 	if len(tagToNodeList) == 0 {
-		if resolvingfailed {
+		if len(conf.Subscription) > 0 {
 			log.Warnln("No node found because all subscription resolving failed.")
 		} else {
 			log.Warnln("No node found.")
