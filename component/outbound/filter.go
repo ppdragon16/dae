@@ -279,11 +279,3 @@ func (s *DialerSet) findNextHop(nextHop string) (*NodeInfo, error) {
 	return nil, fmt.Errorf("next_hop node '%s' not found", nextHop)
 }
 
-func (s *DialerSet) Close() error {
-	for _, nodeInfo := range s.nodeInfos {
-		if nodeInfo.CreatedDialer != nil {
-			nodeInfo.CreatedDialer.Close()
-		}
-	}
-	return nil
-}

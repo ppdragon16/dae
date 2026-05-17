@@ -139,6 +139,26 @@ func ResolveFile(u *url.URL, configDir string) (b []byte, err error) {
 	return bytes.TrimSpace(b), err
 }
 
+// ResolveAllSubscriptions resolves all manual nodes and subscriptions into a
+// tag->nodeList mapping. Manual nodes are added under the empty tag "".
+func ResolveAllSubscriptions(client *http.Client, subscriptionDir string, nodes []string, subscriptions []string) (tagToNodeList map[string][]string) {
+	tagToNodeList = make(map[string][]string)
+	for _, node := range nodes {
+		tagToNodeList[""] = append(tagToNodeList[""], node)
+	}
+	for _, sub := range subscriptions {
+		tag, nodes, err := ResolveSubscription(client, subscriptionDir, sub)
+		if err != nil {
+			log.Warnf("failed to resolve subscription %q: %v", sub, err)
+			continue
+		}
+		if len(nodes) > 0 {
+			tagToNodeList[tag] = append(tagToNodeList[tag], nodes...)
+		}
+	}
+	return tagToNodeList
+}
+
 func ResolveSubscription(client *http.Client, subscriptionDir string, subscription string) (tag string, nodes []string, err error) {
 	/// Get tag.
 	tag, subscription = common.GetTagFromLinkLikePlaintext(subscription)

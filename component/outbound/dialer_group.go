@@ -8,6 +8,7 @@ package outbound
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
@@ -27,6 +28,8 @@ type DialerGroup struct {
 	selector        Selector
 
 	dialerToAnnotation map[*dialer.Dialer]*dialer.Annotation
+
+	mu sync.RWMutex
 }
 
 func NewDialerGroup(
@@ -78,7 +81,74 @@ func (g *DialerGroup) Close() error {
 	return nil
 }
 
+// ReplaceDialers atomically replaces the dialer set in this group.
+// Dialers are matched by Property: old dialers whose Property matches a new
+// dialer are recycled; the rest are unregistered. New dialers with no Property
+// match are registered in their place.
+func (g *DialerGroup) ReplaceDialers(
+	newDialers []*dialer.Dialer,
+	newAnnotations []*dialer.Annotation,
+) {
+	if len(newDialers) != len(newAnnotations) {
+		panic(fmt.Sprintf("unmatched annotations length: %v dialers and %v annotations", len(newDialers), len(newAnnotations)))
+	}
+
+	g.mu.Lock()
+
+	// Build lookup: old Property -> old Dialer (for recycling).
+	oldByProperty := make(map[dialer.Property]*dialer.Dialer, len(g.Dialers))
+	for _, d := range g.Dialers {
+		oldByProperty[*d.Property] = d
+	}
+
+	// Build final dialer list: recycle old dialers where Property matches.
+	finalDialers := make([]*dialer.Dialer, 0, len(newDialers))
+	finalAnnos := make([]*dialer.Annotation, 0, len(newDialers))
+	oldKept := make(map[*dialer.Dialer]bool, len(g.Dialers))
+
+	for j, newD := range newDialers {
+		if oldD, ok := oldByProperty[*newD.Property]; ok {
+			finalDialers = append(finalDialers, oldD)
+			finalAnnos = append(finalAnnos, newAnnotations[j])
+			oldKept[oldD] = true
+		} else {
+			finalDialers = append(finalDialers, newD)
+			finalAnnos = append(finalAnnos, newAnnotations[j])
+		}
+	}
+
+	// Unregister old dialers that are leaving.
+	for _, d := range g.Dialers {
+		if !oldKept[d] {
+			d.UnregisterDialerGroup(g)
+		}
+	}
+
+	// Register new dialers (not recycled).
+	for _, newD := range newDialers {
+		if _, ok := oldByProperty[*newD.Property]; !ok {
+			newD.RegisterDialerGroup(g)
+		}
+	}
+
+	// Update state.
+	g.Dialers = finalDialers
+	g.dialerToAnnotation = make(map[*dialer.Dialer]*dialer.Annotation, len(finalDialers))
+	for i, d := range finalDialers {
+		g.dialerToAnnotation[d] = finalAnnos[i]
+	}
+
+	g.mu.Unlock()
+
+	// Seed selector with current dialer state.
+	for _, d := range finalDialers {
+		g.NotifyStatusChange(d)
+	}
+}
+
 func (g *DialerGroup) GetAnnotation(d *dialer.Dialer) *dialer.Annotation {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 	return g.dialerToAnnotation[d]
 }
 
@@ -86,12 +156,15 @@ func (g *DialerGroup) GetAnnotation(d *dialer.Dialer) *dialer.Annotation {
 // If a "ConditionalPriority" is present, it is applied;
 // Otherwise the default fixed Priority is returned.
 func (g *DialerGroup) GetPriority(d *dialer.Dialer, latency time.Duration) int {
-	for _, p := range g.dialerToAnnotation[d].ConditionalPriority {
+	g.mu.RLock()
+	anno := g.dialerToAnnotation[d]
+	g.mu.RUnlock()
+	for _, p := range anno.ConditionalPriority {
 		if latency >= p.Low && latency <= p.High {
 			return p.Pri
 		}
 	}
-	return g.dialerToAnnotation[d].Priority
+	return anno.Priority
 }
 
 func (g *DialerGroup) GetSelectionPolicy() (policy consts.DialerSelectionPolicy) {
@@ -109,9 +182,13 @@ func (g *DialerGroup) SelectFallbackIpVersion(networkType *common.NetworkType, s
 }
 
 func (g *DialerGroup) Select(networkType *common.NetworkType) (dialer *dialer.Dialer, err error) {
+	g.mu.RLock()
 	if len(g.Dialers) == 0 {
+		g.mu.RUnlock()
 		return nil, ErrNoDialer
 	}
+	g.mu.RUnlock()
+
 select_dialer:
 	dialer = g.selector.Select(networkType)
 	if dialer == nil {
@@ -131,7 +208,9 @@ func (g *DialerGroup) PrintLatency() {
 	if log.IsLevelEnabled(log.InfoLevel) {
 		for i := 0; i < 4; i++ {
 			networkType := common.IndexToNetworkType(i)
+			g.mu.RLock()
 			g.selector.PrintLatencies(networkType, log.Infoln)
+			g.mu.RUnlock()
 		}
 	}
 }

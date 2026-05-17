@@ -11,3 +11,10 @@ const (
 	ReloadDone
 	ReloadError
 )
+
+const (
+	UpdateSubSend = '4' + iota
+	UpdateSubProcessing
+	UpdateSubDone
+	UpdateSubError
+)
