@@ -1540,6 +1540,14 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 			d.Close()
 		}
 	}
+
+	// Clear connectivity check metrics — orphaned stale entries from removed dialers.
+	// Fresh metrics will be set by the ReactivateCheck goroutines.
+	common.Metrics.CheckLatency.Reset()
+	common.Metrics.CheckMovingLatency.Reset()
+	common.Metrics.CheckSelectLatency.Reset()
+	common.Metrics.DialerSelectIndex.Reset()
+
 	// Update the in-use dialer list and activate checks.
 	c.inuseDialers = make([]*dialer.Dialer, 0, len(newInuse))
 	for d := range newInuse {
