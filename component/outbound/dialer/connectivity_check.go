@@ -301,14 +301,6 @@ func (d *Dialer) ReactivateCheck() {
 		return
 	}
 	if d.checkActivated {
-		hasActiveConn := false
-		d.activeConns.Range(func(key, value any) bool {
-			hasActiveConn = true
-			return false
-		})
-		if hasActiveConn {
-			return
-		}
 		d.stopCheck()
 		d.checkActivated = false
 		d.checkCtx, d.checkCancel = context.WithCancel(context.Background())

@@ -123,18 +123,12 @@ func (g *Gauge) With4(v [4]string) *Series {
 	return g.createSlow(key, v[0], v[1], v[2], v[3])
 }
 
-// Drop 删除指定标签组合的 Series，用于清理不再需要的残余指标
-func (g *Gauge) Drop(v []string) {
-	var key uint64
-	if len(v) > 0 {
-		var h maphash.Hash
-		h.SetSeed(metricSeed)
-		for _, s := range v {
-			h.WriteString(s)
-		}
-		key = h.Sum64()
-	}
-	g.series.Delete(key)
+// Reset 清空所有 Series，用于重建前清除残余指标
+func (g *Gauge) Reset() {
+	g.series.Range(func(key, _ any) bool {
+		g.series.Delete(key)
+		return true
+	})
 }
 
 // getOrCreate 核心逻辑：显式参数传递，彻底规避切片逃逸
