@@ -201,7 +201,12 @@ func (s *LatencyBasedSelector) logDialerSelection(oldBestDialer *dialer.Dialer, 
 }
 
 func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, dialer *dialer.Dialer, networkType *common.NetworkType) {
+	labels := [...]string{s.dialerGroup.Name, dialer.Property.SubscriptionTag, dialer.Name, networkType.String()}
 	if !dialer.Supported(networkType) {
+		common.Metrics.CheckLatency.Drop(labels[:])
+		common.Metrics.CheckMovingLatency.Drop(labels[:])
+		common.Metrics.CheckSelectLatency.Drop(labels[:])
+		common.Metrics.DialerSelectIndex.Drop(labels[:])
 		return
 	}
 
@@ -209,7 +214,6 @@ func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, di
 	if !ok {
 		return
 	}
-	labels := [...]string{s.dialerGroup.Name, dialer.Property.SubscriptionTag, dialer.Name, networkType.String()}
 	common.Metrics.CheckLatency.With4(labels).Set(int64(lastLatency.Milliseconds()))
 
 	movingLatency := dialer.MovingAverage[s.dialerGroup]
