@@ -83,7 +83,7 @@ func isDialerAlive(dialer *dialer.Dialer, networkType *common.NetworkType) bool 
 	if !dialer.Alive() {
 		return false
 	}
-	if networkType != nil && !dialer.Supported(networkType) {
+	if networkType != nil && !dialer.Supported(common.NetworkTypeToIndex(networkType)) {
 		return false
 	}
 	return true
@@ -201,7 +201,7 @@ func (s *LatencyBasedSelector) logDialerSelection(oldBestDialer *dialer.Dialer, 
 }
 
 func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, dialer *dialer.Dialer, networkType *common.NetworkType) {
-	if !dialer.Supported(networkType) {
+	if !dialer.Supported(common.NetworkTypeToIndex(networkType)) {
 		return
 	}
 

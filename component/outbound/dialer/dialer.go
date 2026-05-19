@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -36,8 +37,8 @@ type Dialer struct {
 	*Property
 
 	needAliveState bool
-	alive          bool
-	supported      [4]bool
+	alive          atomic.Bool
+	supported      atomic.Uint32
 	Latencies10    map[DialerGroup]*LatenciesN
 	MovingAverage  map[DialerGroup]time.Duration
 
@@ -100,7 +101,6 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 		Dialer:                 dialer,
 		Property:               property,
 		needAliveState:         needAliveState,
-		alive:                  !needAliveState,
 		Latencies10:            make(map[DialerGroup]*LatenciesN),
 		MovingAverage:          make(map[DialerGroup]time.Duration),
 		registeredDialerGroups: make(map[DialerGroup]int),
@@ -110,6 +110,7 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 		checkCtx:               checkCtx,
 		checkCancel:            checkCancel,
 	}
+	d.alive.Store(!needAliveState)
 	log.WithField("dialer", d.Name).
 		WithField("p", unsafe.Pointer(d)).
 		Traceln("NewDialer")
