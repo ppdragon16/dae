@@ -36,11 +36,27 @@ const (
 )
 
 func (d *Dialer) Alive() bool {
-	return d.Dialer.Alive() && d.alive
+	return d.Dialer.Alive() && d.alive.Load()
 }
 
-func (d *Dialer) Supported(typ *common.NetworkType) bool {
-	return d.supported[common.NetworkTypeToIndex(typ)]
+func (d *Dialer) Supported(networkTypeIndex int) bool {
+	return d.supported.Load()&(1<<networkTypeIndex) != 0
+}
+
+func (d *Dialer) setSupportedBit(i int, val bool) {
+	mask := uint32(1) << i
+	for {
+		old := d.supported.Load()
+		var new_ uint32
+		if val {
+			new_ = old | mask
+		} else {
+			new_ = old &^ mask
+		}
+		if old == new_ || d.supported.CompareAndSwap(old, new_) {
+			return
+		}
+	}
 }
 
 func parseIp46FromList(ip []string) (ip46 netutils.Ip46, err error) {
@@ -369,6 +385,8 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	defer d.NotifyStatusChange()
 
+	d.supported.Store(0)
+
 	var wg sync.WaitGroup
 	var latency [4]time.Duration
 	var err [4]error
@@ -380,11 +398,13 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	}
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
-		wg.Add(1)
-		go func() {
-			d.supported[i], latency[i], err[i] = d.Check(opt)
+		wg.Go(func() {
+			ok, lat, e := d.Check(opt)
+			d.setSupportedBit(i, ok)
+			latency[i] = lat
+			err[i] = e
 			if log.IsLevelEnabled(log.InfoLevel) {
-				if d.supported[i] {
+				if ok {
 					log.WithFields(log.Fields{
 						"network": opt.networkType.String(),
 						"node":    d.Name,
@@ -398,13 +418,13 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 				}
 			}
 			wg.Done()
-		}()
+		})
 	}
 	wg.Wait()
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
-		if d.supported[i] {
-			d.Update(d.supported[i], latency[i], opt.networkType, err[i])
+		if ok := d.Supported(i); ok {
+			d.Update(ok, latency[i], opt.networkType, err[i])
 			return opt
 		}
 	}
@@ -460,8 +480,8 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 			ok = false
 		}
 	}
-	oldAlive := d.alive
-	d.alive = ok
+	oldAlive := d.alive.Load()
+	d.alive.Store(ok)
 	for g := range d.registeredDialerGroups {
 		if !ok {
 			penalty := g.GetTimeoutPenalty()
