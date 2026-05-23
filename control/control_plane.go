@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1445,6 +1446,21 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 
 	log.Warnln("[update-sub] Starting subscription update...")
 
+	// Phase 0: Re-read group/node/subscription definitions from config file.
+	// Allows filter/policy/annotation edits without full reload.
+	newGroups, newNodes, newSubs, err := c.reparseDynamicSections()
+	if err != nil {
+		return fmt.Errorf("re-reading config failed (use SIGUSR1 for full reload): %w", err)
+	}
+	if err := validateGroupStructure(c.config.Group, newGroups); err != nil {
+		return fmt.Errorf("group structure changed, use SIGUSR1 for full reload: %w", err)
+	}
+	newConfig := *c.config
+	newConfig.Group = newGroups
+	newConfig.Node = newNodes
+	newConfig.Subscription = newSubs
+	c.config = &newConfig
+
 	// Phase 1: Re-resolve subscriptions.
 	client := http.Client{
 		Transport: &http.Transport{
@@ -1557,6 +1573,58 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 
 	runtime.GC()
 	log.Warnln("[update-sub] Subscription update completed successfully")
+	return nil
+}
+
+// reparseDynamicSections re-reads the config file and extracts group, node,
+// and subscription sections — the parts that change between subscription updates.
+func (c *ControlPlane) reparseDynamicSections() (groups []config.Group, nodes, subs []config.KeyableString, err error) {
+	data, err := os.ReadFile(c.cfgFile)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	sections, err := config_parser.Parse(string(data))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	for _, sec := range sections {
+		switch sec.Name {
+		case "group":
+			if err := config.SectionParser(reflect.ValueOf(&groups), sec); err != nil {
+				return nil, nil, nil, fmt.Errorf("failed to parse group section: %w", err)
+			}
+		case "node":
+			if err := config.SectionParser(reflect.ValueOf(&nodes), sec); err != nil {
+				return nil, nil, nil, fmt.Errorf("failed to parse node section: %w", err)
+			}
+		case "subscription":
+			if err := config.SectionParser(reflect.ValueOf(&subs), sec); err != nil {
+				return nil, nil, nil, fmt.Errorf("failed to parse subscription section: %w", err)
+			}
+		}
+	}
+	if groups == nil {
+		return nil, nil, nil, fmt.Errorf("group section not found in config")
+	}
+	return groups, nodes, subs, nil
+}
+
+// validateGroupStructure ensures the new group layout is compatible with
+// the existing outbounds. Name, count, and redirect status must match.
+func validateGroupStructure(oldGroups, newGroups []config.Group) error {
+	if len(newGroups) != len(oldGroups) {
+		return fmt.Errorf("group count changed (%d -> %d)", len(oldGroups), len(newGroups))
+	}
+	for i := range newGroups {
+		old := &oldGroups[i]
+		new_ := &newGroups[i]
+		if old.Name != new_.Name {
+			return fmt.Errorf("group name changed at index %d (%q -> %q)", i, old.Name, new_.Name)
+		}
+		if old.Redirect != new_.Redirect {
+			return fmt.Errorf("group %q redirect changed", old.Name)
+		}
+	}
 	return nil
 }
 
