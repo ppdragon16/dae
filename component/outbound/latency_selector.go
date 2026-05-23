@@ -262,9 +262,11 @@ func (s *LatencyBasedSelector) NotifyStatusChange(d *dialer.Dialer) {
 		}
 		s.logCheckLatency(aliveDialers, d, networkType)
 		if oldDialer != newDialer {
+			_, oldInGroup := s.dialerGroup.dialerToAnnotation[oldDialer]
 			switch {
 			case oldDialer == nil,
 				newDialer == nil,
+				!oldInGroup,
 				!s.dialerToAlive[oldDialer]:
 				s.networkIndexToDialer[i] = newDialer
 				s.logDialerSelection(oldDialer, newDialer, networkType)
