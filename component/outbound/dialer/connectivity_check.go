@@ -329,12 +329,13 @@ func (d *Dialer) startCheckTicker() {
 	time.Sleep(time.Duration(fastrand.Int63n(int64(d.CheckInterval))))
 	d.tickerMu.Lock()
 	d.ticker = time.NewTicker(d.CheckInterval)
+	ticker := d.ticker
 	d.tickerMu.Unlock()
 	for {
 		select {
 		case <-d.checkCtx.Done():
 			return
-		case t := <-d.ticker.C:
+		case t := <-ticker.C:
 			d.checkCh <- t
 		}
 	}
