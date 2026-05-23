@@ -94,6 +94,7 @@ type ControlPlane struct {
 	trafficLogger *TrafficLogger
 
 	outboundRedirects     map[consts.OutboundIndex]consts.OutboundIndex
+	muOutboundRedirects   sync.RWMutex
 	dnsRouteCache         *common.TimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex]
 	dnsRoutingResultCache *common.TimeWheelCache[netip.Addr, *bpfRoutingResult]
 
@@ -345,14 +346,9 @@ func NewControlPlane(
 			core.outboundAliveChangeCallback(id, group.Name, global.NoConnectivityTrySniff, noConnectivityOutbound))
 		outbounds = append(outbounds, dialerGroup)
 	}
-	outboundRedirects := make(map[consts.OutboundIndex]consts.OutboundIndex)
 	for fromName, toName := range groupNameRedirects {
-		fromIdx, err1 := OutboundIndexByName(outbounds, fromName)
-		toIdx, err2 := OutboundIndexByName(outbounds, toName)
-		if err1 != nil || err2 != nil {
-			return nil, common.Errf("redirect outbound not found: %v->%v", fromName, toName)
-		}
-		outboundRedirects[fromIdx] = toIdx
+		fromIdx, _ := OutboundIndexByName(outbounds, fromName)
+		toIdx, _ := OutboundIndexByName(outbounds, toName)
 		log.Infof("Outbound redirect: %v (%v) -> %v (%v)", fromName, fromIdx, toName, toIdx)
 	}
 
@@ -455,12 +451,15 @@ func NewControlPlane(
 		tproxyPortProtect:      global.TproxyPortProtect,
 		soMarkFromDae:          global.SoMarkFromDae,
 		trafficLogger:          trafficLogger,
-		outboundRedirects:      outboundRedirects,
+
 		dnsRouteCache:          common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil),
 		dnsRoutingResultCache:  common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
 		udpTaskPool:            NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 	}
 	plane.inuseDialers = inuseDialers
+	if err := plane.rebuildOutboundRedirects(groups); err != nil {
+		return nil, err
+	}
 	defer func() {
 		if err != nil {
 			cancel()
@@ -541,7 +540,7 @@ func NewControlPlane(
 		outbound := consts.OutboundIndex(rule.Outbound)
 		if outbound >= consts.OutboundUserDefinedMin &&
 			outbound <= consts.OutboundUserDefinedMax {
-			if outbound2, isRedirect := outboundRedirects[outbound]; isRedirect {
+			if outbound2, isRedirect := plane.outboundRedirects[outbound]; isRedirect {
 				outbound = outbound2
 			}
 			outBoundsToWait[outbound] = true
@@ -644,6 +643,7 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, fmt.Sprintf("GET redirect shouldn't have parameters: %v", params), http.StatusBadRequest)
 				return
 			}
+			c.muOutboundRedirects.RLock()
 			for i, dg := range c.outbounds {
 				if index, exists := c.outboundRedirects[consts.OutboundIndex(i)]; exists {
 					fmt.Fprintf(writer, "- %s -> %s\n", dg.Name, c.outbounds[index].Name)
@@ -651,6 +651,7 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					fmt.Fprintf(writer, "- %s\n", dg.Name)
 				}
 			}
+			c.muOutboundRedirects.RUnlock()
 			return
 		}
 		if r.Method == "PUT" {
@@ -670,11 +671,13 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "outbound not found", http.StatusNotFound)
 				return
 			}
+			c.muOutboundRedirects.Lock()
 			if from == to {
 				delete(c.outboundRedirects, from)
 			} else {
 				c.outboundRedirects[from] = to
 			}
+			c.muOutboundRedirects.Unlock()
 			fmt.Fprintf(writer, "OK\n")
 		}
 	case "priority":
@@ -1391,7 +1394,10 @@ func (c *ControlPlane) chooseBestDnsDialer(
 			}
 		}
 		// Handles outbound redirects
-		if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
+		c.muOutboundRedirects.RLock()
+		redirected, exists := c.outboundRedirects[outboundIndex]
+		c.muOutboundRedirects.RUnlock()
+		if exists {
 			outboundIndex = redirected
 		}
 		dialerGroup := c.outbounds[outboundIndex]
@@ -1460,6 +1466,10 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	newConfig.Node = newNodes
 	newConfig.Subscription = newSubs
 	c.config = &newConfig
+
+	if err := c.rebuildOutboundRedirects(newGroups); err != nil {
+		return fmt.Errorf("redirect update failed: %w", err)
+	}
 
 	// Phase 1: Re-resolve subscriptions.
 	client := http.Client{
@@ -1610,7 +1620,7 @@ func (c *ControlPlane) reparseDynamicSections() (groups []config.Group, nodes, s
 }
 
 // validateGroupStructure ensures the new group layout is compatible with
-// the existing outbounds. Name, count, and redirect status must match.
+// the existing outbounds. Name and count must match.
 func validateGroupStructure(oldGroups, newGroups []config.Group) error {
 	if len(newGroups) != len(oldGroups) {
 		return fmt.Errorf("group count changed (%d -> %d)", len(oldGroups), len(newGroups))
@@ -1621,10 +1631,35 @@ func validateGroupStructure(oldGroups, newGroups []config.Group) error {
 		if old.Name != new_.Name {
 			return fmt.Errorf("group name changed at index %d (%q -> %q)", i, old.Name, new_.Name)
 		}
-		if old.Redirect != new_.Redirect {
-			return fmt.Errorf("group %q redirect changed", old.Name)
+		oldIsRedirect := old.Redirect != ""
+		newIsRedirect := new_.Redirect != ""
+		if oldIsRedirect != newIsRedirect {
+			return fmt.Errorf("group %q redirect nature changed; use SIGUSR1 for full reload", old.Name)
 		}
 	}
+	return nil
+}
+
+// rebuildOutboundRedirects rebuilds the redirect lookup map from config groups.
+func (c *ControlPlane) rebuildOutboundRedirects(groups []config.Group) error {
+	redirects := make(map[consts.OutboundIndex]consts.OutboundIndex)
+	for _, g := range groups {
+		if g.Redirect == "" || g.Name == g.Redirect {
+			continue
+		}
+		fromIdx, err := OutboundIndexByName(c.outbounds, g.Name)
+		if err != nil {
+			return fmt.Errorf("redirect source %q: %w", g.Name, err)
+		}
+		toIdx, err := OutboundIndexByName(c.outbounds, g.Redirect)
+		if err != nil {
+			return fmt.Errorf("redirect target %q: %w", g.Redirect, err)
+		}
+		redirects[fromIdx] = toIdx
+	}
+	c.muOutboundRedirects.Lock()
+	c.outboundRedirects = redirects
+	c.muOutboundRedirects.Unlock()
 	return nil
 }
 

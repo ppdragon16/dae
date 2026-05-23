@@ -101,7 +101,10 @@ func (c *ControlPlane) RouteDialOption(
 		return
 	}
 	// Handles outbound redirects
-	if redirected, exists := c.outboundRedirects[outboundIndex]; exists {
+	c.muOutboundRedirects.RLock()
+	redirected, exists := c.outboundRedirects[outboundIndex]
+	c.muOutboundRedirects.RUnlock()
+	if exists {
 		outboundIndex = redirected
 	}
 	outbound := c.outbounds[outboundIndex]
