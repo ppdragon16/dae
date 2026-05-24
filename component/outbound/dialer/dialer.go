@@ -137,7 +137,7 @@ func (d *Dialer) stopCheck() {
 
 func (d *Dialer) Close() error {
 	d.stopCheck()
-	return nil
+	return d.Dialer.Disconnect()
 }
 
 // RegisterConn registers a connection created by this dialer.

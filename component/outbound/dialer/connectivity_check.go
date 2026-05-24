@@ -407,11 +407,13 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	var wg sync.WaitGroup
 	var latency [4]time.Duration
 	var err [4]error
-	if err := d.Connect(); err != nil {
-		log.WithFields(log.Fields{
-			"node": d.Name,
-		}).Errorf("Failed to connect: %v", err)
-		return nil
+	if !d.Alive() {
+		if err := d.Connect(); err != nil {
+			log.WithFields(log.Fields{
+				"node": d.Name,
+			}).Errorf("Failed to connect: %v", err)
+			return nil
+		}
 	}
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
