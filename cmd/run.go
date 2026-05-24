@@ -301,8 +301,13 @@ loop:
 			case syscall.SIGHUP:
 				// Subscription update.
 				std.Warnln("[update-sub] Received update-sub signal")
+				if !c.UpdatingSub.CompareAndSwap(false, true) {
+					std.Warnln("[update-sub] Subscription update already in progress; skipping duplicate signal")
+					continue
+				}
 				_ = os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateSubProcessing}, 0644)
 				go func() {
+					defer c.UpdatingSub.Store(false)
 					if err := c.UpdateSubscriptions(); err != nil {
 						std.WithFields(log.Fields{
 							"err": err,
