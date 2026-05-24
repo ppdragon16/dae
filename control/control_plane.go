@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -105,6 +106,7 @@ type ControlPlane struct {
 	config          *config.Config
 	inuseDialers    []*dialer.Dialer
 	muUpdateSub     sync.Mutex
+	UpdatingSub     atomic.Bool
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
