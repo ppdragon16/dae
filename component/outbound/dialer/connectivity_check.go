@@ -295,18 +295,28 @@ func (d *Dialer) ActivateCheck() {
 
 	go func() {
 		// at startup, check all network types to determine which are supported
+		done := d.checkCtx.Done()
 		var checkOpt *CheckOption
 		for range 3 {
 			checkOpt = d.runInitialCheck(CheckOpts)
 			if checkOpt != nil {
 				break
 			}
-			time.Sleep(5 * time.Second)
+			select {
+			case <-done:
+				return
+			case <-time.After(5 * time.Second):
+			}
 		}
 		if checkOpt == nil {
 			return
 		}
 		// after startup, only run check on one network type
+		select {
+		case <-done:
+			return
+		default:
+		}
 		go d.startCheckTicker()
 		go d.runCheckLoop(checkOpt)
 	}()
@@ -331,12 +341,17 @@ func (d *Dialer) startCheckTicker() {
 	d.ticker = time.NewTicker(d.CheckInterval)
 	ticker := d.ticker
 	d.tickerMu.Unlock()
+	done := d.checkCtx.Done()
 	for {
 		select {
-		case <-d.checkCtx.Done():
+		case <-done:
 			return
 		case t := <-ticker.C:
-			d.checkCh <- t
+			select {
+			case <-done:
+				return
+			case d.checkCh <- t:
+			}
 		}
 	}
 }
@@ -353,9 +368,10 @@ func (d *Dialer) NotifyCheck() {
 }
 
 func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
+	done := d.checkCtx.Done()
 	for {
 		select {
-		case <-d.checkCtx.Done():
+		case <-done:
 			return
 		case <-d.checkCh:
 			for i := 0; i < RetryCount; i++ {
