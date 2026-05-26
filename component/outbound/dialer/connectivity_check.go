@@ -467,13 +467,13 @@ func (d *Dialer) UnregisterDialerGroup(g DialerGroup) {
 }
 
 func (d *Dialer) NotifyStatusChange() {
-	// if !d.needAliveState {
-	// 	return
-	// }
-	// Inform DialerGroups to update state.
-	// We use lock because AliveDialerSetSet is a reference of that in collection.
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.notifyStatusChangeLocked()
+}
+
+// notifyStatusChangeLocked must be called with d.mu held.
+func (d *Dialer) notifyStatusChangeLocked() {
 	for g := range d.registeredDialerGroups {
 		g.NotifyStatusChange(d)
 	}
@@ -501,6 +501,7 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 	}
 	oldAlive := d.alive.Load()
 	d.alive.Store(ok)
+	d.mu.Lock()
 	for g := range d.registeredDialerGroups {
 		if !ok {
 			penalty := g.GetTimeoutPenalty()
@@ -565,7 +566,8 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 		}
 	}
 	// Notify all registered groups once after all statistics are updated
-	d.NotifyStatusChange()
+	d.notifyStatusChangeLocked()
+	d.mu.Unlock()
 
 	// Dialer just became not alive; abort all connections.
 	if oldAlive && !ok {
