@@ -436,7 +436,6 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 					}).Infof("Inital Connectivity Check Failed: %v\n", err[i])
 				}
 			}
-			wg.Done()
 		})
 	}
 	wg.Wait()
