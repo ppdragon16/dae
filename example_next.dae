@@ -76,12 +76,7 @@ dns {
   # Static DNS entries (defined here, referenced in routing)
   # Each entry maps a name to DNS records (A, AAAA, TXT)
   static {
-    # TXT record for ACME DNS-01 challenge (short TTL for dynamic updates)
-    acme {
-      txt: '=====1234567890abcdef====='
-      ttl: 60
-    }
-    # Records for local NAS (longer TTL)
+    # Records for local NAS
     local_nas {
       a: 192.168.16.42
       aaaa: 'fdfe::be24:11ff:fe64:3598'
@@ -96,7 +91,6 @@ dns {
   routing {
     request {
       qtype(ptr) && qname(geosite:private) -> dnsmasq_dns
-      qname(regex:'^_acme') -> static(acme)
       qname(suffix:mydomain.xyz) -> static(local_nas)
       qtype(ptr, https) -> reject
       qname(suffix:.lan, suffix:telemetry.coder.com, regex:'mcdn\.bilivideo\.(com|cn)$', suffix:szbdyd.com) -> reject
@@ -193,25 +187,21 @@ routing {
 ### List all static entries
 #  curl http://localhost:1111/static
 #  output:
-#  acme:
-#    txt: [=====1234567890abcdef=====]
 #  local_nas:
 #    a: [192.168.16.42]
 #    aaaa: [fdfe::be24:11ff:fe64:3598]
 
 ### Get a specific static entry
-#  curl http://localhost:1111/static/acme
+#  curl http://localhost:1111/static/local_nas
 #  output:
-#  txt: [=====1234567890abcdef=====]
+#  a: [192.168.16.42]
+#  aaaa: [fdfe::be24:11ff:fe64:3598]
 
 ### Update a static entry (only existing entries can be updated)
-#  curl -X PUT http://localhost:1111/static/acme -H "Content-Type: text/plain" -d 'txt: =====newvalue====='
-#  output:
-#  OK
-#
-#  Update with TTL:
-#  curl -X PUT http://localhost:1111/static/acme -H "Content-Type: text/plain" -d 'txt: =====newvalue=====
-#  ttl: 120'
+### Multi-field update — use $'...' with \n for newlines:
+### Inside single quotes, \ is literal, so '...\n...' would send literal backslash.
+### $'...' interprets \n as a newline character.
+#  curl -X PUT http://localhost:1111/static/local_nas -H "Content-Type: text/plain" -d $'a: 192.168.16.42\naaaa: fdfe::be24:11ff:fe64:1234\nttl: 3600'
 #  output:
 #  OK
 #
