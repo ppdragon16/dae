@@ -53,6 +53,11 @@ func (c *commonDnsCache) Get(key HashKey) (resp []byte, expired bool, isNew bool
 	return resp, expired, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
 }
 
+// Range iterates over every cached DNS response. See common.TimeWheelCache.Range.
+func (c *commonDnsCache) Range(fn func(key HashKey, value *dnsCache) bool) {
+	c.cache.Range(fn)
+}
+
 func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
 	respData := pool.GetBuffer(len(cache.Data))
 	copy(respData, cache.Data)

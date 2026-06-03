@@ -237,16 +237,12 @@ func QnameIpHash(qhash HashKey, ip netip.Addr) HashKey {
 }
 
 func dnsQueryInfo(data []byte) (queryInfo queryInfo) {
-	if qname, off, err := dnsDomain(data, 12); err == nil {
-		if len(data) >= off+4 {
-			qtype := binary.BigEndian.Uint16(data[off : off+2])
-			qclass := binary.BigEndian.Uint16(data[off+2 : off+4])
-			if qclass == uint16(dnsmessage.ClassINET) {
-				queryInfo.qname = qname
-				queryInfo.qtype = qtype
-			}
-		}
+	qname, qtype, ok := dnsQuestion(data)
+	if !ok {
+		return
 	}
+	queryInfo.qname = qname
+	queryInfo.qtype = qtype
 	return
 }
 
@@ -846,6 +842,81 @@ func shouldSaveToCache(upstream *dns.Upstream, qname string) bool {
 		return score*2 <= subLen
 	}
 	return score*3 <= subLen
+}
+
+// IpDomainLookupResult describes a single qname → IP mapping observed
+// in the DNS response cache. The qtype is implicit from the queried IP's
+// family (IPv4 only matches A records, IPv6 only matches AAAA), so it
+// is not stored. TTL is the remaining seconds at the time of the
+// lookup; 0 means the entry is logically expired (but still in the
+// cache). Multiple entries with the same qname but different outbounds
+// are reported individually — no dedupe.
+type IpDomainLookupResult struct {
+	QName string
+	TTL   uint32
+}
+
+// LookupDomainsByIP returns every qname whose cached response contains
+// an A or AAAA record equal to ip, along with the remaining TTL for
+// that answer. Pure offline scan over the raw response cache.
+func (c *DnsController) LookupDomainsByIP(ip netip.Addr) []IpDomainLookupResult {
+	var out []IpDomainLookupResult
+	c.dnsCache.Range(func(_ HashKey, cache *dnsCache) bool {
+		qname, _, ok := dnsQuestion(cache.Data)
+		if !ok {
+			return true
+		}
+		elapsed := uint32(time.Since(cache.FetchedAt).Seconds())
+
+		it, iterOK := newDNSRRIterator(cache.Data)
+		if !iterOK {
+			return true
+		}
+		// rrIdx tracks the i-th RR in the answer section; TTLOffsets[i] is that
+		// RR's TTL byte offset. We rely on netip.Addr's documented invariant
+		// that its zero value is invalid and never equals a valid Addr, so
+		// non-A/AAAA records (and truncated rdata) leave rrIP as the zero
+		// value and the rrIP == ip check below filters them out for free.
+		rrIdx := -1
+		for off, hasRR := it.Next(); hasRR; off, hasRR = it.Next() {
+			rrIdx++
+			// Defensive: TTLOffsets is built parallel to all answer RRs in
+			// dnsCache.Save, so it should never be shorter than rrIdx. If it
+			// is, the cache is corrupted — bail out of this entry rather than
+			// doing more doomed iterations.
+			if rrIdx >= len(cache.TTLOffsets) {
+				break
+			}
+			rtype := binary.BigEndian.Uint16(cache.Data[off : off+2])
+			rdataOff := int(off) + 10
+			var rrIP netip.Addr
+			switch rtype {
+			case 1: // A
+				if rdataOff+4 <= len(cache.Data) {
+					rrIP = netip.AddrFrom4([4]byte(cache.Data[rdataOff : rdataOff+4]))
+				}
+			case 28: // AAAA
+				if rdataOff+16 <= len(cache.Data) {
+					rrIP = netip.AddrFrom16([16]byte(cache.Data[rdataOff : rdataOff+16]))
+				}
+			}
+			if rrIP != ip {
+				continue
+			}
+			ttlOff := cache.TTLOffsets[rrIdx]
+			rawTtl := binary.BigEndian.Uint32(cache.Data[ttlOff : ttlOff+4])
+			var remaining uint32
+			if rawTtl > elapsed {
+				remaining = rawTtl - elapsed
+			}
+			out = append(out, IpDomainLookupResult{
+				QName: qname,
+				TTL:   remaining,
+			})
+		}
+		return true
+	})
+	return out
 }
 
 func (c *DnsController) GetStaticEntries() map[string]*config.DnsStaticEntry {

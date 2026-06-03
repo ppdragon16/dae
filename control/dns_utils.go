@@ -166,6 +166,28 @@ func dnsIdSet(data []byte, id uint16) {
 	data[1] = byte(id & 0xff)
 }
 
+// dnsQuestion returns the first question's qname and qtype from a DNS
+// message. ok is false if the message is truncated, the question
+// section is malformed, or qclass is not INET (dae only handles INET
+// queries/responses). RFC 1035 messages almost always carry a single
+// question, so the first one is sufficient.
+func dnsQuestion(data []byte) (qname string, qtype uint16, ok bool) {
+	if len(data) < 12 {
+		return "", 0, false
+	}
+	name, off, err := dnsDomain(data, 12)
+	if err != nil {
+		return "", 0, false
+	}
+	if len(data) < off+4 {
+		return "", 0, false
+	}
+	if binary.BigEndian.Uint16(data[off+2:off+4]) != uint16(dnsmessage.ClassINET) {
+		return "", 0, false
+	}
+	return name, binary.BigEndian.Uint16(data[off : off+2]), true
+}
+
 func dnsRcode(data []byte) uint8 {
 	if len(data) < 4 {
 		return 0

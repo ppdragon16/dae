@@ -747,6 +747,29 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(writer, "Outbound '%s' not found\n", outbound)
 		}
+	case "lookup":
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET method required", http.StatusMethodNotAllowed)
+			return
+		}
+		if len(params) != 1 || params[0] == "" {
+			http.Error(w, "lookup requires 1 IP parameter: /lookup/<ip>", http.StatusBadRequest)
+			return
+		}
+		addr, err := netip.ParseAddr(params[0])
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid IP %q: %v", params[0], err), http.StatusBadRequest)
+			return
+		}
+		infos := c.dnsController.LookupDomainsByIP(addr)
+		if len(infos) == 0 {
+			http.Error(w, fmt.Sprintf("no domain found for IP %v", addr), http.StatusNotFound)
+			return
+		}
+		for _, info := range infos {
+			fmt.Fprintf(writer, "%s:\n", info.QName)
+			fmt.Fprintf(writer, "  ttl: %v\n", info.TTL)
+		}
 	case "static":
 		if len(params) == 0 {
 			// GET /static - list all static entries

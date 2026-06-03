@@ -171,6 +171,21 @@ func (c *TimeWheelCache[K, V]) GetWithKey(key K) (V, K, bool) {
 	return zeroV, key, false
 }
 
+// Range calls fn for each (key, value) currently in the cache.
+// Iteration order is unspecified. The cache's read lock is held for
+// the duration of iteration; fn must not call Save/SaveWithTTL on the
+// same cache (would deadlock). Returning false stops iteration early.
+// Safe for concurrent Get callers.
+func (c *TimeWheelCache[K, V]) Range(fn func(key K, value V) bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for k, e := range c.data {
+		if !fn(k, e.value) {
+			return
+		}
+	}
+}
+
 func (c *TimeWheelCache[K, V]) removeEntry(entry *twcEntry[K, V]) {
 	delete(c.data, entry.key)
 	if entry.prev != nil {
