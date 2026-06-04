@@ -108,6 +108,14 @@ func (g *DialerGroup) ReplaceDialers(
 
 	for j, newD := range newDialers {
 		if oldD, ok := oldByProperty[*newD.Property]; ok {
+			// If the recycled dialer is currently marked not-alive, its
+			// Latencies10 / MovingAverage are likely polluted with
+			// TimeoutPenalty samples from the previous down period. Drop
+			// them so the recovered node starts with a clean history on
+			// this side of the update-sub.
+			if !oldD.Alive() {
+				oldD.ResetLatency()
+			}
 			finalDialers = append(finalDialers, oldD)
 			finalAnnos = append(finalAnnos, newAnnotations[j])
 			oldKept[oldD] = true

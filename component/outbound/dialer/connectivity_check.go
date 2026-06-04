@@ -63,7 +63,7 @@ func parseIp46FromList(ip []string) (ip46 netutils.Ip46, err error) {
 	for _, ip := range ip {
 		addr, err := netip.ParseAddr(ip)
 		if err != nil {
-			return ip46, common.Wrap(err, "invalid ip address: %w", err)
+			return ip46, common.Wrap(err, "invalid ip address")
 		}
 		if addr.Is4() || addr.Is4In6() {
 			ip46.Ip4 = addr
@@ -463,6 +463,21 @@ func (d *Dialer) UnregisterDialerGroup(g DialerGroup) {
 	delete(d.registeredDialerGroups, g)
 	delete(d.Latencies10, g)
 	delete(d.MovingAverage, g)
+}
+
+// ResetLatency clears Latencies10 and MovingAverage for every DialerGroup this
+// dialer is currently registered in. It is intended for the update-sub recycle
+// path: when a dialer is reused across an update-sub and was previously
+// failing, accumulated TimeoutPenalty samples would otherwise keep dragging
+// the moving average up after the node recovers. Resets in place; the dialer's
+// ticker, alive state, and underlying connection are untouched.
+func (d *Dialer) ResetLatency() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for g := range d.registeredDialerGroups {
+		d.Latencies10[g] = NewLatenciesN(10)
+		d.MovingAverage[g] = 0
+	}
 }
 
 func (d *Dialer) NotifyStatusChange() {
