@@ -374,6 +374,7 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 		case <-done:
 			return
 		case <-d.checkCh:
+			didUpdate := false
 			for i := 0; i < RetryCount; i++ {
 				if i > 0 {
 					time.Sleep(RetryInterval)
@@ -386,9 +387,14 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 				}
 				ok, latency, err := d.Check(checkOpt)
 				d.Update(ok, latency, checkOpt.networkType, err)
+				didUpdate = true
 				if ok {
 					break
 				}
+			}
+			if !didUpdate {
+				d.Update(false, 0, checkOpt.networkType,
+					common.Errf("connect failed after %d retries", RetryCount))
 			}
 			// Cleanup channel to avoid consecutive checks.
 			select {
@@ -412,6 +418,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 			log.WithFields(log.Fields{
 				"node": d.Name,
 			}).Errorf("Failed to connect: %v", err)
+			d.Update(false, 0, nil, err)
 			return nil
 		}
 	}
