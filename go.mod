@@ -107,7 +107,7 @@ require (
 
 //replace github.com/daeuniverse/outbound => ../outbound
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-20260604121038-f7e55b912d54
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-20260606014524-13b2df77e665
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
