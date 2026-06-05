@@ -1217,6 +1217,7 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 	if !dst.IsValid() {
 		log.Errorf("Invalid dst from oob: %v, cap: %d", param.oobBuf, cap(param.oobBuf))
 		pool.PutBuffer(param.oobBuf)
+		pool.PutBuffer(param.buf)
 		return
 	}
 	dst = common.ConvergeAddrPort(dst)
