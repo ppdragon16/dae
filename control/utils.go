@@ -449,23 +449,6 @@ func Mac2String(mac []uint8) string {
 	return string(b)
 }
 
-func IsPrivateIP(ip net.IP) bool {
-	privateBlocks := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"fc00::/7",  // IPv6 ULA
-		"fe80::/10", // IPv6 link-local
-	}
-	for _, block := range privateBlocks {
-		_, cidr, _ := net.ParseCIDR(block)
-		if cidr.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
 func OutboundIndexByName(outbounds []*outbound.DialerGroup, name string) (consts.OutboundIndex, error) {
 	for i, o := range outbounds {
 		if o.Name == name {

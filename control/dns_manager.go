@@ -23,11 +23,6 @@ const (
 	dnsRetryCount    = 2
 )
 
-type LeveledError interface {
-	error
-	Level() log.Level
-}
-
 type leveledError struct {
 	err   error
 	level log.Level

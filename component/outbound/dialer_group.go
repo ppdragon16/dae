@@ -19,7 +19,6 @@ import (
 
 var ErrNoDialer = fmt.Errorf("no dialer")
 var ErrNoAliveDialer = fmt.Errorf("no alive dialer")
-var ErrFixedDialerNotAlive = fmt.Errorf("fixed dialer is not alive")
 
 type DialerGroup struct {
 	Name            string

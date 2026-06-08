@@ -442,13 +442,6 @@ Dial:
 		upstream = nextUpstream
 		reqMsg.CopyTo(dnsMessage)
 	}
-	// TODO: dial_mode: domain 的逻辑失效问题
-	// TODO: 我们现在缓存了它, 但并不响应缓存, 这是一个workround, 会导致污染其他非AsIs的查询
-	// TODO: AsIs也需要更新domain_routing_map? 不然没有办法sniff, 并且考虑到有些应用会使用不同的DNS, 必须对全部 upstream 更新
-	// TODO: RemoveCache
-	// TODO: 不再存储Bitmap, 提高更新代码可读性
-	// 但在有bump_map的情况下这不是大问题
-	// TOOD: 细分日志
 	switch {
 	case !dnsMessage.Response,
 		len(dnsMessage.Answer) == 0,
@@ -456,7 +449,6 @@ Dial:
 		dnsMessage.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
 		return nil
 	}
-
 	if isNew {
 		domainBitmap := common.ObtainDomainBitmap()
 		defer common.RecycleDomainBitmap(domainBitmap)

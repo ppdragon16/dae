@@ -132,5 +132,5 @@ func Wrap(err error, format string, args ...any) error {
 	fmt.Fprintf(&b, format, args...)
 	b.WriteString(": ")
 	b.WriteString(err.Error())
-	return fmt.Errorf(b.String())
+	return fmt.Errorf("%s", b.String())
 }
