@@ -104,7 +104,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	// No need sniffer for tcp://8.8.8.8:53.
 	sniffedDomain := ""
 	lConnRelay := lConn
-	if dstTcpAddr.Port != 53 && c.sniffingTimeout > 0 {
+	if c.sniffingTimeout > 0 {
 		sniffingTimeout := c.sniffingTimeout
 		if dstTcpAddr.Port == 80 || dstTcpAddr.Port == 443 {
 			sniffingTimeout = 2 * sniffingTimeout
@@ -243,12 +243,7 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	return nil
 }
 
-type relayResult struct {
-	err       error
-	direction bool // true for lConn->rConn, false for rConn->lConn
-}
-
-func relayDirection(dst, src net.Conn, direction bool) error {
+func relayDirection(dst, src net.Conn) error {
 	// As `io.Copy` uses a 32KB buffer.
 	// See https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/io/io.go;l=419
 	// Uses a smaller buffer for less memory blooming. And 2K is enough for tcp dns.
@@ -304,14 +299,14 @@ func RelayTCP(lConn, rConn net.Conn) error {
 		wg       sync.WaitGroup
 	)
 	wg.Go(func() {
-		e := relayDirection(lConn, rConn, false) // rConn -> lConn
+		e := relayDirection(lConn, rConn) // rConn -> lConn
 		if e != nil {
 			if atomic.CompareAndSwapInt32(&errState, 0, 1) {
 				r2lErr = e
 			}
 		}
 	})
-	e := relayDirection(rConn, lConn, true) // lConn -> rConn
+	e := relayDirection(rConn, lConn) // lConn -> rConn
 	if e != nil {
 		if atomic.CompareAndSwapInt32(&errState, 0, 2) {
 			l2rErr = e

@@ -453,9 +453,9 @@ func NewControlPlane(
 		soMarkFromDae:          global.SoMarkFromDae,
 		trafficLogger:          trafficLogger,
 
-		dnsRouteCache:          common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil),
-		dnsRoutingResultCache:  common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
-		udpTaskPool:            NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
+		dnsRouteCache:         common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil),
+		dnsRoutingResultCache: common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
+		udpTaskPool:           NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 	}
 	plane.inuseDialers = inuseDialers
 	if err := plane.rebuildOutboundRedirects(groups); err != nil {
@@ -518,9 +518,6 @@ func NewControlPlane(
 		return nil, err
 	}
 	plane.deferFuncs = append(deferFuncs, plane.dnsController.Close)
-	// TODO: 保留 LookupCache?
-	// TODO: 在 DNS Config 不变的情况下，保留 DNSCache
-	// Lookup Cache 存储任何 lookup 所产生的记录, 这些记录是否需要GC?
 	// 规则改变不会使得记录失效, 因为程序仍会访问那个域名, 但我们需要保留记录的条目以便 GC
 	if _bpf != nil {
 		var key [4]uint32

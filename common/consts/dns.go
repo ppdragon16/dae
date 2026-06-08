@@ -21,8 +21,6 @@ const (
 	DnsRequestOutboundIndex_LogicalAnd  DnsRequestOutboundIndex = 0xFF
 	DnsRequestOutboundIndex_LogicalMask DnsRequestOutboundIndex = 0xFE
 
-	DnsRequestOutboundIndex_UserDefinedMax = DnsRequestOutboundIndex_Reject - 1
-
 	DefaultDNSRetryInterval = 5 * time.Second
 	DefaultDNSRetryCount    = 3
 	DefaultDNSTimeout       = DefaultDNSRetryInterval * DefaultDNSRetryCount
@@ -53,8 +51,6 @@ const (
 	DnsResponseOutboundIndex_LogicalOr   DnsResponseOutboundIndex = 0xFE
 	DnsResponseOutboundIndex_LogicalAnd  DnsResponseOutboundIndex = 0xFF
 	DnsResponseOutboundIndex_LogicalMask DnsResponseOutboundIndex = 0xFE
-
-	DnsResponseOutboundIndex_UserDefinedMax = DnsResponseOutboundIndex_Accept - 1
 )
 
 func (i DnsResponseOutboundIndex) String() string {

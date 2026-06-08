@@ -20,13 +20,6 @@ const (
 	maxJumpCount = 10 // 限制跳转次数，防止死循环
 )
 
-type RRInfo struct {
-	Type      uint16
-	RROffset  uint16 // 整个 RR 记录的起始位置（Name 之后，Type 开始的位置）
-	TTLOffset uint16 // TTL 字段的起始位置
-	TTL       uint32 // 原始 TTL
-}
-
 type RscWrapper struct {
 	Rsc dnsmessage.RR
 }
