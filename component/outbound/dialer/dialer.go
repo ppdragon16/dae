@@ -53,8 +53,10 @@ type Dialer struct {
 
 	checkActivated bool
 
-	// activeConns tracks connections created by this dialer for aborting when
-	// the dialer is marked as not alive.
+	// activeConns maps rConn -> lConn for every connection pair created
+	// by this dialer. AbortConns uses this to close BOTH ends of the relay
+	// when the dialer transitions alive -> not alive, so a relay goroutine
+	// stuck in Write(lConn) or Read(lConn) actually gets unblocked.
 	activeConns   sync.Map
 	activeConnsMu sync.Mutex
 }
@@ -140,25 +142,47 @@ func (d *Dialer) Close() error {
 	return d.Dialer.Disconnect()
 }
 
-// RegisterConn registers a connection created by this dialer.
-func (d *Dialer) RegisterConn(conn net.Conn) {
+// RegisterConn registers a connection created by this dialer. lConn is the
+// local-side conn that the relay in control/tcp.go will use to push data to
+// the client; rConn is the upstream-side conn returned by DialContext. We
+// keep the lConn alongside the rConn so AbortConns can close BOTH sides of
+// the relay, which is required to break out of a relay goroutine stuck in a
+// blocking Write(lConn) or Read(lConn) that rConn close alone cannot reach
+// (and which would otherwise leave dae_active_connections pinned for the
+// duration of DefaultTCPIdleTimeout, or until the client happens to close).
+func (d *Dialer) RegisterConn(lConn, rConn net.Conn) {
 	d.activeConnsMu.Lock()
 	defer d.activeConnsMu.Unlock()
-	d.activeConns.Store(conn, struct{}{})
+	d.activeConns.Store(rConn, lConn)
 }
 
 // UnregisterConn unregisters a connection from this dialer.
-func (d *Dialer) UnregisterConn(conn net.Conn) {
+func (d *Dialer) UnregisterConn(rConn net.Conn) {
 	d.activeConnsMu.Lock()
 	defer d.activeConnsMu.Unlock()
-	d.activeConns.Delete(conn)
+	d.activeConns.Delete(rConn)
 }
 
-// AbortIfNotAlive closes all connections if the dialer is marked as not alive.
+// AbortConns closes every registered connection pair (lConn + rConn) and
+// empties the registry. Closing lConn FIRST is important: if a relay
+// goroutine is stuck in Write(lConn) (because the client stopped reading
+// and the local kernel send buffer is full), the rConn close from
+// QStream.CancelRead/Close only unblocks reads on rConn — it does NOT
+// unblock the Write(lConn) call. Closing lConn forces the Write to return
+// with a "use of closed network connection" error, which is the only thing
+// that lets the relay goroutine actually exit and run its defers
+// (activeConnectionsCounter.Dec, UnregisterConn, rLogConn.Close).
 func (d *Dialer) AbortConns() {
 	d.activeConnsMu.Lock()
 	defer d.activeConnsMu.Unlock()
-	d.activeConns.Range(func(key, _ any) bool {
+	d.activeConns.Range(func(key, value any) bool {
+		// Close the local side first so a goroutine parked in
+		// Write(lConn) or Read(lConn) gets unblocked; then close
+		// the upstream side to also unblock the opposite relay
+		// direction.
+		if value != nil {
+			value.(net.Conn).Close()
+		}
 		key.(net.Conn).Close()
 		return true
 	})
