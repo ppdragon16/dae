@@ -205,10 +205,35 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		return nil
 	}
 
-	// Register rConn to the dialer so that it can be closed when the dialer
-	// is marked as not alive during connectivity check.
-	dialOption.Dialer.RegisterConn(rConn)
+	// Register the (lConnRelay, rConn) pair so that AbortConns can close
+	// BOTH sides of the relay when the dialer transitions alive -> not
+	// alive. Closing lConn is what unblocks a relay goroutine stuck in a
+	// blocking Write(lConn); rConn close alone can't reach it.
+	dialOption.Dialer.RegisterConn(lConnRelay, rConn)
 	defer dialOption.Dialer.UnregisterConn(rConn)
+
+	// Defensive: if the dialer flipped to not-alive between Select() and
+	// RegisterConn, don't leave a "zombie" conn in the registry that would
+	// only get cleaned up by the next AbortConns cycle. Bail immediately
+	// instead. The defers above will still unregister rConn; we skip the
+	// Inc/Dec pair entirely because the relay never actually started.
+	// We also have to close lConnRelay ourselves here: the normal path
+	// closes it via `defer rLogConn.Close()` (which is registered further
+	// down), but that defer doesn't exist yet at this point in the flow,
+	// so without an explicit Close the local socket would leak until GC
+	// (and the client side would never see the close).
+	//
+	// Return a wrapped error rather than nil so this race is observable
+	// in the log: the connection died for a known reason (dialer went
+	// away), not because of an upstream/network failure. We do NOT bump
+	// ErrorCount or call ReportUnavailable — the connectivity check
+	// already did both when the dialer transitioned alive -> not-alive.
+	if dialOption.Dialer.NeedAliveState() && !dialOption.Dialer.Alive() {
+		rConn.Close()
+		lConnRelay.Close()
+		return common.Errf("conn discarded due to dialer %q (outbound=%q) became not-alive",
+			dialOption.Dialer.Name, dialOption.Outbound.Name)
+	}
 
 	activeConnectionsCounter := common.Metrics.ActiveConnections.With4(labels)
 	activeConnectionsCounter.Inc()
