@@ -139,6 +139,10 @@ func (d *Dialer) stopCheck() {
 
 func (d *Dialer) Close() error {
 	d.stopCheck()
+	// AbortConns first: this dialer is going away (e.g. dialer removed from
+	// config via update-sub, or the daemon is shutting down), so every
+	// relay using it must exit.
+	d.AbortConns()
 	return d.Dialer.Disconnect()
 }
 

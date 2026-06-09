@@ -29,7 +29,25 @@ import (
 )
 
 const (
+	// DefaultTCPIdleTimeout bounds the Read deadline: if neither side
+	// produces data for this long, the relay considers the connection
+	// idle and tears it down. 60 min is conservative — it must be
+	// long enough to never trip on legitimate long-lived sockets
+	// (push-notification keep-alives, video streams, etc.).
 	DefaultTCPIdleTimeout = 60 * time.Minute
+
+	// DefaultTCPWriteTimeout bounds the Write deadline: if a single
+	// dst.Write call doesn't return within this window, the relay
+	// gives up on the connection. Unlike Read, this is about
+	// FAILURE DETECTION, not idle cleanup. The motivation is the
+	// g2 (upload) direction, where dst.Write targets a hy2 QUIC
+	// stream: when the upstream link dies, quic-go's framer can sit
+	// on the send queue flushing the STREAM + FIN + CONNECTION_CLOSE
+	// frames for many minutes because every send fails and
+	// MaxIdleTimeout is fooled by the activity. Without a Write
+	// deadline, the relay goroutine never exits, handleConn never
+	// returns, and dae_active_connections stays pinned.
+	DefaultTCPWriteTimeout = 8 * time.Second
 )
 
 func (c *ControlPlane) handleTcpDns(
@@ -280,6 +298,7 @@ func relayDirection(dst, src net.Conn) error {
 		buf := pool.GetBuffer(bufSize)
 		n, rerr := src.Read(buf)
 		if n > 0 {
+			dst.SetWriteDeadline(time.Now().Add(DefaultTCPWriteTimeout))
 			_, werr := dst.Write(buf[:n])
 			pool.PutBuffer(buf)
 			if werr != nil {
