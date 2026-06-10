@@ -20,6 +20,11 @@ import (
 const (
 	dnsRetryInterval = 1 * time.Second
 	dnsRetryCount    = 2
+
+	// defaultDNSAttemptDeadline bounds a single DNS attempt's write
+	// AND read against the upstream. Note: writing the underlying quic
+	// stream could got stuck on not alive dialer's connection.
+	defaultDNSAttemptDeadline = 2 * time.Second
 )
 
 type leveledError struct {
@@ -291,9 +296,11 @@ func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
 	}()
 
 	for range dnsRetryCount {
+		m.conn.SetWriteDeadline(time.Now().Add(defaultDNSAttemptDeadline))
 		if err := writeData(m.conn, data, m.stream); err != nil {
 			return nil, err
 		}
+		m.conn.SetReadDeadline(time.Now().Add(defaultDNSAttemptDeadline))
 		if timer == nil {
 			timer = resolveTimerPool.Get().(*time.Timer)
 		}
