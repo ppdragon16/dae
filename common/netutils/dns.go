@@ -27,6 +27,12 @@ import (
 	dnsmessage "github.com/miekg/dns"
 )
 
+const (
+	resolveTcpTimeout       = 5 * time.Second
+	resolveUdpRetryInterval = 2 * time.Second
+	resolveUdpRetryCount    = 3
+)
+
 var (
 	ErrBadDnsAns  = fmt.Errorf("bad dns answer")
 	ErrNoIpRecord = fmt.Errorf("no ip record found")
@@ -71,7 +77,7 @@ type deadlineStream interface {
 
 func ResolveStream(stream io.ReadWriter, data []byte, quic bool, respBuf []byte) ([]byte, error) {
 	if d, ok := stream.(deadlineStream); ok {
-		deadline := time.Now().Add(consts.DefaultDNSTimeout)
+		deadline := time.Now().Add(resolveTcpTimeout)
 		d.SetReadDeadline(deadline)
 		d.SetWriteDeadline(deadline)
 	} else {
@@ -120,7 +126,7 @@ func readResolveStream(stream io.ReadWriter, lenBuf []byte, respBuf []byte) (res
 }
 
 func ResolveUDP(conn net.Conn, data []byte, respBuf []byte) (resp []byte, err error) {
-	deadline := time.Now().Add(consts.DefaultDNSTimeout)
+	deadline := time.Now().Add(resolveUdpRetryInterval * resolveUdpRetryCount)
 	conn.SetReadDeadline(deadline)
 
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -135,10 +141,10 @@ func ResolveUDP(conn net.Conn, data []byte, respBuf []byte) (resp []byte, err er
 		recvCh <- rErr
 	}()
 
-	ticker := time.NewTicker(consts.DefaultDNSRetryInterval)
+	ticker := time.NewTicker(resolveUdpRetryInterval)
 	defer ticker.Stop()
 
-	for i := 0; i < consts.DefaultDNSRetryCount; i++ {
+	for i := 0; i < resolveUdpRetryCount; i++ {
 		_, err = conn.Write(data)
 		if err != nil {
 			return nil, common.Wrap(err, "udp write error")

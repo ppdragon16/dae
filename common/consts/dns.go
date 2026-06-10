@@ -8,7 +8,6 @@ package consts
 import (
 	"strconv"
 	"strings"
-	"time"
 )
 
 type DnsRequestOutboundIndex int16
@@ -20,10 +19,6 @@ const (
 	DnsRequestOutboundIndex_LogicalOr   DnsRequestOutboundIndex = 0xFE
 	DnsRequestOutboundIndex_LogicalAnd  DnsRequestOutboundIndex = 0xFF
 	DnsRequestOutboundIndex_LogicalMask DnsRequestOutboundIndex = 0xFE
-
-	DefaultDNSRetryInterval = 5 * time.Second
-	DefaultDNSRetryCount    = 3
-	DefaultDNSTimeout       = DefaultDNSRetryInterval * DefaultDNSRetryCount
 )
 
 func (i DnsRequestOutboundIndex) String() string {
