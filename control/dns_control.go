@@ -322,8 +322,8 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	}
 	dataToWrite := dnsResp.respData
 	if err != nil {
-		netErr, ok := IsNetError(err)
-		if !ok || !netErr.Temporary() {
+		isNetError, _, _, isTemporary := GetNetErrorInfo(err)
+		if !isNetError || !isTemporary {
 			log.Errorf("%+v", err)
 		}
 		dataToWrite = data
@@ -416,21 +416,21 @@ Dial:
 
 		// TODO: 这里可能不可以这样做
 		if err = c.dialSend(data, upstream, dialArgument, queryInfo, dnsResp); err != nil {
-			netErr, ok := IsNetError(err)
-			if !ok || !dnsResponse(dnsResp.respData) || (!netErr.Timeout() && dialArgument.Dialer.NeedAliveState()) {
+			isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
+			if !isNetError || isClosed || !dnsResponse(dnsResp.respData) || (!isTimeout && dialArgument.Dialer.NeedAliveState()) {
 				err = common.
 					In("DialContext").
-					With("Is NetError", ok).
-					With("Is Temporary", ok && netErr.Temporary()).
-					With("Is Timeout", ok && netErr.Timeout()).
+					With("Is NetError", isNetError).
+					With("Is Temporary", isTemporary).
+					With("Is Timeout", isTimeout).
 					With("qname", queryInfo.qname).
 					With("qtype", queryInfo.qtype).
 					With("Outbound", dialArgument.Outbound.Name).
 					With("Dialer", dialArgument.Dialer.Name).
 					Wrapf(err, "DNS dialSend error")
-				if !ok || !dnsResponse(dnsResp.respData) {
+				if !isNetError || isClosed || !dnsResponse(dnsResp.respData) {
 					return err
-				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
+				} else if !isTimeout && dialArgument.Dialer.NeedAliveState() {
 					labels := [...]string{
 						dialArgument.Outbound.Name,
 						dialArgument.Dialer.Property.SubscriptionTag,

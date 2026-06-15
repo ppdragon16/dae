@@ -143,8 +143,8 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 			}
 			// In case of lConn timeout, we continue relaying for remote-first tcp conversation (e.g. ftp, smtp, etc.).
 			// For other network errors, we stop relaying without logging the errors.
-			if netErr, ok := IsNetError(err); ok {
-				if !netErr.Timeout() {
+			if isNetError, _, isTimeout, _ := GetNetErrorInfo(err); isNetError {
+				if !isTimeout {
 					return nil
 				}
 				if log.IsLevelEnabled(log.InfoLevel) {
@@ -184,26 +184,29 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		// TODO: Control Plane Routing?
 		// TODO: 哪些错误说明节点不工作或GFW在工作?
 		// TCP: Connection Reset / Connection Refused
-		netErr, ok := IsNetError(err)
-		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
+		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
+		if isClosed {
+			return nil
+		}
+		if !isNetError || (!isTimeout && dialOption.Dialer.NeedAliveState()) {
 			err = common.
 				In("DialContext").
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
+				With("Is NetError", isNetError).
+				With("Is Temporary", isTemporary).
+				With("Is Timeout", isTimeout).
 				With("Outbound", dialOption.Outbound.Name).
 				With("Dialer", dialOption.Dialer.Name).
 				With("src", src.String()).
 				With("dst", dst.String()).
 				With("domain", sniffedDomain).
 				Wrapf(err, "failed to DialContext")
-			if !ok {
-				return err
-			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
-				common.Metrics.ErrorCount.With4(labels).Inc()
-				dialOption.Dialer.ReportUnavailable()
+			if !isNetError {
 				return err
 			}
+			// Must be !isTimeout && dialOption.Dialer.NeedAliveState()
+			common.Metrics.ErrorCount.With4(labels).Inc()
+			dialOption.Dialer.ReportUnavailable()
+			return err
 		}
 		return nil
 	}
@@ -255,26 +258,29 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 
 	// Relay
 	if err := RelayTCP(lConnRelay, rLogConn); err != nil {
-		netErr, ok := IsNetError(err)
-		if !ok || (!netErr.Timeout() && dialOption.Dialer.NeedAliveState()) {
+		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
+		if isClosed {
+			return nil
+		}
+		if !isNetError || (!isTimeout && dialOption.Dialer.NeedAliveState()) {
 			err = common.
 				In("RelayTCP").
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
+				With("Is NetError", isNetError).
+				With("Is Temporary", isTemporary).
+				With("Is Timeout", isTimeout).
 				With("Outbound", dialOption.Outbound.Name).
 				With("Dialer", dialOption.Dialer.Name).
 				With("src", src.String()).
 				With("dst", dst.String()).
 				With("domain", sniffedDomain).
 				Wrapf(err, "failed to RelayTCP")
-			if !ok {
-				return err
-			} else if !netErr.Timeout() && dialOption.Dialer.NeedAliveState() {
-				common.Metrics.ErrorCount.With4(labels).Inc()
-				dialOption.Dialer.ReportUnavailable()
+			if !isNetError {
 				return err
 			}
+			// Must be !isTimeout && dialOption.Dialer.NeedAliveState()
+			common.Metrics.ErrorCount.With4(labels).Inc()
+			dialOption.Dialer.ReportUnavailable()
+			return err
 		}
 	}
 	// case strings.HasSuffix(err.Error(), "write: broken pipe"),
@@ -302,7 +308,11 @@ func relayDirection(dst, src net.Conn) error {
 			_, werr := dst.Write(buf[:n])
 			pool.PutBuffer(buf)
 			if werr != nil {
-				err = werr
+				if errors.Is(werr, net.ErrClosed) {
+					err = nil
+				} else {
+					err = werr
+				}
 				break
 			}
 			bufSize = min(n*2, maxBufSize)
@@ -310,10 +320,12 @@ func relayDirection(dst, src net.Conn) error {
 			pool.PutBuffer(buf)
 		}
 		if rerr != nil {
-			// Timeout / EOF is normal.
+			// Timeout / EOF / Closed is normal.
 			if netErr, ok := rerr.(net.Error); ok && netErr.Timeout() {
 				err = nil
 			} else if rerr == io.EOF {
+				err = nil
+			} else if errors.Is(rerr, net.ErrClosed) {
 				err = nil
 			} else {
 				err = rerr
