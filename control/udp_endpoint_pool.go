@@ -101,18 +101,21 @@ func (ue *UdpEndpoint) run() {
 	DefaultAnyfromPool.Recycle(ue.Dst, ue.af)
 	DefaultUdpEndpointPool.Remove(ue.UdpEndpointKey)
 	if err != nil {
-		netErr, ok := IsNetError(err)
-		if !ok || (!netErr.Timeout() && ue.dialer.NeedAliveState()) {
+		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
+		if !isNetError || isClosed || (!isTimeout && ue.dialer.NeedAliveState()) {
 			err = common.
 				In("UdpEndpoint r -> l relay").
-				With("Is NetError", ok).
-				With("Is Temporary", ok && netErr.Temporary()).
-				With("Is Timeout", ok && netErr.Timeout()).
+				With("Is NetError", isNetError).
+				With("Is Temporary", isTemporary).
+				With("Is Timeout", isTimeout).
 				With("Dialer", ue.dialer.Name).
 				Wrap(err)
-			if !ok {
+			if !isNetError {
 				log.Warnf("%+v", err)
-			} else if !netErr.Timeout() && ue.dialer.NeedAliveState() {
+			} else if isClosed {
+				// Endpoint was closed locally; normal termination.
+				log.Debugf("%+v", err)
+			} else if !isTimeout && ue.dialer.NeedAliveState() {
 				common.Metrics.ErrorCount.With4(ue.labels).Inc()
 				ue.dialer.ReportUnavailable()
 				log.Warnf("%+v", err)

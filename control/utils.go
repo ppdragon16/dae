@@ -47,9 +47,18 @@ func RecycleDialOption(option *DialOption) {
 	dialOptionPool.Put(option)
 }
 
-func IsNetError(err error) (netErr net.Error, ok bool) {
-	ok = errors.As(err, &netErr)
-	return
+// GetNetErrorInfo decomposes an error into orthogonal net.Error properties.
+// isNetError:  true if err implements net.Error.
+// isClosed:    true if err wraps net.ErrClosed ("use of closed network connection").
+// isTimeout:   true if netErr.Timeout().
+// isTemporary: true if netErr.Temporary().
+// All fields are false when isNetError is false.
+func GetNetErrorInfo(err error) (isNetError bool, isClosed bool, isTimeout bool, isTemporary bool) {
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		return false, false, false, false
+	}
+	return true, errors.Is(err, net.ErrClosed), netErr.Timeout(), netErr.Temporary()
 }
 
 func (c *ControlPlane) RouteDialOption(

@@ -282,8 +282,8 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 		err = c.handleDNSRequest(dnsMessage, req, queryInfo)
 	}
 	if err != nil {
-		netErr, ok := IsNetError(err)
-		if !ok || !netErr.Temporary() {
+		isNetError, _, _, isTemporary := GetNetErrorInfo(err)
+		if !isNetError || !isTemporary {
 			log.Warningf("%+v", err)
 		}
 		dnsMessage.Rcode = dnsmessage.RcodeServerFailure
@@ -381,21 +381,21 @@ Dial:
 		// TODO: 这里可能不可以这样做
 		isNew, err = c.dialSend(dnsMessage, upstream, dialArgument, queryInfo)
 		if err != nil {
-			netErr, ok := IsNetError(err)
-			if !ok || !dnsMessage.Response || (!netErr.Timeout() && dialArgument.Dialer.NeedAliveState()) {
+			isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
+			if !isNetError || isClosed || !dnsMessage.Response || (!isTimeout && dialArgument.Dialer.NeedAliveState()) {
 				err = common.
 					In("DialContext").
-					With("Is NetError", ok).
-					With("Is Temporary", ok && netErr.Temporary()).
-					With("Is Timeout", ok && netErr.Timeout()).
+					With("Is NetError", isNetError).
+					With("Is Temporary", isTemporary).
+					With("Is Timeout", isTimeout).
 					With("qname", queryInfo.qname).
 					With("qtype", queryInfo.qtype).
 					With("Outbound", dialArgument.Outbound.Name).
 					With("Dialer", dialArgument.Dialer.Name).
 					Wrapf(err, "DNS dialSend error")
-				if !ok || !dnsMessage.Response {
+				if !isNetError || isClosed || !dnsMessage.Response {
 					return err
-				} else if !netErr.Timeout() && dialArgument.Dialer.NeedAliveState() {
+				} else if !isTimeout && dialArgument.Dialer.NeedAliveState() {
 					labels := [...]string{
 						dialArgument.Outbound.Name,
 						dialArgument.Dialer.Property.SubscriptionTag,
