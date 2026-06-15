@@ -259,6 +259,13 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 			RefineSourceToShow(req.Src, req.Dst.Addr()), req.Dst.String(), queryInfo.qname, queryInfo.qtype)
 	}
 
+	// qname is empty when dnsQuestion failed to parse the question section
+	// (malformed packet, non-INET class, etc.). Return false so the data
+	// falls through to regular UDP routing.
+	if queryInfo.qname == "" {
+		return false
+	}
+
 	id := dnsId(data)
 	// Avoids duplicated id from clients, so make the id unique.
 	dnsIdSet(data, uint16(fastrand.Intn(math.MaxUint16)))
@@ -295,6 +302,7 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 					if dnsResp2.respData != nil && dnsResp2.fromPool {
 						pool.PutBuffer(dnsResp2.respData)
 					}
+					*dnsResp2 = dnsResponseData{}
 					dnsResponseDataPool.Put(dnsResp2)
 				}()
 				copy(data2, data)
