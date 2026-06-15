@@ -243,6 +243,14 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	}
 
 	queryInfo := c.prepareQueryInfo(dnsMessage)
+
+	// qname is empty when dnsQuestion failed to parse the question section
+	// (malformed packet, non-INET class, etc.). Return false so the data
+	// falls through to regular UDP routing.
+	if queryInfo.qname == "" {
+		return
+	}
+
 	id := dnsMessage.Id
 	// Avoids duplicated id from clients, so make the id unique.
 	dnsMessage.Id = uint16(fastrand.Intn(math.MaxUint16))

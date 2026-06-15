@@ -220,12 +220,11 @@ func (m *ResponseMatcher) Match(
 	ips []netip.Addr,
 	upstream consts.DnsRequestOutboundIndex,
 ) (upstreamIndex consts.DnsResponseOutboundIndex, err error) {
-	if qName == "" {
-		return 0, fmt.Errorf("qName cannot be empty")
-	}
 	domainMatchBitmap := common.ObtainDomainBitmap()
 	defer common.RecycleDomainBitmap(domainMatchBitmap)
-	m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap)
+	if qName != "" {
+		m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap)
+	}
 	bin128 := make([]string, 0, len(ips))
 	for _, ip := range ips {
 		bin128 = append(bin128, trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(ip.As16()), 128)))

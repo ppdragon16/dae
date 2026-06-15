@@ -387,8 +387,12 @@ func RelayTCP(lConn, rConn net.Conn) error {
 
 	switch atomic.LoadInt32(&errState) {
 	case 1: // r -> l
+		errMsg := r2lErr.Error()
 		switch {
-		case strings.Contains(r2lErr.Error(), "write:"): // lConn Write
+		case strings.Contains(errMsg, "write:"): // lConn Write
+			return nil
+		case strings.HasSuffix(errMsg, "canceled by local with error code 0"),
+			strings.HasSuffix(errMsg, "canceled by remote with error code 0"):
 			return nil
 		default:
 			return common.In("rConn -> lConn Relay").Wrap(r2lErr)
