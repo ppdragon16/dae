@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/daeuniverse/dae/common"
@@ -209,6 +210,14 @@ func NewTrafficLogConn(conn net.Conn, counter *common.Series, onTraffic func(dir
 		Conn:      conn,
 		counter:   counter,
 	}
+}
+
+func (tc *TrafficLogConn) CloseWrite() error {
+	if cw, ok := tc.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	// Keep the same logic as in ControlPlane.relayDirection.
+	return tc.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 }
 
 func (tc *TrafficLogConn) Read(p []byte) (int, error) {
