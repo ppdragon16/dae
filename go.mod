@@ -98,7 +98,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mzz2017/disk-bloom v1.0.1 // indirect
 	github.com/onsi/ginkgo v1.16.5 // indirect
-	github.com/refraction-networking/utls v1.8.1 // indirect
+	github.com/refraction-networking/utls v1.8.2
 	github.com/spf13/pflag v1.0.10 // indirect
 	gitlab.com/yawning/chacha20.git v0.0.0-20230427033715-7877545b1b37 // indirect
 	golang.org/x/term v0.37.0 // indirect
@@ -107,11 +107,15 @@ require (
 
 //replace github.com/daeuniverse/outbound => ../outbound
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-20260619060343-0fdca422c365
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
 replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-20260518041944-35a749a3e540
+
+//replace github.com/refraction-networking/utls => ../utls_ppdn
+
+replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled
 
 //replace github.com/cilium/ebpf => /home/mzz/goProjects/ebpf
 //replace github.com/daeuniverse/dae-config-dist/go/dae_config => /home/mzz/antlrProjects/dae-config/build/go/dae_config
