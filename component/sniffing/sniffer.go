@@ -6,7 +6,6 @@
 package sniffing
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +25,7 @@ type Sniffer struct {
 
 	// Common
 	sniffed string
-	buf     *bytes.Buffer
+	buf     *pool.PooledBuffer
 
 	// Packet
 	data         [][]byte
@@ -36,7 +35,7 @@ type Sniffer struct {
 }
 
 func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
-	buffer := pool.GetBytesBuffer()
+	buffer := pool.NewPooledBuffer()
 	buffer.Grow(AssumedTlsClientHelloMaxLength)
 	buffer.Reset()
 	s := &Sniffer{
@@ -47,7 +46,7 @@ func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
 }
 
 func NewPacketSniffer(data []byte, timeout time.Duration) *Sniffer {
-	buffer := pool.GetBytesBuffer()
+	buffer := pool.NewPooledBuffer()
 	buffer.Write(data)
 	s := &Sniffer{
 		r:    nil,
@@ -168,7 +167,7 @@ func (s *Sniffer) Read(p []byte) (n int, err error) {
 		if s.buf.Len() > 0 {
 			return s.buf.Read(p)
 		}
-		pool.PutBytesBuffer(s.buf)
+		s.buf.Reset()
 		s.buf = nil
 	}
 
@@ -185,7 +184,7 @@ func (s *Sniffer) Close() (err error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 	if s.buf != nil {
-		pool.PutBytesBuffer(s.buf)
+		s.buf.Reset()
 		s.buf = nil
 	}
 	return nil

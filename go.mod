@@ -79,6 +79,7 @@ require (
 	golang.org/x/tools v0.39.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251124214823-79d6a2a48846 // indirect
 	google.golang.org/grpc v1.77.0 // indirect
+	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
@@ -105,9 +106,9 @@ require (
 	golang.org/x/text v0.31.0 // indirect
 )
 
-//replace github.com/daeuniverse/outbound => ../outbound
+//replace github.com/daeuniverse/outbound => ../outbound_ppdn
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.4
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
@@ -115,7 +116,7 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-2
 
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
-replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled
+replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.3
 
 //replace github.com/cilium/ebpf => /home/mzz/goProjects/ebpf
 //replace github.com/daeuniverse/dae-config-dist/go/dae_config => /home/mzz/antlrProjects/dae-config/build/go/dae_config

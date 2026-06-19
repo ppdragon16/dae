@@ -562,5 +562,6 @@ func emptyConfig() (conf *config.Config, err error) {
 
 func init() {
 	utls.SetBufferPool(pool.GetBuffer, pool.PutBuffer)
+	utls.NewBytesBufferFunc = func() utls.BytesBuffer { return pool.NewPooledBuffer() }
 	rootCmd.AddCommand(runCmd)
 }
