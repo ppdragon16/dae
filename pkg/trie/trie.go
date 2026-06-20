@@ -105,7 +105,7 @@ func Prefix2bin128(prefix netip.Prefix) (bin128 string) {
 		n += 96
 	}
 	ip := prefix.Addr().As16()
-	buf := pool.NewPooledBuffer()
+	buf := pool.PooledBuffer{}
 	defer buf.Reset()
 loop:
 	for i := 0; i < len(ip); i++ {
