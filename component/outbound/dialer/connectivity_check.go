@@ -648,9 +648,9 @@ func (d *Dialer) HttpCheck(u *netutils.URL, ip netip.Addr, method string, networ
 		if strconv.Itoa(resp.StatusCode) != strings.TrimPrefix(page, "generate_") {
 			b, _ := io.ReadAll(resp.Body)
 			if log.IsLevelEnabled(log.DebugLevel) {
-				buf := pool.NewPooledBuffer()
+				buf := pool.PooledBuffer{}
 				defer buf.Reset()
-				_ = resp.Request.Write(buf)
+				_ = resp.Request.Write(&buf)
 				log.Debugln(buf.String(), "Resp: ", string(b))
 			}
 			return false, fmt.Errorf("unexpected status code: %v", resp.StatusCode)

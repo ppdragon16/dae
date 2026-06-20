@@ -37,7 +37,6 @@ type Sniffer struct {
 func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
 	buffer := pool.NewPooledBuffer()
 	buffer.Grow(AssumedTlsClientHelloMaxLength)
-	buffer.Reset()
 	s := &Sniffer{
 		r:   r,
 		buf: buffer,
