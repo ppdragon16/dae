@@ -317,8 +317,8 @@ func NewGcm(key []byte) (cipher.AEAD, error) {
 
 // Htons converts the unsigned short integer hostshort from host byte order to network byte order.
 func Htons(i uint16) uint16 {
-	b := make([]byte, 2)
-	binary.BigEndian.PutUint16(b, i)
+	var b [2]byte
+	binary.BigEndian.PutUint16(b[:], i)
 	return *(*uint16)(unsafe.Pointer(&b[0]))
 }
 

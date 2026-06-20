@@ -11,15 +11,15 @@ import (
 )
 
 func Htons(x uint16) uint16 {
-	data := make([]byte, 2)
-	nativeEndian.PutUint16(data, x)
-	return binary.BigEndian.Uint16(data)
+	var data [2]byte
+	nativeEndian.PutUint16(data[:], x)
+	return binary.BigEndian.Uint16(data[:])
 }
 
 func Ntohs(x uint16) uint16 {
-	data := make([]byte, 2)
-	binary.BigEndian.PutUint16(data, x)
-	return nativeEndian.Uint16(data)
+	var data [2]byte
+	binary.BigEndian.PutUint16(data[:], x)
+	return nativeEndian.Uint16(data[:])
 }
 
 func TrimNull(s string) string {
