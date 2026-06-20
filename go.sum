@@ -186,12 +186,12 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 h1:o4JXh1EVt9k/+g42oCprj/FisM4qX9L3sZB3upGN2ZU=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55/go.mod h1:OmDBASR4679mdNQnz2pUhc2G8CO2JrUAVFDRBDP/hJE=
-github.com/ppdragon16/outbound v0.0.0-next.4 h1:80qiOjk0f9b0P3UGNKKRGgqbChRzDNAjL/Jx/ro0oQw=
-github.com/ppdragon16/outbound v0.0.0-next.4/go.mod h1:Ws/OYVcjHRGvV2ni5Qzbt3TVMa8xCXKqoYgnA66kiig=
+github.com/ppdragon16/outbound v0.0.0-next.5 h1:DAOyVuxZU73Eve4fOCyhp52aLRsztv8M6HPCTHyo5yE=
+github.com/ppdragon16/outbound v0.0.0-next.5/go.mod h1:Ws/OYVcjHRGvV2ni5Qzbt3TVMa8xCXKqoYgnA66kiig=
 github.com/ppdragon16/quic-go v0.0.0-20260518041944-35a749a3e540 h1:KapIF/FJyPHq+psqBJ3wQ0sP16nACt+AP1qHu8iamJU=
 github.com/ppdragon16/quic-go v0.0.0-20260518041944-35a749a3e540/go.mod h1:hykVjD1wT/nAFcAkagZpziNAnXLwJOOpn0Ozohtgmsw=
-github.com/ppdragon16/utls v1.8.2-pooled.3 h1:9DKqJmMzgDHXuDANZVftC9lubjN34J466nhmIvKfL8k=
-github.com/ppdragon16/utls v1.8.2-pooled.3/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
+github.com/ppdragon16/utls v1.8.2-pooled.6 h1:QS+KAxkMbXlYQMnsjwTHShWU59cgXslj8zvk+Zj87S8=
+github.com/ppdragon16/utls v1.8.2-pooled.6/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
 github.com/quic-go/qpack v0.5.1 h1:giqksBPnT/HDtZ6VhtFKgoLOWmlyo9Ei6u9PqzIMbhI=
 github.com/quic-go/qpack v0.5.1/go.mod h1:+PC4XFrEskIVkcLzpEkbLqq1uCoxPhQuvK5rH1ZgaEg=
 github.com/rogpeppe/go-internal v1.13.1 h1:KvO1DLK/DRN07sQ1LQKScxyZJuNnedQ5/wKSR38lUII=
