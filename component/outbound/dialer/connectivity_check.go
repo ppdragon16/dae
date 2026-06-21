@@ -375,14 +375,19 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 			return
 		case <-d.checkCh:
 			didUpdate := false
-			for i := 0; i < RetryCount; i++ {
+			for i := range RetryCount {
 				if i > 0 {
 					time.Sleep(RetryInterval)
 				}
 				if !d.Alive() {
 					d.NotifyStatusChange()
 					if err := d.Connect(); err != nil {
-						continue
+						// Dialer is already dead and reconnect failed;
+						// no point retrying within this cycle — wait for
+						// the next ticker tick.
+						d.Update(false, 0, checkOpt.networkType, err)
+						didUpdate = true
+						break
 					}
 				}
 				ok, latency, err := d.Check(checkOpt)
