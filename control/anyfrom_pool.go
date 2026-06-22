@@ -64,21 +64,21 @@ func (a *Anyfrom) SyscallConn() (syscall.RawConn, error) {
 	return a.UDPConn.SyscallConn()
 }
 func (a *Anyfrom) WriteMsgUDP(b []byte, oob []byte, addr *net.UDPAddr) (n int, oobn int, err error) {
-	defer a.afterWrite(err)
+	defer func() { a.afterWrite(err) }()
 	if a.SupportGso(len(b)) {
 		return a.UDPConn.WriteMsgUDP(b, appendUDPSegmentSizeMsg(oob, uint16(len(b))), addr)
 	}
 	return a.UDPConn.WriteMsgUDP(b, oob, addr)
 }
 func (a *Anyfrom) WriteMsgUDPAddrPort(b []byte, oob []byte, addr netip.AddrPort) (n int, oobn int, err error) {
-	defer a.afterWrite(err)
+	defer func() { a.afterWrite(err) }()
 	if a.SupportGso(len(b)) {
 		return a.UDPConn.WriteMsgUDPAddrPort(b, appendUDPSegmentSizeMsg(oob, uint16(len(b))), addr)
 	}
 	return a.UDPConn.WriteMsgUDPAddrPort(b, oob, addr)
 }
 func (a *Anyfrom) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	defer a.afterWrite(err)
+	defer func() { a.afterWrite(err) }()
 	if a.SupportGso(len(b)) {
 		n, _, err = a.UDPConn.WriteMsgUDP(b, appendUDPSegmentSizeMsg(nil, uint16(len(b))), addr.(*net.UDPAddr))
 		return n, err
@@ -86,7 +86,7 @@ func (a *Anyfrom) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 	return a.UDPConn.WriteTo(b, addr)
 }
 func (a *Anyfrom) WriteToUDP(b []byte, addr *net.UDPAddr) (n int, err error) {
-	defer a.afterWrite(err)
+	defer func() { a.afterWrite(err) }()
 	if a.SupportGso(len(b)) {
 		n, _, err = a.UDPConn.WriteMsgUDP(b, appendUDPSegmentSizeMsg(nil, uint16(len(b))), addr)
 		return n, err
@@ -94,7 +94,7 @@ func (a *Anyfrom) WriteToUDP(b []byte, addr *net.UDPAddr) (n int, err error) {
 	return a.UDPConn.WriteToUDP(b, addr)
 }
 func (a *Anyfrom) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (n int, err error) {
-	defer a.afterWrite(err)
+	defer func() { a.afterWrite(err) }()
 	if a.SupportGso(len(b)) {
 		n, _, err = a.UDPConn.WriteMsgUDPAddrPort(b, appendUDPSegmentSizeMsg(nil, uint16(len(b))), addr)
 		return n, err
