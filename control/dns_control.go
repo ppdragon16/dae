@@ -367,11 +367,11 @@ func (c *DnsController) handleDNSRequest(
 	queryInfo queryInfo,
 	dnsResp *dnsResponseData,
 ) error {
-	var err error
-	// Route Requset
+	// Route Request
 	hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, nil)
 	RequestIndex, ok := c.requestSelectCache.Get(hashKey)
 	if !ok {
+		var err error
 		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
 		if err != nil {
 			return err
@@ -387,9 +387,14 @@ func (c *DnsController) handleDNSRequest(
 		return nil
 	}
 
+	// Check for race group: race(upstream1, upstream2, ...)
+	if raceUpstreams := c.routing.GetRaceUpstreams(RequestIndex); len(raceUpstreams) > 0 {
+		return c.handleDNSRequestRace(data, req, queryInfo, dnsResp, raceUpstreams)
+	}
+
+	// Resolve the single upstream and dial.
 	var upstream *dns.Upstream
 	if RequestIndex == consts.DnsRequestOutboundIndex_AsIs {
-		// As-is should not be valid in response routing, thus using connection realDest is reasonable.
 		upstream = &dns.Upstream{
 			Scheme:   "udp",
 			Hostname: req.Dst.Addr().String(),
@@ -398,16 +403,30 @@ func (c *DnsController) handleDNSRequest(
 			IsAsIs:   true,
 		}
 	} else {
-		// Get corresponding upstream.
+		var err error
 		upstream, err = c.routing.GetUpstream(RequestIndex)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Dial and re-route
+	return c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, dnsResp)
+}
+
+// handleDNSRequestByUpstream selects the best dialer, sends DNS query, handles response
+// routing, logging, and lookup cache update. It manages dialArgument lifecycle internally.
+// Caller provides a pre-allocated dnsResp as the output parameter.
+func (c *DnsController) handleDNSRequestByUpstream(
+	data []byte,
+	req *dnsRequest,
+	queryInfo queryInfo,
+	upstream *dns.Upstream,
+	dnsResp *dnsResponseData,
+) error {
 	dialArgument := dialArgumentPool.Get().(*dialArgument)
 	defer dialArgumentPool.Put(dialArgument)
+
+	var err error
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		if log.IsLevelEnabled(log.DebugLevel) {
@@ -417,12 +436,10 @@ Dial:
 			}).Debugln("Request to DNS upstream")
 		}
 
-		// Select best dial arguments (outbound, dialer, l4proto, ipversion, etc.)
-		if err := c.bestDialerChooser(req, upstream, dialArgument); err != nil {
+		// Select best dial arguments and send DNS query.
+		if err = c.bestDialerChooser(req, upstream, dialArgument); err != nil {
 			return err
 		}
-
-		// TODO: 这里可能不可以这样做
 		if err = c.dialSend(data, upstream, dialArgument, queryInfo, dnsResp); err != nil {
 			isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
 			if !isNetError || isClosed || !dnsResponse(dnsResp.respData) || (!isTimeout && dialArgument.Dialer.NeedAliveState()) {
@@ -471,12 +488,9 @@ Dial:
 			}
 			switch ResponseIndex {
 			case consts.DnsResponseOutboundIndex_Reject:
-				// Reject
-				// TODO: cache response reject.
 				c.reject(dnsResp.respData)
 				fallthrough
 			case consts.DnsResponseOutboundIndex_Accept:
-				// Accept.
 				break Dial
 			default:
 				return common.Errf("unknown upstream: %v", ResponseIndex.String())
@@ -506,6 +520,72 @@ Dial:
 		}
 	}
 	return err
+}
+
+// handleDNSRequestRace sends DNS queries to multiple upstreams concurrently and uses the
+// first successful response. Each sub-upstream independently goes through the full
+// handleDNSRequestByUpstream path (including response routing).
+func (c *DnsController) handleDNSRequestRace(
+	data []byte,
+	req *dnsRequest,
+	queryInfo queryInfo,
+	dnsResp *dnsResponseData,
+	raceUpstreams []*dns.Upstream,
+) error {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var winnerResp *dnsResponseData
+	var firstErr error
+
+	for _, upstream := range raceUpstreams {
+		wg.Add(1)
+		go func(upstream *dns.Upstream) {
+			defer wg.Done()
+
+			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
+			isWinner := false
+			defer func() {
+				if isWinner {
+					// Ownership transferred to main goroutine; skip cleanup.
+					return
+				}
+				if localResp.respData != nil && localResp.fromPool {
+					pool.PutBuffer(localResp.respData)
+				}
+				*localResp = dnsResponseData{}
+				dnsResponseDataPool.Put(localResp)
+			}()
+
+			err := c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, localResp)
+
+			mu.Lock()
+			if err == nil && winnerResp == nil {
+				winnerResp = localResp
+				isWinner = true
+			}
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			mu.Unlock()
+		}(upstream)
+	}
+	wg.Wait()
+
+	if winnerResp == nil {
+		if firstErr != nil {
+			return fmt.Errorf("all %d race upstreams failed: %w", len(raceUpstreams), firstErr)
+		}
+		return fmt.Errorf("all %d race upstreams failed", len(raceUpstreams))
+	}
+
+	// Transfer winner's data to caller's dnsResp, then recycle the struct.
+	dnsResp.respData = winnerResp.respData
+	dnsResp.fromPool = winnerResp.fromPool
+	dnsResp.isNew = winnerResp.isNew
+	dnsResp.upstreamFrom = winnerResp.upstreamFrom
+	*winnerResp = dnsResponseData{}
+	dnsResponseDataPool.Put(winnerResp)
+	return nil
 }
 
 func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgument, queryInfo queryInfo, accepted bool) {

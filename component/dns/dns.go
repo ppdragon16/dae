@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/daeuniverse/dae/common"
@@ -29,6 +30,11 @@ type Dns struct {
 	reqMatcher       *RequestMatcher
 	respMatcher      *ResponseMatcher
 	hasResponseRules bool
+	// raceGroupIndices maps from a race placeholder upstream index to its sub-upstream indices.
+	raceGroupIndices map[uint8][]uint8
+	// raceUpstreams caches resolved sub-upstreams, populated lazily on first use.
+	raceUpstreams map[uint8][]*Upstream
+	raceCacheMu   sync.RWMutex
 }
 
 type NewOption struct {
@@ -95,6 +101,84 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 			}
 			urlKey = upstreamName
 			upstreamName = upstreamName + "(" + outboundName + ")"
+		} else if upstreamName == consts.Function_Race {
+			// Race multiple upstreams: race(upstream1, upstream2, ...)
+			// Create individual upstreams for each sub-name and a race group entry.
+			var subIndices []uint8
+			var subNames []string
+			for _, p := range rule.Outbound.Params {
+				if p.Key != "" {
+					return nil, fmt.Errorf("race() only accepts bare upstream names, got key=%q", p.Key)
+				}
+				subName := p.Val
+				if subName == "" {
+					return nil, fmt.Errorf("race() requires non-empty upstream names")
+				}
+				subNames = append(subNames, subName)
+				// Look up or create upstream for this sub-name.
+				subIdx, exists := upstreamName2Id[subName]
+				if !exists {
+					if rawURL, ok = predefinedUpstreamNames[subName]; !ok {
+						return nil, fmt.Errorf("Undefined upstream name %q in race()", subName)
+					}
+					subIdx = uint8(len(s.upstream))
+					if currentUpstreamIndex := len(s.upstream); currentUpstreamIndex >= int(consts.OutboundUserDefinedMax) {
+						return nil, fmt.Errorf("Too many upstreams")
+					}
+					r := &UpstreamResolver{
+						Raw:     rawURL,
+						Network: opt.UpstreamResolverNetwork,
+						FinishInitCallback: func(i int, outbound uint8) func(raw *url.URL, upstream *Upstream) {
+							return func(raw *url.URL, upstream *Upstream) {
+								upstream.Outbound = consts.OutboundIndex(outbound)
+								opt.UpstreamReadyCallback(upstream)
+								s.upstream2IndexMu.Lock()
+								s.upstream2Index[upstream] = i
+								s.upstream2IndexMu.Unlock()
+							}
+						}(len(s.upstream), outboundIdx),
+						mu:       sync.Mutex{},
+						upstream: nil,
+					}
+					upstreamName2Id[subName] = subIdx
+					s.upstream = append(s.upstream, r)
+				}
+				subIndices = append(subIndices, subIdx)
+			}
+			// Build the composite race upstream name.
+			upstreamName = consts.Function_Race + "(" + strings.Join(subNames, ",") + ")"
+			urlKey = upstreamName
+			// Create a race placeholder upstream entry.
+			raceIdx := uint8(len(s.upstream))
+			if currentUpstreamIndex := len(s.upstream); currentUpstreamIndex >= int(consts.OutboundUserDefinedMax) {
+				return nil, fmt.Errorf("Too many upstreams")
+			}
+			// Use a dummy URL for the race placeholder; it will never be resolved.
+			dummyURL, err := url.Parse("race://" + strings.Join(subNames, ","))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create race upstream URL: %w", err)
+			}
+			r := &UpstreamResolver{
+				Raw:     dummyURL,
+				Network: opt.UpstreamResolverNetwork,
+				FinishInitCallback: func(i int, outbound uint8) func(raw *url.URL, upstream *Upstream) {
+					return func(raw *url.URL, upstream *Upstream) {
+						upstream.Outbound = consts.OutboundIndex(outbound)
+						s.upstream2IndexMu.Lock()
+						s.upstream2Index[upstream] = i
+						s.upstream2IndexMu.Unlock()
+					}
+				}(len(s.upstream), outboundIdx),
+				mu:       sync.Mutex{},
+				upstream: nil,
+			}
+			upstreamName2Id[upstreamName] = raceIdx
+			s.upstream = append(s.upstream, r)
+			if s.raceGroupIndices == nil {
+				s.raceGroupIndices = make(map[uint8][]uint8)
+			}
+			s.raceGroupIndices[raceIdx] = subIndices
+			continue
 		} else {
 			urlKey = upstreamName
 		}
@@ -166,7 +250,12 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 }
 
 func (s *Dns) CheckUpstreamsFormat() error {
-	for _, upstream := range s.upstream {
+	for i, upstream := range s.upstream {
+		// Skip race placeholder upstreams; they use a synthetic "race://" URL
+		// and are never resolved directly.
+		if _, isRace := s.raceGroupIndices[uint8(i)]; isRace {
+			continue
+		}
 		_, _, _, _, err := ParseRawUpstream(upstream.Raw)
 		if err != nil {
 			return err
@@ -177,6 +266,48 @@ func (s *Dns) CheckUpstreamsFormat() error {
 
 func (s *Dns) GetUpstream(upstreamIndex consts.DnsRequestOutboundIndex) (upstream *Upstream, err error) {
 	return s.upstream[upstreamIndex].GetUpstream()
+}
+
+// GetRaceUpstreams returns resolved upstreams for a race group.
+// Resolution happens lazily on first call and is cached thereafter.
+// Returns nil if this index is not a race group.
+func (s *Dns) GetRaceUpstreams(upstreamIndex consts.DnsRequestOutboundIndex) []*Upstream {
+	idx := uint8(upstreamIndex)
+	indices := s.raceGroupIndices[idx]
+	if indices == nil {
+		return nil
+	}
+
+	// Fast path: read lock, cache hit.
+	s.raceCacheMu.RLock()
+	if cached := s.raceUpstreams[idx]; cached != nil {
+		s.raceCacheMu.RUnlock()
+		return cached
+	}
+	s.raceCacheMu.RUnlock()
+
+	// Slow path: write lock, resolve and cache.
+	s.raceCacheMu.Lock()
+	// Double-check: another goroutine may have populated it while we waited.
+	if cached := s.raceUpstreams[idx]; cached != nil {
+		s.raceCacheMu.Unlock()
+		return cached
+	}
+	upstreams := make([]*Upstream, len(indices))
+	for i, subIdx := range indices {
+		up, err := s.upstream[subIdx].GetUpstream()
+		if err != nil {
+			s.raceCacheMu.Unlock()
+			return nil
+		}
+		upstreams[i] = up
+	}
+	if s.raceUpstreams == nil {
+		s.raceUpstreams = make(map[uint8][]*Upstream)
+	}
+	s.raceUpstreams[idx] = upstreams
+	s.raceCacheMu.Unlock()
+	return upstreams
 }
 
 func (s *Dns) HasResponseRules() bool {

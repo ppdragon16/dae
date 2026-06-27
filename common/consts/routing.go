@@ -30,6 +30,7 @@ const (
 	Function_QType    = "qtype"
 	Function_Upstream = "upstream"
 	Function_Static   = "static"
+	Function_Race     = "race"
 
 	OutboundParam_Mark = "mark"
 	OutboundParam_Via  = "via"
