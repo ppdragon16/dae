@@ -87,6 +87,7 @@ dns {
     dnsmasq_dns: 'udp://127.0.0.1:53'
     cn_dns: 'udp://223.5.5.5:53'
     proxy_dns: 'tcp+udp://1.1.1.1:53'
+    googledns: 'tcp+udp://8.8.8.8:53'
   }
   routing {
     request {
@@ -98,6 +99,11 @@ dns {
       # Go upstream 'proxy_dns' via outbound 'ai'
       qname(keyword:gemini, keyword:aistudio, keyword:generativelanguage, keyword:chatgpt, keyword:openai) -> proxy_dns(via: ai)
       qname(geosite:gfw, regex:'google|cloudflare') -> proxy_dns
+      # Alternative: use race() to query multiple DNS upstreams concurrently.
+      # The first response wins, naturally picking the fastest path through
+      # whatever proxy node is currently selected. Useful when different
+      # VPS nodes have different latency to different DNS servers.
+      # qname(geosite:gfw) -> race(proxy_dns, googledns)
       fallback: cn_dns
     }
   }

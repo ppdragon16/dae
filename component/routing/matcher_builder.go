@@ -8,6 +8,7 @@ package routing
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/config_parser"
@@ -114,6 +115,25 @@ func ParseOutbound(rawOutbound *config_parser.Function) (outbound *Outbound, err
 			return nil, fmt.Errorf("'static' upstream takes only one parameter")
 		}
 		outbound.Name = rawOutbound.Params[0].Val
+		return outbound, nil
+	}
+	// Handle race() function: race(upstream1, upstream2, ...)
+	// The composite name encodes all sub-upstreams for later resolution.
+	if rawOutbound.Name == consts.Function_Race {
+		var subNames []string
+		for _, p := range rawOutbound.Params {
+			if p.Key != "" {
+				return nil, fmt.Errorf("race() only accepts bare upstream names, got key=%q", p.Key)
+			}
+			if p.Val == "" {
+				return nil, fmt.Errorf("race() requires non-empty upstream names")
+			}
+			subNames = append(subNames, p.Val)
+		}
+		if len(subNames) < 2 {
+			return nil, fmt.Errorf("race() requires at least 2 upstreams")
+		}
+		outbound.Name = consts.Function_Race + "(" + strings.Join(subNames, ",") + ")"
 		return outbound, nil
 	}
 	for _, p := range rawOutbound.Params {
