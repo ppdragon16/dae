@@ -676,6 +676,11 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				c.outboundRedirects[from] = to
 			}
 			c.muOutboundRedirects.Unlock()
+
+			// Sync eBPF so redirect to direct/block happens in kernel space.
+			if err := c.syncRedirectToEbpf(from, to); err != nil {
+				log.Warnf("Failed to sync eBPF redirect for %v -> %v: %v", from, to, err)
+			}
 			fmt.Fprintf(writer, "OK\n")
 		}
 	case "priority":
@@ -1688,6 +1693,43 @@ func (c *ControlPlane) rebuildOutboundRedirects(groups []config.Group) error {
 	c.muOutboundRedirects.Lock()
 	c.outboundRedirects = redirects
 	c.muOutboundRedirects.Unlock()
+
+	// Sync eBPF outbound_connectivity_map for kernel-space short-circuit.
+	for fromIdx, toIdx := range redirects {
+		if err := c.syncRedirectToEbpf(fromIdx, toIdx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncRedirectToEbpf updates the eBPF outbound_connectivity_map so the kernel
+// program can short-circuit traffic for fromIdx. When toIdx is OutboundDirect
+// or OutboundBlock, all (l4proto × ipversion) combinations are set to force
+// direct/block in kernel space. Otherwise value 0 is written, restoring normal
+// userspace handling.
+func (c *ControlPlane) syncRedirectToEbpf(fromIdx, toIdx consts.OutboundIndex) error {
+	if fromIdx == consts.OutboundDirect || fromIdx == consts.OutboundBlock {
+		return fmt.Errorf("cannot redirect from reserved outbound index %d", fromIdx)
+	}
+	// 0: go control plane
+	// 1: direct
+	// 2: block
+	value := uint32(0)
+	if toIdx == consts.OutboundDirect || toIdx == consts.OutboundBlock {
+		value = uint32(toIdx) + 1
+	}
+	for i := range 4 {
+		networkType := common.IndexToNetworkType(i)
+		key := bpfOutboundConnectivityQuery{
+			Outbound:  uint8(fromIdx),
+			L4proto:   networkType.L4Proto.ToL4Proto(),
+			Ipversion: networkType.IpVersion.ToIpVersion(),
+		}
+		if err := c.core.bpf.OutboundConnectivityMap.Update(key, value, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("outbound %v l4=%v ipv=%v: %w", fromIdx, networkType.L4Proto, networkType.IpVersion, err)
+		}
+	}
 	return nil
 }
 
