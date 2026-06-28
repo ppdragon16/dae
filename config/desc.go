@@ -78,7 +78,10 @@ var GroupDesc = Desc{
 	"filter": `Filter nodes from the global node pool defined by the "subscription" and "node" sections.
 Available functions: name, subtag. Not operator is supported.
 Available keys in name function: keyword, regex. No key indicates full match.
-Available keys in subtag function: regex. No key indicates full match.`,
+Available keys in subtag function: regex. No key indicates full match.
+Available annotations: priority, add_latency, dns_cache_tag.
+dns_cache_tag: Group dialers sharing the same DNS cache domain. Dialers with the same non-empty tag share DNS cache entries (useful when multiple dialers are on the same VPS in the same region), while dialers with different tags are isolated. When empty, falls back to per-group caching. Syntax: [dns_cache_tag: 'my_region']
+`,
 	"policy": `Dialer selection policy. For each new connection, select a node as dialer from group by this policy.
 Available values: random, fixed, min, min_avg10, min_moving_avg.
 random: Select randomly.

@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	AnnotationKey_AddLatency = "add_latency"
-	AnnotationKey_Priority   = "priority"
+	AnnotationKey_AddLatency  = "add_latency"
+	AnnotationKey_Priority    = "priority"
+	AnnotationKey_DnsCacheTag = "dns_cache_tag"
 )
 
 type Priority struct {
@@ -32,6 +33,11 @@ type Annotation struct {
 	Priority   int
 	// Optional conditional priorities based on latency range.
 	ConditionalPriority []*Priority
+	// DnsCacheTag groups dialers sharing the same DNS cache.
+	// Dialers with the same non-empty tag share DNS cache entries,
+	// while dialers with different tags are isolated.
+	// When empty, falls back to per-group caching (default behavior).
+	DnsCacheTag string
 }
 
 func (p *Priority) String() string {
@@ -100,6 +106,8 @@ func NewAnnotation(annotation []*config_parser.Param) (*Annotation, error) {
 			}
 			anno.Priority = pri
 			anno.ConditionalPriority = condPris
+		case AnnotationKey_DnsCacheTag:
+			anno.DnsCacheTag = param.Val
 		default:
 			return nil, fmt.Errorf("unknown filter annotation: %v", param.Key)
 		}

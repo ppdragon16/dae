@@ -211,14 +211,21 @@ var dnsResponseDataPool = sync.Pool{
 	},
 }
 
-func (c *DnsController) GetHashKey(qname string, qtype uint16, outbound *outbound.DialerGroup) HashKey {
+func (c *DnsController) GetHashKey(qname string, qtype uint16, outbound *outbound.DialerGroup, dialer *dialer.Dialer) HashKey {
 	// 1. 获取字符串的基础哈希（汇编加速）
 	h1 := maphash.String(c.dnsCacheHashSeed, qname)
 
-	// 2. 混入 qtype 和 outbound 指针
-	// 建议：使用异或配合位移，减少冲突概率
+	// 2. 混入 qtype 和 outbound/dialer/cache-tag
 	h1 ^= uint64(qtype) << 32
 	if outbound != nil {
+		// If the dialer has a dns_cache_tag annotation, use it as the cache domain.
+		// Dialers with the same tag share DNS cache; different tags are isolated.
+		if dialer != nil {
+			if anno := outbound.GetAnnotation(dialer); anno != nil && anno.DnsCacheTag != "" {
+				h1 ^= maphash.String(c.dnsCacheHashSeed, anno.DnsCacheTag)
+				return HashKey(h1)
+			}
+		}
 		h1 ^= uint64(uintptr(unsafe.Pointer(outbound)))
 	}
 	return HashKey(h1)
@@ -368,7 +375,7 @@ func (c *DnsController) handleDNSRequest(
 	dnsResp *dnsResponseData,
 ) error {
 	// Route Request
-	hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, nil)
+	hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, nil, nil)
 	RequestIndex, ok := c.requestSelectCache.Get(hashKey)
 	if !ok {
 		var err error
@@ -760,7 +767,7 @@ func recycleDnsRefreshParam(p *dnsRefreshParam) {
 func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
 	// Lookup Cache
 	if c.enableCache {
-		if respData, expired, isNew := c.dnsCache.Get(c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound)); respData != nil {
+		if respData, expired, isNew := c.dnsCache.Get(c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)); respData != nil {
 			if expired {
 				// Refresh cache asynchronously.
 				go func(c *DnsController, p *dnsRefreshParam) {
@@ -805,7 +812,7 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 
 func (c *DnsController) singleFlightForwardDNS(
 	qi queryInfo, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (r []byte, leader bool, shared bool, err error) {
-	hashKey := c.GetHashKey(qi.qname, qi.qtype, dialArgument.Outbound)
+	hashKey := c.GetHashKey(qi.qname, qi.qtype, dialArgument.Outbound, dialArgument.Dialer)
 	param := singleFlightParam{
 		dnsForwarderKey: dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument},
 		c:               c,
@@ -880,7 +887,7 @@ func (c *DnsController) singleFlightForwardDNS(
 					"outbound": dialArgument.Outbound,
 				}).Debugf("Update DNS record cache")
 			}
-			key := c.GetHashKey(qname, qtype, dialArgument.Outbound)
+			key := c.GetHashKey(qname, qtype, dialArgument.Outbound, dialArgument.Dialer)
 			fixedTtl := c.fixedDomainTtl[qname]
 			c.dnsCache.Save(key, r, fixedTtl, isBackground)
 		}
