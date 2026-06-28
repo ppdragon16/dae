@@ -28,6 +28,14 @@ subscription {
 }
 
 group {
+  # Example: multi-region mix group with dns_cache_tag.
+  #
+  # mix {
+  #   filter: subtag(sub1) && name(keyword:'新加坡') [dns_cache_tag: 'sg']
+  #   filter: subtag(sub2) && name(keyword:'东京') [dns_cache_tag: 'jp']
+  #   policy: min_moving_avg
+  # }
+
   # Redirect groups: no filter/policy required.
   # Traffic will be forwarded to the target group via direct dialer.
   macbook {
