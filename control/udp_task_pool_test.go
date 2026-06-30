@@ -21,29 +21,31 @@ func TestUdpTaskPool(t *testing.T) {
 	t.Log(c)
 	DefaultNatTimeoutUDP = 1000 * time.Millisecond
 
+	pool := NewUdpTaskPool[netip.AddrPort, struct{}](AddrPortHash)
+
 	key1 := netip.MustParseAddrPort("1.1.1.1:1")
 	key2 := netip.MustParseAddrPort("1.1.1.1:2")
 	key3 := netip.MustParseAddrPort("1.1.1.1:3")
 
 	// Test task execution
 	for i := 0; i <= UdpTaskQueueLength; i++ {
-		DefaultUdpTaskPool.EmitTask(key1, func() { time.Sleep(500 * time.Millisecond) })
+		pool.EmitTask(key1, &UdpTask[struct{}]{exec: func(_ *UdpTask[struct{}]) { time.Sleep(500 * time.Millisecond) }})
 	} // Fill the queue to full
 	time.Sleep(400 * time.Millisecond) // Task should be executed
-	DefaultUdpTaskPool.EmitTask(key1, func() {})
+	pool.EmitTask(key1, &UdpTask[struct{}]{exec: func(_ *UdpTask[struct{}]) {}})
 
 	// Test task timeout
 	for i := 0; i <= UdpTaskQueueLength; i++ {
-		DefaultUdpTaskPool.EmitTask(key2, func() { time.Sleep(500 * time.Millisecond) })
+		pool.EmitTask(key2, &UdpTask[struct{}]{exec: func(_ *UdpTask[struct{}]) { time.Sleep(500 * time.Millisecond) }})
 	} // Fill the queue to full
 	time.Sleep(200 * time.Millisecond) // Task should be executed
-	DefaultUdpTaskPool.EmitTask(key2, func() {})
+	pool.EmitTask(key2, &UdpTask[struct{}]{exec: func(_ *UdpTask[struct{}]) {}})
 
 	// Test task gc with pending emit
 	for i := 0; i <= UdpTaskQueueLength; i++ {
-		DefaultUdpTaskPool.EmitTask(key3, func() { time.Sleep(100 * time.Second) })
+		pool.EmitTask(key3, &UdpTask[struct{}]{exec: func(_ *UdpTask[struct{}]) { time.Sleep(100 * time.Second) }})
 	} // Fill the queue
-	DefaultUdpTaskPool.EmitTask(key3, func() {})
+	pool.EmitTask(key3, &UdpTask[struct{}]{exec: func(_ *UdpTask[struct{}]) {}})
 
 	c, err = cpu.Times(false)
 	require.NoError(t, err)

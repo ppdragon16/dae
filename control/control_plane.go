@@ -400,7 +400,8 @@ func NewControlPlane(
 	if log.IsLevelEnabled(log.DebugLevel) {
 		var debugBuilder strings.Builder
 		for _, rule := range rules {
-			debugBuilder.WriteString(rule.String(true, false, false) + "\n")
+			debugBuilder.WriteString(rule.String(true, false, false))
+			debugBuilder.WriteByte('\n')
 		}
 		log.Debugf("RoutingA:\n%vfallback: %v\n", debugBuilder.String(), routingA.Fallback)
 	}

@@ -1,6 +1,6 @@
 /*
-*  SPDX-License-Identifier: AGPL-3.0-only
-*  Copyright (c) 2022-2025, daeuniverse Organization <dae@v2raya.org>
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (c) 2022-2025, daeuniverse Organization <dae@v2raya.org>
  */
 
 package control
@@ -22,8 +22,8 @@ func TestPacketSniffer_Normal(t *testing.T) {
 	for _, _data := range testPacketSnifferData {
 		data, _ := hex.DecodeString(_data)
 		sniffer, _ := DefaultPacketSnifferSessionMgr.GetOrCreate(PacketSnifferKey{
-			LAddr: netip.MustParseAddrPort("1.1.1.1:1111"),
-			RAddr: netip.MustParseAddrPort("2.2.2.2:2222"),
+			Src: netip.MustParseAddrPort("1.1.1.1:1111"),
+			Dst: netip.MustParseAddrPort("2.2.2.2:2222"),
 		}, nil)
 		sniffer.AppendData(data)
 		domain, err := sniffer.SniffUdp()
@@ -51,10 +51,9 @@ func TestPacketSniffer_Mismatched(t *testing.T) {
 		part1 := data[:len(data)/2]
 		part2 := data[len(data)/2:]
 
-		// First part
 		sniffer1, _ := DefaultPacketSnifferSessionMgr.GetOrCreate(PacketSnifferKey{
-			LAddr: netip.MustParseAddrPort("1.1.1.1:1111"),
-			RAddr: dst,
+			Src: netip.MustParseAddrPort("1.1.1.1:1111"),
+			Dst: dst,
 		}, nil)
 		sniffer1.AppendData(part1)
 		_, _ = sniffer1.SniffUdp()
@@ -62,59 +61,10 @@ func TestPacketSniffer_Mismatched(t *testing.T) {
 		if sniffer1.NeedMore() {
 			sniffer1.AppendData(part2)
 			domain, err := sniffer1.SniffUdp()
-			// It should fail because the data is garbage/incomplete for a valid DNS packet,
-			// or simply not match what's expected. The original test seems to expect it NOT to find the domain.
-			// But wait, the original logic was:
-			// "unexpected found in second sniffer"
-			// The test name is "Mismatched". It implies we are feeding data that *shouldn't* result in a valid domain sniff?
-			// The data is `testPacketSnifferData`.
-			// Let's look at `TestPacketSniffer_Normal`. It uses the SAME data and expects success.
-			// So "Mismatched" implies... what?
-			// Ah, `TestPacketSniffer_Mismatched` uses `2.2.2.2:2222` as initial destination.
-			// If `NeedMore` is true, it means the first part wasn't enough.
-			// If we append part2, it SHOULD succeed if it's the right session.
-			// But wait, this test was seemingly checking that if we change DST, we get a NEW sniffer?
-			//
-			// Re-reading `ee2d298`:
-			// Original logic (before `ee2d298`):
-			// sniffer.AppendData(data) -> one go.
-			//
-			// The `ee2d298` diff introduced the split.
-			// The test name `TestPacketSniffer_Mismatched` suggests it might be testing that if connection details don't match, we don't get the session?
-			// BUT, the code before `ee2d298` was:
-			// sniffer, _ := GetOrCreate(..., dst)
-			// sniffer.AppendData(data)
-			// ...
-			// if sniffer.NeedMore() { 
-			//      dst = ... + 1
-			//      continue 
-			// }
-			//
-			// This suggests the OLD logic was trying to find a `dst` where `NeedMore` is FALSE?
-			// No, `continue` would go to the next `_data` in the loop.
-			// So it was iterating through `testPacketSnifferData` until it found one that didn't need more?
-			//
-			// The new logic split the data.
-			// If I want to fix the "bad logic", I should probably demonstrate that `NeedMore` works?
-			//
-			// Let's assume the goal is: verify that feeding split data works.
-			if err == nil {
-				t.Log("Successfully sniffed domain:", domain)
-			} else {
-				// If it fails after full data, that might be unexpected for 'Normal' data.
-				// But this test specifically sets a different DST than the Normal test?
-				// Normal: 2.2.2.2:2222
-				// Mismatched: 2.2.2.2:2222.
-				// They are the same.
-				//
-				// Let's just fix the "New Sniffer" bug. We should feed part2 to `sniffer1`.
+			if err != nil && !sniffing.IsSniffingError(err) {
+				t.Fatal(err)
 			}
-			
-			if err == nil {
-				// If we successfully sniffed it, that's good!
-			} else if !sniffing.IsSniffingError(err) {
-                 t.Fatal(err)
-            }
+			t.Log(domain)
 		} else {
 			t.Log("part1 was enough, skipping split test for this entry")
 		}
