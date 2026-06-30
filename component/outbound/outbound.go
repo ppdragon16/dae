@@ -13,7 +13,7 @@ import (
 	_ "github.com/daeuniverse/outbound/dialer/juicity"
 	_ "github.com/daeuniverse/outbound/dialer/shadowsocks"
 
-	// _ "github.com/daeuniverse/outbound/dialer/shadowsocksr"
+	_ "github.com/daeuniverse/outbound/dialer/shadowsocksr"
 	_ "github.com/daeuniverse/outbound/dialer/socks"
 	_ "github.com/daeuniverse/outbound/dialer/trojan"
 
