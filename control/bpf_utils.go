@@ -193,6 +193,9 @@ func detectCgroupPath() (string, error) {
 			return fields[1], nil
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
 
 	return "", errors.New("cgroup2 not mounted")
 }
