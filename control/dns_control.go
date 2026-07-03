@@ -243,6 +243,24 @@ func QnameIpHash(qhash HashKey, ip netip.Addr) HashKey {
 	return HashKey(h1)
 }
 
+func (c *DnsController) hashKeyForDnsRequest(qname string, qtype uint16, srcMac [6]byte, srcIp netip.Addr) HashKey {
+	h1 := uint64(c.GetHashKey(qname, qtype, nil, nil))
+	if !c.routing.HasClientRequestRules() {
+		return HashKey(h1)
+	}
+	// Mix in MAC (6 bytes, zero-padded to 8).
+	var mac8 [8]byte
+	copy(mac8[:], srcMac[:])
+	h1 ^= binary.LittleEndian.Uint64(mac8[:])
+	if srcIp.IsValid() {
+		// Mix in source IP (16 bytes as two uint64).
+		addr := srcIp.As16()
+		h1 ^= binary.LittleEndian.Uint64(addr[0:8])
+		h1 ^= binary.LittleEndian.Uint64(addr[8:16])
+	}
+	return HashKey(h1)
+}
+
 func dnsQueryInfo(data []byte) (queryInfo queryInfo) {
 	qname, qtype, ok := dnsQuestion(data)
 	if !ok {
@@ -374,12 +392,12 @@ func (c *DnsController) handleDNSRequest(
 	queryInfo queryInfo,
 	dnsResp *dnsResponseData,
 ) error {
-	// Route Request
-	hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, nil, nil)
+	// Route Request.
+	hashKey := c.hashKeyForDnsRequest(queryInfo.qname, queryInfo.qtype, req.routingResult.Mac, req.Src.Addr())
 	RequestIndex, ok := c.requestSelectCache.Get(hashKey)
 	if !ok {
 		var err error
-		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
+		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype, req.routingResult.Mac, req.Src.Addr())
 		if err != nil {
 			return err
 		}

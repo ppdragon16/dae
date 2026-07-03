@@ -7,6 +7,7 @@ package dns
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
 
 	"github.com/daeuniverse/dae/common"
@@ -15,11 +16,14 @@ import (
 	"github.com/daeuniverse/dae/component/routing/domain_matcher"
 	"github.com/daeuniverse/dae/config"
 	"github.com/daeuniverse/dae/pkg/config_parser"
+	"github.com/daeuniverse/dae/pkg/trie"
 )
 
 type RequestMatcherBuilder struct {
 	upstreamName2Id    map[string]uint8
 	simulatedDomainSet []routing.DomainSet
+	macSet             []*trie.Trie
+	sourceIpSet        []*trie.Trie
 	fallback           *routing.Outbound
 	rules              []requestMatchSet
 }
@@ -30,6 +34,8 @@ func NewRequestMatcherBuilder(rules []*config_parser.RoutingRule, upstreamName2I
 	rulesBuilder.RegisterFunctionParser(consts.Function_QName, routing.PlainParserFactory(b.addQName))
 	rulesBuilder.RegisterFunctionParser(consts.Function_QType, TypeParserFactory(b.addQType))
 	rulesBuilder.RegisterFunctionParser(consts.Function_Static, routing.PlainParserFactory(b.addStatic))
+	rulesBuilder.RegisterFunctionParser(consts.Function_Mac, routing.MacParserFactory(b.addSourceMac))
+	rulesBuilder.RegisterFunctionParser(consts.Function_SourceIp, routing.IpParserFactory(b.addSourceIp))
 	if err = rulesBuilder.Apply(rules); err != nil {
 		return nil, err
 	}
@@ -135,6 +141,52 @@ func (b *RequestMatcherBuilder) addStatic(f *config_parser.Function, key string,
 	return nil
 }
 
+func (b *RequestMatcherBuilder) addSourceMac(f *config_parser.Function, macAddrs [][6]byte, upstream *routing.Outbound) (err error) {
+	upstreamId, err := b.upstreamToId(upstream.Name)
+	if err != nil {
+		return err
+	}
+	var addr16 [16]byte
+	values := make([]netip.Prefix, 0, len(macAddrs))
+	for _, mac := range macAddrs {
+		copy(addr16[10:], mac[:])
+		values = append(values, netip.PrefixFrom(netip.AddrFrom16(addr16), 128))
+	}
+	t, err := trie.NewTrieFromPrefixes(values)
+	if err != nil {
+		return err
+	}
+	rule := requestMatchSet{
+		Value:    uint16(len(b.macSet)),
+		Type:     consts.MatchType_Mac,
+		Not:      f.Not,
+		Upstream: uint8(upstreamId),
+	}
+	b.macSet = append(b.macSet, t)
+	b.rules = append(b.rules, rule)
+	return nil
+}
+
+func (b *RequestMatcherBuilder) addSourceIp(f *config_parser.Function, cidrs []netip.Prefix, upstream *routing.Outbound) (err error) {
+	upstreamId, err := b.upstreamToId(upstream.Name)
+	if err != nil {
+		return err
+	}
+	t, err := trie.NewTrieFromPrefixes(cidrs)
+	if err != nil {
+		return err
+	}
+	rule := requestMatchSet{
+		Value:    uint16(len(b.sourceIpSet)),
+		Type:     consts.MatchType_SourceIpSet,
+		Not:      f.Not,
+		Upstream: uint8(upstreamId),
+	}
+	b.sourceIpSet = append(b.sourceIpSet, t)
+	b.rules = append(b.rules, rule)
+	return nil
+}
+
 func (b *RequestMatcherBuilder) addFallback(fallbackOutbound config.FunctionOrString) (err error) {
 	upstream, err := routing.ParseOutbound(config.FunctionOrStringToFunction(fallbackOutbound))
 	if err != nil {
@@ -167,6 +219,9 @@ func (b *RequestMatcherBuilder) Build() (matcher *RequestMatcher, err error) {
 	if err = m.domainMatcher.Build(); err != nil {
 		return nil, err
 	}
+	// MacSet and SourceIpSet.
+	m.macSet = b.macSet
+	m.sourceIpSet = b.sourceIpSet
 
 	// Write routings.
 	// Fallback rule MUST be the last.
@@ -180,6 +235,8 @@ func (b *RequestMatcherBuilder) Build() (matcher *RequestMatcher, err error) {
 
 type RequestMatcher struct {
 	domainMatcher routing.DomainMatcher // All domain matchSets use one DomainMatcher.
+	macSet        []*trie.Trie
+	sourceIpSet   []*trie.Trie
 
 	matches []requestMatchSet
 }
@@ -195,6 +252,8 @@ type requestMatchSet struct {
 func (m *RequestMatcher) Match(
 	qName string,
 	qType uint16,
+	srcMac [6]byte,
+	srcIp netip.Addr,
 ) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
 	domainMatchBitmap := common.ObtainDomainBitmap()
 	defer common.RecycleDomainBitmap(domainMatchBitmap)
@@ -222,6 +281,17 @@ func (m *RequestMatcher) Match(
 		case consts.MatchType_Static:
 			// Static match always hits; the static entry name is stored in match.StaticName
 			goodSubrule = true
+		case consts.MatchType_Mac:
+			if m.macSet[match.Value].HasPrefixMac(srcMac) {
+				goodSubrule = true
+			}
+		case consts.MatchType_SourceIpSet:
+			if srcIp.IsValid() {
+				bin128 := trie.Prefix2bin128(netip.PrefixFrom(srcIp, srcIp.BitLen()))
+				if m.sourceIpSet[match.Value].HasPrefix(bin128) {
+					goodSubrule = true
+				}
+			}
 		default:
 			return 0, fmt.Errorf("unknown match type: %v", match.Type)
 		}

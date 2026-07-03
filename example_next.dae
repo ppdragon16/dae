@@ -102,6 +102,9 @@ dns {
       qtype(ptr) && qname(geosite:private) -> dnsmasq_dns
       qname(suffix:mydomain.xyz) -> static(local_nas)
       qtype(ptr, https) -> reject
+      # Per-client DNS filtering: e.g. block AAAA (IPv6) queries for specific
+      qtype(aaaa) && mac('11:22:33:44:55:66') -> reject
+      qtype(aaaa) && sip(192.168.1.100) -> reject
       qname(suffix:.lan, suffix:telemetry.coder.com, regex:'mcdn\.bilivideo\.(com|cn)$', suffix:szbdyd.com) -> reject
       qname(regex:'^(ssl|www)\.gstatic\.com', regex:'(fonts|update)\.googleapis\.com$') -> cn_dns
       # Go upstream 'proxy_dns' via outbound 'ai'

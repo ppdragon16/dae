@@ -346,9 +346,9 @@ func (s *Dns) GetStaticEntry(name string) (*config.DnsStaticEntry, bool) {
 	return entry, ok
 }
 
-func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
+func (s *Dns) RequestSelect(qname string, qtype uint16, srcMac [6]byte, srcIp netip.Addr) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
 	// Route.
-	upstreamIndex, err = s.reqMatcher.Match(qname, qtype)
+	upstreamIndex, err = s.reqMatcher.Match(qname, qtype, srcMac, srcIp)
 	if err != nil {
 		return 0, err
 	}
@@ -361,6 +361,11 @@ func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.Dn
 		return 0, fmt.Errorf("bad upstream index: %v not in [0, %v]", upstreamIndex, len(s.upstream)-1)
 	}
 	return upstreamIndex, nil
+}
+
+// HasClientRequestRules returns whether the request routing uses client-specific matchers (mac or sip).
+func (s *Dns) HasClientRequestRules() bool {
+	return len(s.reqMatcher.macSet) > 0 || len(s.reqMatcher.sourceIpSet) > 0
 }
 
 func (s *Dns) ResponseSelect(qname string, qtype uint16, ips []netip.Addr, fromUpstream *Upstream) (upstreamIndex consts.DnsResponseOutboundIndex, upstream *Upstream, err error) {
