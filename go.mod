@@ -68,7 +68,6 @@ require (
 	github.com/tklauser/numcpus v0.10.0 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 // indirect
-	github.com/xtaci/smux v1.5.44 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
@@ -108,7 +107,7 @@ require (
 
 //replace github.com/daeuniverse/outbound => ../outbound_ppdn
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.12
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.14
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
@@ -116,7 +115,7 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-n
 
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
-replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.6
+replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.7
 
 //replace github.com/cilium/ebpf => /home/mzz/goProjects/ebpf
 //replace github.com/daeuniverse/dae-config-dist/go/dae_config => /home/mzz/antlrProjects/dae-config/build/go/dae_config

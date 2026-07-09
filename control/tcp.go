@@ -300,14 +300,13 @@ func relayDirection(dst, src net.Conn) error {
 	var err error
 	bufSize := 2 * 1024 // initial 2K, the bufSize will dynamically increase as needed
 	maxBufSize := 32 * 1024
+	buf := pool.GetBuffer(bufSize)
 	for {
 		src.SetReadDeadline(time.Now().Add(DefaultTCPIdleTimeout))
-		buf := pool.GetBuffer(bufSize)
 		n, rerr := src.Read(buf)
 		if n > 0 {
 			dst.SetWriteDeadline(time.Now().Add(DefaultTCPWriteTimeout))
 			_, werr := dst.Write(buf[:n])
-			pool.PutBuffer(buf)
 			if werr != nil {
 				if errors.Is(werr, net.ErrClosed) {
 					err = nil
@@ -317,8 +316,10 @@ func relayDirection(dst, src net.Conn) error {
 				break
 			}
 			bufSize = min(n*2, maxBufSize)
-		} else {
-			pool.PutBuffer(buf)
+			if bufSize > len(buf) {
+				pool.PutBuffer(buf)
+				buf = pool.GetBuffer(bufSize)
+			}
 		}
 		if rerr != nil {
 			// Timeout / EOF / Closed is normal.
@@ -334,6 +335,7 @@ func relayDirection(dst, src net.Conn) error {
 			break
 		}
 	}
+	pool.PutBuffer(buf)
 	if err != nil {
 		dst.Close()
 	} else if writeCloser, ok := dst.(netproxy.CloseWriter); ok {
