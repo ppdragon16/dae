@@ -317,6 +317,7 @@ struct domain_routing {
 // in sync.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, __be32[4]);
 	__type(value, struct domain_routing);
 	__uint(max_entries, MAX_DOMAIN_ROUTING_NUM);
@@ -327,6 +328,7 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, __be32[4]);
 	__type(value, struct domain_routing);
 	__uint(max_entries, MAX_DOMAIN_ROUTING_NUM);
@@ -368,6 +370,7 @@ struct udp_conn_state {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, MAX_DST_MAPPING_NUM_UDP);
 	__type(key, struct tuples_key);
 	__type(value, struct udp_conn_state);
