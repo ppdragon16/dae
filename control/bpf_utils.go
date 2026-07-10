@@ -247,18 +247,27 @@ retryLoadBpf:
 	}
 	constants := map[string]interface{}{
 		"PARAM": struct {
-			tproxyPort      uint32
-			controlPlanePid uint32
-			dae0Ifindex     uint32
-			dae0NetnsId     uint32
-			dae0peerMac     [6]byte
-			padding         [2]byte
+			tproxyPort           uint32
+			controlPlanePid      uint32
+			dae0Ifindex          uint32
+			dae0NetnsId          uint32
+			dae0peerMac          [6]byte
+			paddingAfterMac      [2]byte
+			useRedirectPeer      uint8
+			hasBpfGetCurrentTask uint8
+			padding2             uint16
+			daeSocketMark        uint32
 		}{
-			tproxyPort:      uint32(opts.BigEndianTproxyPort),
-			controlPlanePid: uint32(os.Getpid()),
-			dae0Ifindex:     uint32(GetDaeNetns().Dae0().Attrs().Index),
-			dae0NetnsId:     uint32(netnsID),
-			dae0peerMac:     [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
+			tproxyPort:           uint32(opts.BigEndianTproxyPort),
+			controlPlanePid:      uint32(os.Getpid()),
+			dae0Ifindex:          uint32(GetDaeNetns().Dae0().Attrs().Index),
+			dae0NetnsId:          uint32(netnsID),
+			dae0peerMac:          [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
+			paddingAfterMac:      [2]byte{},
+			useRedirectPeer:      0,
+			hasBpfGetCurrentTask: 1,
+			padding2:             0,
+			daeSocketMark:        0,
 		},
 	}
 	if err = loadBpfObjectsWithConstants(bpf, opts.CollectionOptions, constants); err != nil {
