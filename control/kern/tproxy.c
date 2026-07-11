@@ -306,6 +306,15 @@ struct {
 	// __uint(pinning, LIBBPF_PIN_BY_NAME);
 } routing_map SEC(".maps");
 
+// key=0: active routing rules length in routing_map.
+// Populated by Go at load time, read by route() to optimize bpf_loop.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(max_entries, 1);
+} routing_meta_map SEC(".maps");
+
 struct domain_routing {
 	__u32 bitmap[MAX_MATCH_SET_LEN / 32];
 };
@@ -1520,7 +1529,14 @@ static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
 	struct route_loop_ctx loop_ctx = {
 		.work = ctx,
 	};
-	ret = bpf_loop(MAX_MATCH_SET_LEN, route_loop_cb, &loop_ctx, 0);
+	__u32 active_rules_len = MAX_MATCH_SET_LEN;
+	__u32 *rules_len_ptr =
+		bpf_map_lookup_elem(&routing_meta_map, &zero_key);
+
+	if (rules_len_ptr && *rules_len_ptr <= MAX_MATCH_SET_LEN)
+		active_rules_len = *rules_len_ptr;
+
+	ret = bpf_loop(active_rules_len, route_loop_cb, &loop_ctx, 0);
 	if (unlikely(ret < 0))
 		return ret;
 	if (ctx->result >= 0)

@@ -423,6 +423,10 @@ func (b *RoutingMatcherBuilder) BuildKernspace() (err error) {
 	}
 	log.Infof("Routing match set len: %v/%v", len(b.rules), consts.MaxMatchSetLen)
 
+	// Notify eBPF of active rules count so bpf_loop only iterates
+	// used entries instead of always scanning MAX_MATCH_SET_LEN.
+	_ = b.bpf.RoutingMetaMap.Update(uint32(0), routingsLen, ebpf.UpdateAny)
+
 	return nil
 }
 
