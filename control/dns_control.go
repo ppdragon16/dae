@@ -25,6 +25,7 @@ import (
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/dae/config"
+	"github.com/daeuniverse/dae/pkg/logger/fastlog"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
@@ -548,30 +549,27 @@ func (c *DnsController) handleDNSRequestRace(
 }
 
 func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgument, queryInfo queryInfo, accepted bool) {
-	if log.IsLevelEnabled(log.InfoLevel) {
-		fields := log.Fields{
-			"network":  dialArgument.networkType.String(),
-			"outbound": dialArgument.Outbound.Name,
-			"policy":   dialArgument.Outbound.GetSelectionPolicy(),
-			"dialer":   dialArgument.Dialer.Name,
-			"qname":    queryInfo.qname,
-			"qtype":    queryInfo.qtype,
-			"pid":      req.routingResult.Pid,
-			"ifindex":  req.routingResult.Ifindex,
-			"dscp":     req.routingResult.Dscp,
-			"pname":    ProcessName2String(req.routingResult.Pname[:]),
-			"mac":      Mac2String(req.routingResult.Mac[:]),
-		}
-		if accepted {
-			tcpDnsStr := ""
-			if req.isTcp {
-				tcpDnsStr = "(TCP)"
-			}
-			log.WithFields(fields).Infof("[DNS%s] %v <-> %v", tcpDnsStr, RefineSourceToShow(req.Src, req.Dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
-		} else {
-			log.WithFields(fields).Infof("[DNS] %v <-> %v Reject with empty answer", RefineSourceToShow(req.Src, req.Dst.Addr()), RefineAddrPortToShow(dialArgument.Target))
-		}
+	if !log.IsLevelEnabled(log.InfoLevel) || !fastlog.Enabled() {
+		return
 	}
+
+	fastlog.LogDnsResponse(
+		req.Src, req.Dst,
+		req.isTcp,
+		dialArgument.Target,
+		dialArgument.networkType.String(),
+		dialArgument.Outbound.Name,
+		string(dialArgument.Outbound.GetSelectionPolicy()),
+		dialArgument.Dialer.Name,
+		queryInfo.qname,
+		queryInfo.qtype,
+		req.routingResult.Pname,
+		req.routingResult.Mac,
+		req.routingResult.Pid,
+		req.routingResult.Ifindex,
+		req.routingResult.Dscp,
+		accepted,
+	)
 }
 
 func (c *DnsController) checkDomainBitmap(qname string, domainBitmap []uint32) (allZero bool, shouldUpdateLookupCache bool) {

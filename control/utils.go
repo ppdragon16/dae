@@ -15,7 +15,6 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -24,6 +23,7 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
+	"github.com/daeuniverse/dae/pkg/logger/fastlog"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -239,36 +239,34 @@ func (tc *TrafficLogConn) Write(p []byte) (int, error) {
 }
 
 func LogDial(src, dst netip.AddrPort, domain string, dialOption *DialOption, networkType *common.NetworkType, routingResult *bpfRoutingResult) {
-	if log.IsLevelEnabled(log.InfoLevel) {
-		fields := log.Fields{
-			"network": networkType.String(),
-			"sniffed": domain,
-			"ip":      RefineAddrPortToShow(dst),
-			"pid":     routingResult.Pid,
-			"ifindex": routingResult.Ifindex,
-			"dscp":    routingResult.Dscp,
-			"pname":   ProcessName2String(routingResult.Pname[:]),
-			"mac":     Mac2String(routingResult.Mac[:]),
-		}
-		if consts.OutboundIndex(routingResult.Outbound) == consts.OutboundControlPlaneRouting {
-			fields["controlPlaneRoute"] = "true"
-		}
-		networkTypeStr := strings.ToUpper(networkType.String())
-		if dialOption.FallbackIpVersion {
-			networkTypeStr = networkTypeStr + " (fallback)"
-		}
-		if dialOption.FallbackDialer {
-			fields["originalOutbound"] = dialOption.Outbound.Name
-			fields["originalPolicy"] = dialOption.Outbound.GetSelectionPolicy()
-			fields["fallbackDialer"] = dialOption.Dialer.Name
-			log.WithFields(fields).Infof("[%v] %v <-(fallback)-> %v", networkTypeStr, RefineSourceToShow(src, dst.Addr()), dialOption.DialTarget)
-		} else {
-			fields["outbound"] = dialOption.Outbound.Name
-			fields["policy"] = dialOption.Outbound.GetSelectionPolicy()
-			fields["dialer"] = dialOption.Dialer.Name
-			log.WithFields(fields).Infof("[%v] %v <-> %v", networkTypeStr, RefineSourceToShow(src, dst.Addr()), dialOption.DialTarget)
-		}
+	if !log.IsLevelEnabled(log.InfoLevel) || !fastlog.Enabled() {
+		return
 	}
+
+	outboundName := dialOption.Outbound.Name
+	policy := string(dialOption.Outbound.GetSelectionPolicy())
+	dialerName := dialOption.Dialer.Name
+
+	fastlog.LogDial(
+		src, dst,
+		networkType.String(),
+		domain,
+		routingResult.Pname,
+		routingResult.Mac,
+		routingResult.Pid,
+		routingResult.Ifindex,
+		routingResult.Dscp,
+		consts.OutboundIndex(routingResult.Outbound) == consts.OutboundControlPlaneRouting,
+		dialOption.FallbackIpVersion,
+		dialOption.DialTarget,
+		dialOption.FallbackDialer,
+		outboundName,
+		policy,
+		dialerName,
+		outboundName, // originalOutbound (only used when fallback=true)
+		policy,       // originalPolicy (only used when fallback=true)
+		dialerName,   // fallbackDialer (only used when fallback=true)
+	)
 }
 
 func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto consts.L4ProtoType, routingResult *bpfRoutingResult) (outboundIndex consts.OutboundIndex, mark uint32, must bool, err error) {
