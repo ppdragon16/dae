@@ -6,6 +6,7 @@
 package logger
 
 import (
+	"github.com/daeuniverse/dae/pkg/logger/fastlog"
 	log "github.com/sirupsen/logrus"
 	prefixed "github.com/x-cray/logrus-prefixed-formatter"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -26,4 +27,5 @@ func SetLogger(logLevel string, disableTimestamp bool, logFileOpt *lumberjack.Lo
 	if logFileOpt != nil {
 		log.SetOutput(logFileOpt)
 	}
+	fastlog.Configure(log.StandardLogger().Out)
 }
