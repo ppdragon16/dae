@@ -412,6 +412,9 @@ func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []s
 	// Deep copy to prevent modification.
 	conf = deepcopy.Copy(conf).(*config.Config)
 
+	// Free the temp alloc by parsing config.
+	runtime.GC()
+
 	/// Init Direct Dialers.
 	direct.InitDirectDialers(conf.Global.FallbackResolver, conf.Global.Mptcp, int(conf.Global.SoMarkFromDae))
 
