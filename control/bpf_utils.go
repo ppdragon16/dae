@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
@@ -302,5 +303,9 @@ retryLoadBpf:
 		}
 		return err
 	}
+
+	// Free BTF globa cache (~6-8MB). CO-RE won't be needed after loading.
+	btf.FlushKernelSpec()
+
 	return nil
 }

@@ -224,3 +224,60 @@ func New(sections []*config_parser.Section) (conf *Config, err error) {
 	}
 	return conf, nil
 }
+
+// GlobalTrimmed is a subset of Global containing only the fields needed
+// for subscription updates (dialer options, connectivity checks).
+// It avoids retaining the full ~40-field Global struct in memory.
+type GlobalTrimmed struct {
+	AllowInsecure       bool
+	TlsImplementation   string
+	UtlsImitate         string
+	TlsFragment         bool
+	TlsFragmentLength   string
+	TlsFragmentInterval string
+	BandwidthMaxTx      string
+	BandwidthMaxRx      string
+	UDPHopInterval      time.Duration
+	UdpCheckDns         []string
+	CheckInterval       time.Duration
+	CheckTolerance      time.Duration
+}
+
+// Trim extracts a GlobalTrimmed from the full Global.
+func (g *Global) Trim() *GlobalTrimmed {
+	return &GlobalTrimmed{
+		AllowInsecure:       g.AllowInsecure,
+		TlsImplementation:   g.TlsImplementation,
+		UtlsImitate:         g.UtlsImitate,
+		TlsFragment:         g.TlsFragment,
+		TlsFragmentLength:   g.TlsFragmentLength,
+		TlsFragmentInterval: g.TlsFragmentInterval,
+		BandwidthMaxTx:      g.BandwidthMaxTx,
+		BandwidthMaxRx:      g.BandwidthMaxRx,
+		UDPHopInterval:      g.UDPHopInterval,
+		UdpCheckDns:         g.UdpCheckDns,
+		CheckInterval:       g.CheckInterval,
+		CheckTolerance:      g.CheckTolerance,
+	}
+}
+
+// ConfigTrimmed holds only the fields from Config that are needed for
+// subscription updates, avoiding retention of the full Config (especially
+// the large Routing and Dns sections) in memory.
+type ConfigTrimmed struct {
+	Global *GlobalTrimmed
+	Group  []Group
+	Node   []KeyableString
+	Sub    []KeyableString
+}
+
+// Trim creates a ConfigTrimmed containing only the fields needed for
+// subscription updates.
+func (c *Config) Trim() *ConfigTrimmed {
+	return &ConfigTrimmed{
+		Global: c.Global.Trim(),
+		Group:  c.Group,
+		Node:   c.Node,
+		Sub:    c.Subscription,
+	}
+}

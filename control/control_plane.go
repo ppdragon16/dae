@@ -104,7 +104,7 @@ type ControlPlane struct {
 	// Subscription update support.
 	cfgFile         string
 	subscriptionDir string
-	config          *config.Config
+	config          *config.ConfigTrimmed
 	inuseDialers    []*dialer.Dialer
 	muUpdateSub     sync.Mutex
 	UpdatingSub     atomic.Bool
@@ -247,7 +247,7 @@ func NewControlPlane(
 	if global.AllowInsecure {
 		log.Warnln("AllowInsecure is enabled, but it is not recommended. Please make sure you have to turn it on.")
 	}
-	option := dialer.NewGlobalOption(global)
+	option := dialer.NewGlobalOption(global.Trim())
 
 	consts.VerifyRerouteMode(string(global.RerouteMode))
 	consts.VerifySniffVerifyMode(string(global.SniffVerifyMode))
@@ -329,7 +329,7 @@ func NewControlPlane(
 		if len(dialers) == 0 {
 			log.Infoln("\t<Empty>")
 		}
-		groupOption, err := ParseGroupOverrideOption(group, *global)
+		groupOption, err := ParseGroupOverrideOption(group, *global.Trim())
 		finalOption := option
 		if err == nil && groupOption != nil {
 			newDialers := make([]*dialer.Dialer, 0)
@@ -887,7 +887,7 @@ func convertUdpSniffPorts(ports []string) []uint16 {
 	return result
 }
 
-func ParseGroupOverrideOption(group config.Group, global config.Global) (*dialer.GlobalOption, error) {
+func ParseGroupOverrideOption(group config.Group, global config.GlobalTrimmed) (*dialer.GlobalOption, error) {
 	result := global
 	changed := false
 	// if group.TcpCheckUrl != nil {
@@ -929,7 +929,7 @@ func (c *ControlPlane) InjectBpf(bpf *bpfObjects) {
 func (c *ControlPlane) SetConfigState(cfgFile, subscriptionDir string, conf *config.Config) {
 	c.cfgFile = cfgFile
 	c.subscriptionDir = subscriptionDir
-	c.config = conf
+	c.config = conf.Trim()
 }
 
 func (c *ControlPlane) cacheDnsUpstream(dnsUpstream *dns.Upstream) {
@@ -1467,11 +1467,9 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	if err := validateGroupStructure(c.config.Group, newGroups); err != nil {
 		return fmt.Errorf("group structure changed, use SIGUSR1 for full reload: %w", err)
 	}
-	newConfig := *c.config
-	newConfig.Group = newGroups
-	newConfig.Node = newNodes
-	newConfig.Subscription = newSubs
-	c.config = &newConfig
+	c.config.Group = newGroups
+	c.config.Node = newNodes
+	c.config.Sub = newSubs
 
 	if err := c.rebuildOutboundRedirects(newGroups); err != nil {
 		return fmt.Errorf("redirect update failed: %w", err)
@@ -1490,8 +1488,8 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	for i, n := range c.config.Node {
 		nodeStrs[i] = string(n)
 	}
-	subStrs := make([]string, len(c.config.Subscription))
-	for i, s := range c.config.Subscription {
+	subStrs := make([]string, len(c.config.Sub))
+	for i, s := range c.config.Sub {
 		subStrs[i] = string(s)
 	}
 	newTagToNodeList := subscription.ResolveAllSubscriptions(&client, c.subscriptionDir, nodeStrs, subStrs)
@@ -1500,7 +1498,7 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	}
 
 	// Phase 2: Build new DialerSet from fresh data.
-	option := dialer.NewGlobalOption(&c.config.Global)
+	option := dialer.NewGlobalOption(c.config.Global)
 	newDialerSet := outbound.NewDialerSetFromLinks(option, newTagToNodeList)
 
 	// Phase 3: For each user-defined outbound group, re-filter and swap dialers.
@@ -1532,7 +1530,7 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 		// Apply group-level option override if any.
 		var groupOpt *dialer.GlobalOption
 		if groupCfg.UdpCheckDns != nil || groupCfg.CheckInterval != 0 || groupCfg.CheckTolerance != 0 {
-			groupOpt, err = ParseGroupOverrideOption(groupCfg, c.config.Global)
+			groupOpt, err = ParseGroupOverrideOption(groupCfg, *c.config.Global)
 			if err != nil {
 				return fmt.Errorf("group %q: %w", group.Name, err)
 			}

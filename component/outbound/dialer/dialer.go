@@ -74,7 +74,7 @@ type Property struct {
 	SubscriptionTag string
 }
 
-func NewGlobalOption(global *config.Global) *GlobalOption {
+func NewGlobalOption(global *config.GlobalTrimmed) *GlobalOption {
 	return &GlobalOption{
 		ExtraOption: D.ExtraOption{
 			AllowInsecure:       global.AllowInsecure,
