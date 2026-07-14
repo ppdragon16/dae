@@ -115,7 +115,7 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-n
 
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
-replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.8
+replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.9
 
 //replace github.com/cilium/ebpf => /home/mzz/goProjects/ebpf
 //replace github.com/daeuniverse/dae-config-dist/go/dae_config => /home/mzz/antlrProjects/dae-config/build/go/dae_config
