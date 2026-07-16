@@ -15,6 +15,7 @@ import (
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
+	"github.com/daeuniverse/dae/pkg/logger/fastlog"
 	"github.com/daeuniverse/outbound/pool"
 	log "github.com/sirupsen/logrus"
 )
@@ -89,8 +90,8 @@ func (ue *UdpEndpoint) run() {
 		ue.counterTraffic.Add(int64(n))
 		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
 		// Only print routing for new connection to avoid the log exploded (Quic and BT).
-		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) {
-			log.Infof("Received UDP packet reply: %v <- %v", ue.Src, from)
+		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) && fastlog.Enabled() {
+			fastlog.LogUdpReply(ue.Src, from)
 		}
 		if _, err = ue.af.WriteToUDPAddrPort(buf[:n], ue.Src); err != nil {
 			break
