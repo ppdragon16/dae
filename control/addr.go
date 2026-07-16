@@ -16,12 +16,8 @@ func RefineSourceToShow(src netip.AddrPort, dst netip.Addr) (srcToShow string) {
 		// If nothing else, this means this packet is sent from localhost.
 		return net.JoinHostPort("localhost", strconv.Itoa(int(src.Port())))
 	} else {
-		return RefineAddrPortToShow(src)
+		return src.String()
 	}
-}
-
-func RefineAddrPortToShow(addrPort netip.AddrPort) (srcToShow string) {
-	return net.JoinHostPort(net.IP(addrPort.Addr().AsSlice()).String(), strconv.Itoa(int(addrPort.Port())))
 }
 
 func ToAddrPort(addr net.Addr) netip.AddrPort {
