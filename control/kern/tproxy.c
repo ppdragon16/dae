@@ -194,6 +194,19 @@ struct dae_param {
 
 const volatile struct dae_param PARAM = {};
 
+/* dae_ifindex_map holds the runtime-updatable ifindex of the dae0 device.
+ * Unlike PARAM.dae0_ifindex (frozen in .rodata at load time), this ARRAY map
+ * can be updated from userspace without reloading the BPF program. This allows
+ * hot-recovery when the kernel recreates the netkit/veth device and assigns a
+ * new ifindex. BPF falls back to PARAM.dae0_ifindex if the map is uninitialized.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(max_entries, 1);
+} dae_ifindex_map SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__type(key, struct tuples_key);
@@ -1552,18 +1565,37 @@ static __noinline __s64 route(const __u32 *flag, const void *l4hdr,
 #undef _is_wan
 #undef _dscp
 }
+
+/* get_dae0_ifindex returns the current dae0 ifindex, preferring the
+ * runtime-updatable map over the frozen rodata constant. This allows
+ * transparent recovery when dae0 is recreated with a new ifindex.
+ */
+static __always_inline __u32 get_dae0_ifindex(void)
+{
+	__u32 key = 0;
+	__u32 *val = bpf_map_lookup_elem(&dae_ifindex_map, &key);
+
+	if (val)
+		return *val;
+	return PARAM.dae0_ifindex;
+}
+
 static __always_inline int __attribute__((unused)) redirect_to_control_plane_ingress(void)
 {
+	__u32 ifindex = get_dae0_ifindex();
+
 	// bpf_redirect_peer requires kernel >= 6.8 (CVE-2025-37959 fix).
 	if (PARAM.use_redirect_peer)
-		return bpf_redirect_peer(PARAM.dae0_ifindex, 0);
-	return bpf_redirect(PARAM.dae0_ifindex, 0);
+		return bpf_redirect_peer(ifindex, 0);
+	return bpf_redirect(ifindex, 0);
 }
 
 static __always_inline int redirect_to_control_plane_egress(void)
 {
+	__u32 ifindex = get_dae0_ifindex();
+
 	// bpf_redirect_peer() is NOT supported in egress direction.
-	return bpf_redirect(PARAM.dae0_ifindex, 0);
+	return bpf_redirect(ifindex, 0);
 }
 
 static __always_inline int assign_listener(struct __sk_buff *skb, __u8 l4proto)
