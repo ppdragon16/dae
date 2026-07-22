@@ -69,7 +69,7 @@ func newControlPlaneCore(
 	closed, toClose := context.WithCancel(context.Background())
 	ifmgr := component.NewInterfaceManager()
 	deferFuncs = append(deferFuncs, ifmgr.Close)
-	return &controlPlaneCore{
+	core := &controlPlaneCore{
 		deferFuncs:    deferFuncs,
 		bpf:           bpf,
 		kernelVersion: kernelVersion,
@@ -81,6 +81,46 @@ func newControlPlaneCore(
 		closed:        closed,
 		close:         toClose,
 	}
+
+	// Hot-update dae0 ifindex via dae_ifindex_map when the kernel recreates
+	// the device and assigns a new ifindex. Previously this required a full
+	// dae restart (SIGUSR1 reload reuses bpfObjects and does NOT refresh
+	// PARAM.dae0_ifindex).
+	ifmgr.Register(HostVethName,
+		func(link netlink.Link) {
+			// initCallback: set initial ifindex in the runtime map.
+			bpf := core.bpf
+			if bpf == nil || bpf.DaeIfindexMap == nil {
+				return
+			}
+			if err := bpf.DaeIfindexMap.Update(uint32(0), uint32(link.Attrs().Index), ebpf.UpdateAny); err != nil {
+				log.Errorf("Failed to init dae_ifindex_map: %v", err)
+			}
+		},
+		func(link netlink.Link) {
+			// newCallback: dae0 was recreated; hot-update if it drifted.
+			newIfindex := uint32(link.Attrs().Index)
+			bpf := core.bpf
+			if bpf == nil || bpf.DaeIfindexMap == nil {
+				return
+			}
+			var currentIfindex uint32
+			if err := bpf.DaeIfindexMap.Lookup(uint32(0), &currentIfindex); err != nil {
+				currentIfindex = 0
+			}
+			if newIfindex == currentIfindex {
+				return
+			}
+			if err := bpf.DaeIfindexMap.Update(uint32(0), newIfindex, ebpf.UpdateAny); err != nil {
+				log.Errorf("Failed to update dae_ifindex_map: %v", err)
+			} else {
+				log.Warnf("dae0 ifindex drift detected and recovered: %d -> %d", currentIfindex, newIfindex)
+			}
+		},
+		nil,
+	)
+
+	return core
 }
 
 func (c *controlPlaneCore) Flip() {
