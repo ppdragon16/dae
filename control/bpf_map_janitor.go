@@ -18,58 +18,112 @@ import (
 )
 
 const (
-	// cookiePidJanitorInterval is the tick interval for scanning cookie_pid_map.
+	// Base tick interval for the janitor goroutine.
+	janitorTickInterval = 10 * time.Second
+
+	// cookiePidMap scan and timeout constants.
 	cookiePidJanitorInterval = 30 * time.Second
+	cookiePidMapTimeout      = 5 * time.Minute
 
-	// cookiePidMapTimeout is the TTL for cookie_pid entries without a refresh.
-	cookiePidMapTimeout = 5 * time.Minute
+	// redirectTrack scan and timeout constants.
+	redirectTrackJanitorInterval = 30 * time.Second
+	redirectTrackTimeout         = 1 * time.Minute
 
-	// janitorBatchLookupSize is the number of entries read per BatchLookup call.
 	janitorBatchLookupSize = 1024
-
-	// janitorDeleteInitCap is the initial capacity for the delete scratch slice.
-	janitorDeleteInitCap = 256
-
-	// janitorDeleteRetainMax is the maximum retained capacity for the delete
-	// scratch slice.
+	janitorDeleteInitCap   = 256
 	janitorDeleteRetainMax = 8192
 )
 
-// cookiePidJanitorScratch holds reusable buffers for a single janitor tick,
-// avoiding per-tick allocations for BatchLookup and BatchDelete.
+// ---- cookie_pid scratch ----
+
 type cookiePidJanitorScratch struct {
 	keys   []uint64
 	values []bpfPidPname
 	delete []uint64
 }
 
-// bpfMapJanitor manages the background goroutine that periodically
-// scans and prunes stale entries from eBPF maps that use HASH (not LRU).
-//
-// Currently handles cookie_pid_map only; designed to be extended with additional
-// scratch slots and staggered cleanup intervals for redirect_track and
-// routing_tuples_map.
-type bpfMapJanitor struct {
-	cookiePidMap func() *ebpf.Map
-
-	stop    chan struct{}
-	done    chan struct{}
-	scratch cookiePidJanitorScratch
+func (j *bpfMapJanitor) obtainCookiePidScratch() *cookiePidJanitorScratch {
+	s := &j.cookiePidScratch
+	if cap(s.keys) < janitorBatchLookupSize {
+		s.keys = make([]uint64, janitorBatchLookupSize)
+	}
+	if cap(s.values) < janitorBatchLookupSize {
+		s.values = make([]bpfPidPname, janitorBatchLookupSize)
+	}
+	if cap(s.delete) < janitorDeleteInitCap {
+		s.delete = make([]uint64, 0, janitorDeleteInitCap)
+	} else {
+		s.delete = s.delete[:0]
+	}
+	return s
 }
 
-func newControlPlaneDatapathJanitor(cookiePidMap func() *ebpf.Map) bpfMapJanitor {
+func recycleCookiePidScratch(s *cookiePidJanitorScratch) {
+	if cap(s.delete) > janitorDeleteRetainMax {
+		s.delete = make([]uint64, 0, janitorDeleteInitCap)
+	} else {
+		s.delete = s.delete[:0]
+	}
+}
+
+// ---- redirect_track scratch ----
+
+type redirectTrackJanitorScratch struct {
+	keys   []bpfRedirectTuple
+	values []bpfRedirectEntry
+	delete []bpfRedirectTuple
+}
+
+func (j *bpfMapJanitor) obtainRedirectTrackScratch() *redirectTrackJanitorScratch {
+	s := &j.redirectScratch
+	if cap(s.keys) < janitorBatchLookupSize {
+		s.keys = make([]bpfRedirectTuple, janitorBatchLookupSize)
+	}
+	if cap(s.values) < janitorBatchLookupSize {
+		s.values = make([]bpfRedirectEntry, janitorBatchLookupSize)
+	}
+	if cap(s.delete) < janitorDeleteInitCap {
+		s.delete = make([]bpfRedirectTuple, 0, janitorDeleteInitCap)
+	} else {
+		s.delete = s.delete[:0]
+	}
+	return s
+}
+
+func recycleRedirectTrackScratch(s *redirectTrackJanitorScratch) {
+	if cap(s.delete) > janitorDeleteRetainMax {
+		s.delete = make([]bpfRedirectTuple, 0, janitorDeleteInitCap)
+	} else {
+		s.delete = s.delete[:0]
+	}
+}
+
+// ---- janitor ----
+
+type bpfMapJanitor struct {
+	bpf func() *bpfObjects
+
+	stop            chan struct{}
+	done            chan struct{}
+	cookiePidScratch  cookiePidJanitorScratch
+	redirectScratch   redirectTrackJanitorScratch
+}
+
+func newBpfMapJanitor(bpf func() *bpfObjects) bpfMapJanitor {
 	return bpfMapJanitor{
-		cookiePidMap: cookiePidMap,
-		stop:         make(chan struct{}),
-		done:         make(chan struct{}),
+		bpf:  bpf,
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
 	}
 }
 
 func (j *bpfMapJanitor) Start(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(cookiePidJanitorInterval)
+		ticker := time.NewTicker(janitorTickInterval)
 		defer ticker.Stop()
 		defer close(j.done)
+
+		var lastCookiePidCleanup, lastRedirectCleanup time.Time
 
 		for {
 			select {
@@ -77,8 +131,15 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 				return
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				j.cleanupCookiePidMap()
+			case now := <-ticker.C:
+				if lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
+					j.cleanupCookiePidMap()
+					lastCookiePidCleanup = now
+				}
+				if lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
+					j.cleanupRedirectTrackMap()
+					lastRedirectCleanup = now
+				}
 			}
 		}
 	}()
@@ -95,18 +156,27 @@ func (j *bpfMapJanitor) Stop() {
 	}
 }
 
-func (j *bpfMapJanitor) cleanupCookiePidMap() int {
-	m := j.cookiePidMap()
-	if m == nil {
-		return 0
-	}
-
+func monotonicNowNano() int64 {
 	var ts unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
-		log.WithError(err).Error("cleanupCookiePidMap: failed to get monotonic time")
+		return -1
+	}
+	return ts.Nano()
+}
+
+// ---- cookie_pid cleanup ----
+
+func (j *bpfMapJanitor) cleanupCookiePidMap() int {
+	bpf := j.bpf()
+	if bpf == nil {
 		return 0
 	}
-	nowNano := ts.Nano()
+	m := bpf.CookiePidMap
+	nowNano := monotonicNowNano()
+	if nowNano < 0 {
+		log.Error("cleanupCookiePidMap: failed to get monotonic time")
+		return 0
+	}
 	timeoutNano := cookiePidMapTimeout.Nanoseconds()
 
 	scratch := j.obtainCookiePidScratch()
@@ -138,28 +208,48 @@ func (j *bpfMapJanitor) cleanupCookiePidMap() int {
 	return len(scratch.delete)
 }
 
-func (j *bpfMapJanitor) obtainCookiePidScratch() *cookiePidJanitorScratch {
-	s := &j.scratch
-	if cap(s.keys) < janitorBatchLookupSize {
-		s.keys = make([]uint64, janitorBatchLookupSize)
-	}
-	if cap(s.values) < janitorBatchLookupSize {
-		s.values = make([]bpfPidPname, janitorBatchLookupSize)
-	}
-	if cap(s.delete) < janitorDeleteInitCap {
-		s.delete = make([]uint64, 0, janitorDeleteInitCap)
-	} else {
-		s.delete = s.delete[:0]
-	}
-	return s
-}
+// ---- redirect_track cleanup ----
 
-func recycleCookiePidScratch(s *cookiePidJanitorScratch) {
-	if cap(s.delete) > janitorDeleteRetainMax {
-		s.delete = make([]uint64, 0, janitorDeleteInitCap)
-	} else {
-		s.delete = s.delete[:0]
+func (j *bpfMapJanitor) cleanupRedirectTrackMap() int {
+	bpf := j.bpf()
+	if bpf == nil {
+		return 0
 	}
+	m := bpf.RedirectTrack
+	nowNano := monotonicNowNano()
+	if nowNano < 0 {
+		log.Error("cleanupRedirectTrackMap: failed to get monotonic time")
+		return 0
+	}
+	timeoutNano := redirectTrackTimeout.Nanoseconds()
+
+	scratch := j.obtainRedirectTrackScratch()
+	defer recycleRedirectTrackScratch(scratch)
+
+	var cursor ebpf.MapBatchCursor
+	for {
+		count, err := m.BatchLookup(&cursor, scratch.keys, scratch.values, nil)
+		if count > 0 {
+			for i := range count {
+				if nowNano-int64(scratch.values[i].LastSeenNs) > timeoutNano {
+					scratch.delete = append(scratch.delete, scratch.keys[i])
+				}
+			}
+		}
+		if err != nil {
+			if !isIgnorableBatchLookupErr(err) {
+				log.WithError(err).Error("cleanupRedirectTrackMap: BatchLookup error")
+			}
+			break
+		}
+	}
+
+	if len(scratch.delete) > 0 {
+		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil {
+			log.WithError(err).Debug("cleanupRedirectTrackMap: batch delete error")
+		}
+	}
+	return len(scratch.delete)
 }
 
 func isIgnorableBatchLookupErr(err error) bool {

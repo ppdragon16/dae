@@ -127,12 +127,13 @@ struct redirect_entry {
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct redirect_tuple);
 	__type(value, struct redirect_entry);
 	__uint(max_entries, 65536);
 } redirect_track SEC(".maps");
-// 7.86 MB
+// Memory is allocated on demand (BPF_F_NO_PREALLOC).
 
 struct ip_port {
 	union ip6 ip;
