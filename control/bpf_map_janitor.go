@@ -32,6 +32,7 @@ const (
 	// routingTuples scan and timeout constants.
 	routingTuplesJanitorInterval = 30 * time.Second
 	routingTuplesTimeoutActive   = 30 * time.Minute
+	routingTuplesTimeoutUdp      = 5 * time.Minute
 	routingTuplesTimeoutClosing  = 10 * time.Second
 
 	janitorBatchLookupSize = 1024
@@ -310,6 +311,7 @@ func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 		return 0
 	}
 	activeTimeout := routingTuplesTimeoutActive.Nanoseconds()
+	udpTimeout := routingTuplesTimeoutUdp.Nanoseconds()
 	closingTimeout := routingTuplesTimeoutClosing.Nanoseconds()
 
 	scratch := j.obtainRoutingTuplesScratch()
@@ -325,6 +327,8 @@ func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 				timeout := activeTimeout
 				if key.L4proto == unix.IPPROTO_TCP && val.TcpState == tcpStateClosing {
 					timeout = closingTimeout
+				} else if key.L4proto == unix.IPPROTO_UDP {
+					timeout = udpTimeout
 				}
 				if nowNano-int64(val.LastSeenNs) > timeout {
 					scratch.delete = append(scratch.delete, key)

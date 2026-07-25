@@ -326,6 +326,17 @@ func (c *controlPlaneCore) RetrieveUDPRoutingResult(src netip.AddrPort, outResul
 	return nil
 }
 
+func (c *controlPlaneCore) deleteRoutingTuplesEntry(src, dst netip.AddrPort, l4proto uint8) {
+	if c.bpf == nil || c.bpf.RoutingTuplesMap == nil {
+		return
+	}
+	tuples := obtainBpfTuplesKey(src, dst, l4proto)
+	if err := c.bpf.RoutingTuplesMap.Delete(tuples); err != nil {
+		log.WithError(err).Errorf("deleteRoutingTuplesEntry: src=%v dst=%v l4proto=%v", src, dst, l4proto)
+	}
+	recycleBpfTuplesKey(tuples)
+}
+
 func RetrieveOriginalDest(oob []byte) netip.AddrPort {
 	// 模拟 C 语言中的 CMSG_ALIGN 宏
 	// Linux 下对齐大小通常等于指针大小 (SizeofPtr)

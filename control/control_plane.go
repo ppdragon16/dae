@@ -1236,6 +1236,8 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 	/// Handle DNS
 	// To keep consistency with kernel program, we only sniff DNS request sent to 53.
 	if dst.Port() == 53 {
+		defer c.core.deleteRoutingTuplesEntry(src, netip.AddrPort{}, 17 /* IPPROTO_UDP */)
+
 		var routingResult *bpfRoutingResult
 		var ok bool
 		if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
