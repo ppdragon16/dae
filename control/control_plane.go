@@ -100,6 +100,8 @@ type ControlPlane struct {
 
 	udpTaskPool *UdpTaskPool[netip.AddrPort, emitParam]
 
+	bpfMapJanitor bpfMapJanitor
+
 	// Subscription update support.
 	cfgFile         string
 	subscriptionDir string
@@ -457,6 +459,13 @@ func NewControlPlane(
 		dnsRouteCache:         common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil),
 		dnsRoutingResultCache: common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
 		udpTaskPool:           NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
+
+		bpfMapJanitor: newControlPlaneDatapathJanitor(func() *ebpf.Map {
+			if core.bpf == nil {
+				return nil
+			}
+			return core.bpf.CookiePidMap
+		}),
 	}
 	plane.inuseDialers = inuseDialers
 	if err := plane.rebuildOutboundRedirects(groups); err != nil {
@@ -1129,6 +1138,8 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	udpTaskChan := c.startUdpWorkers(100)
 	go c.loopUdp(udpConn, udpTaskChan)
 
+	c.bpfMapJanitor.Start(c.ctx)
+
 	<-c.ctx.Done()
 	return nil
 }
@@ -1742,9 +1753,14 @@ func (c *ControlPlane) AbortConnections() (err error) {
 	})
 	return errors.Join(errs...)
 }
+
 func (c *ControlPlane) Close() (err error) {
 	c.dnsRouteCache.Close()
 	c.dnsRoutingResultCache.Close()
+
+	// Stop janitor before cancel (so BPF maps are still valid during cleanup).
+	c.bpfMapJanitor.Stop()
+
 	// Invoke defer funcs in reverse order.
 	for i := len(c.deferFuncs) - 1; i >= 0; i-- {
 		if e := c.deferFuncs[i](); e != nil {
