@@ -461,12 +461,7 @@ func NewControlPlane(
 		dnsRoutingResultCache: common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
 		udpTaskPool:           NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 
-		bpfMapJanitor: newControlPlaneDatapathJanitor(func() *ebpf.Map {
-			if core.bpf == nil {
-				return nil
-			}
-			return core.bpf.CookiePidMap
-		}),
+		bpfMapJanitor: newBpfMapJanitor(func() *bpfObjects { return core.bpf }),
 	}
 	plane.inuseDialers = inuseDialers
 	if err := plane.rebuildOutboundRedirects(groups); err != nil {
