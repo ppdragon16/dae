@@ -29,6 +29,11 @@ const (
 	redirectTrackJanitorInterval = 30 * time.Second
 	redirectTrackTimeout         = 1 * time.Minute
 
+	// routingTuples scan and timeout constants.
+	routingTuplesJanitorInterval = 30 * time.Second
+	routingTuplesTimeoutActive   = 30 * time.Minute
+	routingTuplesTimeoutClosing  = 10 * time.Second
+
 	janitorBatchLookupSize = 1024
 	janitorDeleteInitCap   = 256
 	janitorDeleteRetainMax = 8192
@@ -98,15 +103,48 @@ func recycleRedirectTrackScratch(s *redirectTrackJanitorScratch) {
 	}
 }
 
+// ---- routing_tuples scratch ----
+
+type routingTuplesJanitorScratch struct {
+	keys   []bpfTuplesKey
+	values []bpfRoutingResult
+	delete []bpfTuplesKey
+}
+
+func (j *bpfMapJanitor) obtainRoutingTuplesScratch() *routingTuplesJanitorScratch {
+	s := &j.routingTuplesScratch
+	if cap(s.keys) < janitorBatchLookupSize {
+		s.keys = make([]bpfTuplesKey, janitorBatchLookupSize)
+	}
+	if cap(s.values) < janitorBatchLookupSize {
+		s.values = make([]bpfRoutingResult, janitorBatchLookupSize)
+	}
+	if cap(s.delete) < janitorDeleteInitCap {
+		s.delete = make([]bpfTuplesKey, 0, janitorDeleteInitCap)
+	} else {
+		s.delete = s.delete[:0]
+	}
+	return s
+}
+
+func recycleRoutingTuplesScratch(s *routingTuplesJanitorScratch) {
+	if cap(s.delete) > janitorDeleteRetainMax {
+		s.delete = make([]bpfTuplesKey, 0, janitorDeleteInitCap)
+	} else {
+		s.delete = s.delete[:0]
+	}
+}
+
 // ---- janitor ----
 
 type bpfMapJanitor struct {
 	bpf func() *bpfObjects
 
-	stop            chan struct{}
-	done            chan struct{}
-	cookiePidScratch  cookiePidJanitorScratch
-	redirectScratch   redirectTrackJanitorScratch
+	stop                 chan struct{}
+	done                 chan struct{}
+	cookiePidScratch     cookiePidJanitorScratch
+	redirectScratch      redirectTrackJanitorScratch
+	routingTuplesScratch routingTuplesJanitorScratch
 }
 
 func newBpfMapJanitor(bpf func() *bpfObjects) bpfMapJanitor {
@@ -123,7 +161,7 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 		defer ticker.Stop()
 		defer close(j.done)
 
-		var lastCookiePidCleanup, lastRedirectCleanup time.Time
+		var lastCookiePidCleanup, lastRedirectCleanup, lastRoutingTuplesCleanup time.Time
 
 		for {
 			select {
@@ -139,6 +177,10 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 				if lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
 					j.cleanupRedirectTrackMap()
 					lastRedirectCleanup = now
+				}
+				if lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
+					j.cleanupRoutingTuplesMap()
+					lastRoutingTuplesCleanup = now
 				}
 			}
 		}
@@ -247,6 +289,59 @@ func (j *bpfMapJanitor) cleanupRedirectTrackMap() int {
 	if len(scratch.delete) > 0 {
 		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil {
 			log.WithError(err).Debug("cleanupRedirectTrackMap: batch delete error")
+		}
+	}
+	return len(scratch.delete)
+}
+
+// ---- routing_tuples cleanup ----
+
+const tcpStateClosing = 1
+
+func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
+	bpf := j.bpf()
+	if bpf == nil {
+		return 0
+	}
+	m := bpf.RoutingTuplesMap
+	nowNano := monotonicNowNano()
+	if nowNano < 0 {
+		log.Error("cleanupRoutingTuplesMap: failed to get monotonic time")
+		return 0
+	}
+	activeTimeout := routingTuplesTimeoutActive.Nanoseconds()
+	closingTimeout := routingTuplesTimeoutClosing.Nanoseconds()
+
+	scratch := j.obtainRoutingTuplesScratch()
+	defer recycleRoutingTuplesScratch(scratch)
+
+	var cursor ebpf.MapBatchCursor
+	for {
+		count, err := m.BatchLookup(&cursor, scratch.keys, scratch.values, nil)
+		if count > 0 {
+			for i := range count {
+				val := scratch.values[i]
+				key := scratch.keys[i]
+				timeout := activeTimeout
+				if key.L4proto == unix.IPPROTO_TCP && val.TcpState == tcpStateClosing {
+					timeout = closingTimeout
+				}
+				if nowNano-int64(val.LastSeenNs) > timeout {
+					scratch.delete = append(scratch.delete, key)
+				}
+			}
+		}
+		if err != nil {
+			if !isIgnorableBatchLookupErr(err) {
+				log.WithError(err).Error("cleanupRoutingTuplesMap: BatchLookup error")
+			}
+			break
+		}
+	}
+
+	if len(scratch.delete) > 0 {
+		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil {
+			log.WithError(err).Debug("cleanupRoutingTuplesMap: batch delete error")
 		}
 	}
 	return len(scratch.delete)
