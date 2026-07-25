@@ -372,14 +372,15 @@ struct pid_pname {
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, __u64);
 	__type(value, struct pid_pname);
 	__uint(max_entries, MAX_COOKIE_PID_PNAME_MAPPING_NUM);
 	/// NOTICE: No persistence.
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } cookie_pid_map SEC(".maps");
-// 6.29 MB
+// Memory is allocated on demand (BPF_F_NO_PREALLOC).
 
 struct udp_conn_state {
 	// For each flow (echo symmetric path), note the original flow direction.
