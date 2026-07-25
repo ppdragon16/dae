@@ -149,6 +149,9 @@ struct routing_result {
 	__u32 pid;
 	__u32 ifindex;
 	__u8 dscp;
+	__u8 tcp_state;
+	__u8 padding[2];
+	__u64 last_seen_ns;
 };
 
 struct tuples_key {
@@ -208,15 +211,19 @@ struct {
 	__uint(max_entries, 1);
 } dae_ifindex_map SEC(".maps");
 
+// routing_tuples_map uses HASH (not LRU) so the kernel never silently evicts
+// entries. Active connections refresh last_seen_ns on every packet; stale
+// entries are cleaned by the Go-side janitor with dual timeout (e.g. 30m for
+// ACTIVE/UDP & 10s for CLOSING).
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct tuples_key);
-	__type(value, struct routing_result); // outbound
+	__type(value, struct routing_result);
 	__uint(max_entries, MAX_DST_MAPPING_NUM);
-	/// NOTICE: It MUST be pinned.
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(pinning, LIBBPF_PIN_NONE);
 } routing_tuples_map SEC(".maps");
-// 18.87 MB
+// Memory is allocated on demand (BPF_F_NO_PREALLOC).
 
 /* Sockets in fast_sock map are used for fast-redirecting via
  * sk_msg/fast_redirect. Sockets are automactically deleted from map once
@@ -379,7 +386,7 @@ struct {
 	__type(value, struct pid_pname);
 	__uint(max_entries, MAX_COOKIE_PID_PNAME_MAPPING_NUM);
 	/// NOTICE: No persistence.
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(pinning, LIBBPF_PIN_NONE);
 } cookie_pid_map SEC(".maps");
 // Memory is allocated on demand (BPF_F_NO_PREALLOC).
 
@@ -1863,8 +1870,12 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 			bpf_map_lookup_elem(&routing_tuples_map,
 					    &routing_tuples_key);
 
-		if (routing_result)
+		if (routing_result) {
+			routing_result->last_seen_ns = bpf_ktime_get_ns();
+			if (tcph.fin || tcph.rst)
+				routing_result->tcp_state = TCP_STATE_CLOSING;
 			goto control_plane;
+		}
 
 		// Non-proxy connections or previous connections.
 		return TC_ACT_PIPE;
@@ -1927,6 +1938,7 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 	routing_result.ifindex = ifindex;
 	__builtin_memcpy(routing_result.mac, ethh.h_source,
 			 sizeof(routing_result.mac));
+	routing_result.last_seen_ns = bpf_ktime_get_ns();
 
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 	if (is_wan) {
