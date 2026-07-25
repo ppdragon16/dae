@@ -114,6 +114,8 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		return common.Wrap(err, "failed to retrieve target info %v", dst.String())
 	}
 
+	defer c.core.deleteRoutingTuplesEntry(src, dst, 6 /* IPPROTO_TCP */)
+
 	src = common.ConvergeAddrPort(src)
 	dst = common.ConvergeAddrPort(dst)
 	if istcpdns {
