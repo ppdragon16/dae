@@ -159,18 +159,26 @@ func BpfMapBatchUpdate(m *ebpf.Map, keys interface{}, values interface{}, opts *
 }
 
 // BpfMapBatchDelete deletes keys and ignores ErrKeyNotExist.
+// Uses kernel batch delete API when available (5.6+), otherwise falls back to loop.
 func BpfMapBatchDelete(m *ebpf.Map, keys interface{}) (n int, err error) {
-	// Simulate
+	if !SimulateBatchUpdate {
+		n, err = m.BatchDelete(keys, &ebpf.BatchOptions{})
+		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return n, fmt.Errorf("batch delete map %s: %w", m.String(), err)
+		}
+		return n, nil
+	}
+
+	// Fallback: simulate with individual Delete calls.
 	vKeys := reflect.ValueOf(keys)
 	if vKeys.Kind() != reflect.Slice {
 		return 0, fmt.Errorf("keys must be slice")
 	}
 	length := vKeys.Len()
-
-	for i := 0; i < length; i++ {
+	for i := range length {
 		vKey := vKeys.Index(i)
 		if err = m.Delete(vKey.Interface()); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return i, err
+			return i, fmt.Errorf("batch delete map %s at index %d: %w", m.String(), i, err)
 		}
 	}
 	return vKeys.Len(), nil
