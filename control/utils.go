@@ -19,6 +19,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cilium/ebpf"
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/outbound"
@@ -326,15 +327,21 @@ func (c *controlPlaneCore) RetrieveUDPRoutingResult(src netip.AddrPort, outResul
 	return nil
 }
 
-func (c *controlPlaneCore) deleteRoutingTuplesEntry(src, dst netip.AddrPort, l4proto uint8) {
+func (c *controlPlaneCore) closeRoutingTuplesEntry(src, dst netip.AddrPort, l4proto uint8) {
 	if c.bpf == nil || c.bpf.RoutingTuplesMap == nil {
 		return
 	}
 	tuples := obtainBpfTuplesKey(src, dst, l4proto)
-	if err := c.bpf.RoutingTuplesMap.Delete(tuples); err != nil {
-		log.WithError(err).Errorf("deleteRoutingTuplesEntry: src=%v dst=%v l4proto=%v", src, dst, l4proto)
+	defer recycleBpfTuplesKey(tuples)
+
+	var result bpfRoutingResult
+	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, &result); err != nil {
+		return // entry doesn't exist or already closed, nothing to do
 	}
-	recycleBpfTuplesKey(tuples)
+	result.State = 1 // CLOSING — janitor will delete within 10s
+	if err := c.bpf.RoutingTuplesMap.Update(tuples, &result, ebpf.UpdateExist); err != nil {
+		log.WithError(err).Errorf("closeRoutingTuplesEntry: src=%v dst=%v l4proto=%v", src, dst, l4proto)
+	}
 }
 
 func RetrieveOriginalDest(oob []byte) netip.AddrPort {

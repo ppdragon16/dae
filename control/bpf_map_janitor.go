@@ -297,8 +297,6 @@ func (j *bpfMapJanitor) cleanupRedirectTrackMap() int {
 
 // ---- routing_tuples cleanup ----
 
-const tcpStateClosing = 1
-
 func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 	bpf := j.bpf()
 	if bpf == nil {
@@ -325,7 +323,7 @@ func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 				val := scratch.values[i]
 				key := scratch.keys[i]
 				timeout := activeTimeout
-				if key.L4proto == unix.IPPROTO_TCP && val.TcpState == tcpStateClosing {
+				if val.State == 1 { // Closing state
 					timeout = closingTimeout
 				} else if key.L4proto == unix.IPPROTO_UDP {
 					timeout = udpTimeout
