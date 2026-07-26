@@ -149,7 +149,7 @@ struct routing_result {
 	__u32 pid;
 	__u32 ifindex;
 	__u8 dscp;
-	__u8 tcp_state;
+	__u8 state;
 	__u8 padding[2];
 	__u64 last_seen_ns;
 };
@@ -521,10 +521,10 @@ struct {
 	__uint(max_entries, 1);
 } conntrack_args_map SEC(".maps");
 
-// TCP connection state constants.
-enum tcp_state {
-	TCP_STATE_ACTIVE = 0,
-	TCP_STATE_CLOSING = 1,  // FIN or RST seen
+// Connection state constants for routing results.
+enum routing_result_state {
+	STATE_ACTIVE = 0,
+	STATE_CLOSING = 1,  // Go-side closeRoutingTuplesEntry sets this for both TCP and UDP
 };
 
 // Functions:
@@ -1873,7 +1873,7 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 		if (routing_result) {
 			routing_result->last_seen_ns = bpf_ktime_get_ns();
 			if (tcph.fin || tcph.rst)
-				routing_result->tcp_state = TCP_STATE_CLOSING;
+				routing_result->state = STATE_CLOSING;
 			goto control_plane;
 		}
 
