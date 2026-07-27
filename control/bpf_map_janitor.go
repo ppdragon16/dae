@@ -32,8 +32,8 @@ const (
 	// routingTuples scan and timeout constants.
 	routingTuplesJanitorInterval = 30 * time.Second
 	routingTuplesTimeoutActive   = 30 * time.Minute
-	routingTuplesTimeoutUdp      = 10 * time.Second
 	routingTuplesTimeoutClosing  = 10 * time.Second
+	routingTuplesTimeoutUdp      = 5 * time.Minute
 
 	janitorBatchLookupSize = 1024
 	janitorDeleteInitCap   = 256

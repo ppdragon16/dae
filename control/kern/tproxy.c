@@ -1748,6 +1748,18 @@ static __always_inline bool pid_is_control_plane(struct __sk_buff *skb,
 	return false;
 }
 
+long control_plane_save_udp_traffic(struct tuples_key* key, struct routing_result *routing_result)
+{
+	__builtin_memset(&key->dip, 0, sizeof(key->dip));
+	key->dport = 0;
+	struct routing_result *existing = bpf_map_lookup_elem(&routing_tuples_map, key);
+	if (existing) {
+		existing->last_seen_ns = routing_result->last_seen_ns;
+		return 0;
+	}
+	return bpf_map_update_elem(&routing_tuples_map, key, routing_result, BPF_ANY);
+}
+
 // Routing and redirect the packet back.
 static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 link_h_len)
 {
@@ -1799,17 +1811,10 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 
 	bool isdns = tuples.five.dport == bpf_htons(53) && (l4proto == IPPROTO_UDP || l4proto == IPPROTO_TCP);
 
-	struct tuples_key routing_tuples_key = tuples.five;
-	if (l4proto == IPPROTO_UDP) {
-		__builtin_memset(&routing_tuples_key.dip, 0, sizeof(routing_tuples_key.dip));
-		routing_tuples_key.dport = 0;
-	}
-
 	if (l4proto == IPPROTO_TCP && !(tcph.syn && !tcph.ack)) {
 		// Established TCP Connection.
 		struct routing_result *routing_result =
-			bpf_map_lookup_elem(&routing_tuples_map,
-					    &routing_tuples_key);
+			bpf_map_lookup_elem(&routing_tuples_map, &tuples.five);
 
 		if (routing_result) {
 			routing_result->last_seen_ns = bpf_ktime_get_ns();
@@ -1820,6 +1825,33 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 
 		// Non-proxy connections or previous connections.
 		return TC_ACT_PIPE;
+	}
+
+	struct tuples_key udp_tuples_key;
+	if (l4proto == IPPROTO_UDP) {
+		udp_tuples_key = tuples.five;
+		// Fast-path: per-flow full-5-tuple lookup. For DNS, zero
+		// sport so all queries from the same IP share one entry.
+		// Note: this assumes the rules configuration never uses
+		// sport to differentiate routing for UDP 53.
+		if (isdns)
+			udp_tuples_key.sport = 0;
+		struct routing_result *routing_result =
+			bpf_map_lookup_elem(&routing_tuples_map, &udp_tuples_key);
+		if (routing_result) {
+			routing_result->last_seen_ns = bpf_ktime_get_ns();
+			switch (routing_result->outbound) {
+			case OUTBOUND_DIRECT:
+				goto direct;
+			case OUTBOUND_BLOCK:
+				goto block;
+			default:
+				if (control_plane_save_udp_traffic(&udp_tuples_key, routing_result)) {
+					goto block;
+				}
+				goto control_plane;
+			}
+		}
 	}
 
 	// New Connection.
@@ -1880,6 +1912,11 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 	__builtin_memcpy(routing_result.mac, ethh.h_source,
 			 sizeof(routing_result.mac));
 	routing_result.last_seen_ns = bpf_ktime_get_ns();
+
+	if (l4proto == IPPROTO_UDP) {
+		bpf_map_update_elem(&routing_tuples_map, &udp_tuples_key,
+					&routing_result, BPF_ANY);
+	}
 
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 	if (is_wan) {
@@ -1947,8 +1984,13 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 	}
 
 	// Only proxy traffic should be saved.
-	if (bpf_map_update_elem(&routing_tuples_map, &routing_tuples_key,
-				&routing_result, BPF_ANY)) {
+	long ret;
+	if (l4proto == IPPROTO_UDP) {
+		ret = control_plane_save_udp_traffic(&udp_tuples_key, &routing_result);
+	} else {
+		ret = bpf_map_update_elem(&routing_tuples_map, &tuples.five, &routing_result, BPF_ANY);
+	}
+	if (ret) {
 		bpf_printk("shot save routing result: %d", s64_ret);
 		return TC_ACT_SHOT;
 	}
