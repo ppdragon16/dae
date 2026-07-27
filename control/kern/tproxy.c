@@ -1760,6 +1760,27 @@ long control_plane_save_udp_traffic(struct tuples_key* key, struct routing_resul
 	return bpf_map_update_elem(&routing_tuples_map, key, routing_result, BPF_ANY);
 }
 
+// Returns 0 to continue, 1 for direct, 2 for block.
+u32 check_connectivity_map(struct routing_result *routing_result, struct __sk_buff *skb, u8 l4proto) {
+	if (routing_result->outbound >= OUTBOUND_MUST_RULES)
+		return 0;
+	struct outbound_connectivity_query q = {
+		.outbound = routing_result->outbound,
+		.ipversion = skb->protocol == bpf_htons(ETH_P_IP) ? 4 : 6,
+		.l4proto = l4proto
+	};
+	
+#if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
+		bpf_printk("outbound_connectivity_query: outbound: %u, ipversion: %u, l4proto: %u", q.outbound, q.ipversion, q.l4proto);
+#endif
+
+	__u32 *alive = bpf_map_lookup_elem(&outbound_connectivity_map, &q);
+	if (!alive) {
+		return 1;
+	}
+	return *alive;
+}
+
 // Routing and redirect the packet back.
 static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 link_h_len)
 {
@@ -1846,6 +1867,15 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 			case OUTBOUND_BLOCK:
 				goto block;
 			default:
+				// Check connectivity — redirect based on alive state.
+				if (!isdns) {
+					switch (check_connectivity_map(routing_result, skb, l4proto)) {
+					case 1:
+						goto direct;
+					case 2:
+						goto block;
+					}
+				}
 				if (control_plane_save_udp_traffic(&udp_tuples_key, routing_result)) {
 					goto block;
 				}
@@ -1956,26 +1986,10 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 		goto block;
 	}
 
-	if (!isdns && routing_result.outbound < OUTBOUND_MUST_RULES) {
-		// Check outbound connectivity in specific ipversion and l4proto.
-		struct outbound_connectivity_query q = {
-			.outbound = routing_result.outbound,
-			.ipversion = skb->protocol == bpf_htons(ETH_P_IP) ? 4 : 6,
-			.l4proto = l4proto
-		};
+	if (!isdns) {
+		// Check connectivity — redirect based on alive state.
 
-#if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
-		bpf_printk("outbound_connectivity_query: outbound: %u, ipversion: %u, l4proto: %u", q.outbound, q.ipversion, q.l4proto);
-#endif
-
-		__u32 *alive = bpf_map_lookup_elem(&outbound_connectivity_map, &q);
-
-		if (!alive) {
-			// Outbound is not ready. skip
-			return TC_ACT_PIPE;
-		}
-
-		switch (*alive) {
+		switch (check_connectivity_map(&routing_result, skb, l4proto)) {
 		case 1:
 			goto direct;
 		case 2:
