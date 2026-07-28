@@ -150,6 +150,7 @@ var (
 	BpfTimerFeatureVersion                    = internal.Version{5, 15, 0}
 	HelperBpfGetFuncIpVersionFeatureVersion   = internal.Version{5, 15, 0}
 	BpfLoopFeatureVersion                     = internal.Version{5, 17, 0}
+	RedirectPeerFeatureVersion                = internal.Version{6, 8, 0}
 )
 
 var (

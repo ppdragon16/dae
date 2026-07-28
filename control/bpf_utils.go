@@ -232,6 +232,7 @@ type loadBpfOptions struct {
 	PinPath             string
 	BigEndianTproxyPort uint32
 	CollectionOptions   *ebpf.CollectionOptions
+	KernelVersion       *internal.Version
 }
 
 func loadBpfObjectsWithConstants(obj interface{}, opts *ebpf.CollectionOptions, constants map[string]interface{}) error {
@@ -273,7 +274,12 @@ retryLoadBpf:
 			dae0NetnsId:          uint32(netnsID),
 			dae0peerMac:          [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
 			paddingAfterMac:      [2]byte{},
-			useRedirectPeer:      0,
+			useRedirectPeer:      func() uint8 {
+				if opts.KernelVersion != nil && !opts.KernelVersion.Less(consts.RedirectPeerFeatureVersion) {
+					return 1
+				}
+				return 0
+			}(),
 			hasBpfGetCurrentTask: 1,
 			padding2:             0,
 			daeSocketMark:        0,
