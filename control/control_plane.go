@@ -220,6 +220,7 @@ func NewControlPlane(
 			PinPath:             pinPath,
 			BigEndianTproxyPort: uint32(common.Htons(global.TproxyPort)),
 			CollectionOptions:   collectionOpts,
+			KernelVersion:       &kernelVersion,
 		}); err != nil {
 			err = common.Wrap(err, "load eBPF objects")
 			if log.IsLevelEnabled(log.PanicLevel) {

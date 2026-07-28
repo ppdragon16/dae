@@ -130,10 +130,6 @@ struct {
 } redirect_track SEC(".maps");
 // Memory is allocated on demand (BPF_F_NO_PREALLOC).
 
-struct ip_port {
-	union ip6 ip;
-	__be16 port;
-};
 
 struct routing_result {
 	__u32 mark;
@@ -161,22 +157,6 @@ struct tuples {
 	struct tuples_key five;
 	__u8 dscp;
 };
-
-struct l4_hdr {
-	union {
-		struct tcphdr tcph;
-		struct udphdr udph;
-		struct icmp6hdr icmp6h;
-	};
-};
-
-struct l3_hdr {
-	union {
-		struct iphdr iph;
-		struct ipv6hdr ipv6h;
-	};
-};
-
 struct dae_param {
 	__u32 tproxy_port;
 	__u32 control_plane_pid;
@@ -362,11 +342,6 @@ struct {
 } domain_bump_map SEC(".maps");
 // 13.63 MB
 
-struct ip_port_proto {
-	__u32 ip[4];
-	__be16 port;
-	__u8 proto;
-};
 
 struct pid_pname {
 	__u64 last_seen_ns;
@@ -459,45 +434,6 @@ struct {
 	__uint(max_entries, 1);
 } route_ctx_scratch_map SEC(".maps");
 
-struct wan_egress_route_scratch {
-	__u32 flag[8];
-	__be32 mac_be[4];
-	__u8 is_wan;
-	__u8 must_val;
-	__u8 mac[6];
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, __u32);
-	__type(value, struct wan_egress_route_scratch);
-	__uint(max_entries, 1);
-} wan_egress_route_scratch_map SEC(".maps");
-
-// Per-CPU scratch to tunnel conntrack args past the BPF 5-argument limit.
-#define CT_ARGS_HAS_ROUTING  BIT(0)
-#define CT_ARGS_HAS_MAC      BIT(1)
-#define CT_ARGS_HAS_PNAME    BIT(2)
-
-struct conntrack_args {
-	__u8 flags;        // CT_ARGS_HAS_* bitmask
-	__u8 outbound;
-	__u8 must;
-	__u8 dscp;
-	__u32 mark;
-	__u32 pid;
-	__u8 mac[6];
-	__u8 padding[2];
-	__u8 pname[TASK_COMM_LEN];
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, __u32);
-	__type(value, struct conntrack_args);
-	__uint(max_entries, 1);
-} conntrack_args_map SEC(".maps");
-
 // Connection state constants for routing results.
 enum routing_result_state {
 	STATE_ACTIVE = 0,
@@ -553,45 +489,6 @@ get_tuples(const struct __sk_buff *skb, struct tuples *tuples,
 		tuples->five.sport = udph->source;
 		tuples->five.dport = udph->dest;
 	}
-}
-
-__attribute__((unused)) static __always_inline void
-conntrack_args_set(struct conntrack_args *a,
-		   __u8 *outbound, __u32 *mark, __u8 *must, __u8 *mac,
-		   __u8 dscp, const char *pname, __u32 pid)
-{
-	__u8 flags = 0;
-
-	a->outbound = 0;
-	a->must = 0;
-	a->dscp = dscp;
-	a->mark = 0;
-	a->pid = 0;
-	__builtin_memset(a->mac, 0, sizeof(a->mac));
-	__builtin_memset(a->pname, 0, sizeof(a->pname));
-
-	if (outbound) {
-		flags |= CT_ARGS_HAS_ROUTING;
-		a->outbound = *outbound;
-		a->mark = *mark;
-		a->must = *must;
-	}
-	if (mac) {
-		flags |= CT_ARGS_HAS_MAC;
-		__builtin_memcpy(a->mac, mac, 6);
-	}
-	if (pname) {
-		flags |= CT_ARGS_HAS_PNAME;
-		__builtin_memcpy(a->pname, pname, TASK_COMM_LEN);
-	}
-	a->pid = pid;
-	a->flags = flags;
-}
-
-static __always_inline const char *
-__attribute__((unused)) conntrack_args_pname_or_null(const struct conntrack_args *a)
-{
-	return a->flags & CT_ARGS_HAS_PNAME ? (const char *)a->pname : NULL;
 }
 
 static __always_inline __u8
@@ -1060,30 +957,6 @@ parse_packet(struct __sk_buff *skb, __u32 link_h_len,
 	return ret;
 }
 
-// static __always_inline bool
-// is_bittorrent(const struct __sk_buff *skb, __u32 offset)
-// {
-//     __u8 buf[20];
-//     int ret = bpf_skb_load_bytes(skb, offset, buf, sizeof(buf));
-
-//     if (ret) {
-// 	return false;
-//     }
-
-//     if (buf[0] != 0x13) {
-// 	return false;
-//     }
-
-//     const char *protocol = "BitTorrent protocol";
-
-//     for (int i = 0; i < 19; i++) {
-// 	if (buf[i + 1] != protocol[i]) {
-// 	    return false;
-// 	}
-//     }
-
-//     return true;
-// }
 
 // Only work for first packet of a new connection.
 static __always_inline bool
@@ -1116,7 +989,6 @@ is_utp(const struct __sk_buff *skb, __u8 l4proto, __u32 offset)
 
 	for (int i = 0; i < UTP_MAX_EXTENSIONS; i++) {
 		if (extension == 0) {
-			// return is_bittorrent(skb, offset);
 			return true;
 		}
 		if (extension > 0x04)
@@ -1132,31 +1004,6 @@ is_utp(const struct __sk_buff *skb, __u8 l4proto, __u32 offset)
 	return false;
 }
 
-// static __always_inline bool
-// is_udp_tracker(const struct __sk_buff *skb, __u8 l4proto, __u32 offset) {
-// 	const __u32 tracker_connect_min_size = 16;
-//     const __u64 tracker_protocol_id = 0x41727101980;
-//     const __u32 tracker_connect_action = 0;
-
-// 	if (l4proto != IPPROTO_UDP || skb->len < offset + tracker_connect_min_size) {
-// 		return false;
-// 	}
-
-// 	__u64 id;
-// 	__u32 action;
-// 	int ret = bpf_skb_load_bytes(skb, offset, &id, sizeof(id));
-
-// 	if (ret || id != tracker_protocol_id) {
-// 		return false;
-// 	}
-
-// 	ret = bpf_skb_load_bytes(skb, offset + sizeof(id), &action, sizeof(action));
-// 	if (ret || action != tracker_connect_action) {
-// 		return false;
-// 	}
-
-// 	return true;
-// }
 
 static __always_inline int
 route_match_lpm(struct route_ctx *ctx, const struct match_set *match_set,
@@ -1566,7 +1413,7 @@ static __always_inline __u32 get_dae0_ifindex(void)
 	return PARAM.dae0_ifindex;
 }
 
-static __always_inline int __attribute__((unused)) redirect_to_control_plane_ingress(void)
+static __always_inline int redirect_to_control_plane_ingress(void)
 {
 	__u32 ifindex = get_dae0_ifindex();
 
@@ -2015,7 +1862,11 @@ control_plane:
 	skb->cb[0] = TPROXY_MARK;
 	skb->cb[1] = pkt->listener_l4proto;
 	prep_redirect_to_control_plane(skb, link_h_len, &tuples, &ethh, is_wan);
-	return redirect_to_control_plane_egress();
+	// lan_ingress is a tc ingress hook where bpf_redirect_peer is valid;
+	// wan_egress is a tc egress hook where it is not.
+	if (is_wan)
+		return redirect_to_control_plane_egress();
+	return redirect_to_control_plane_ingress();
 
 direct:
 	return TC_ACT_PIPE;
