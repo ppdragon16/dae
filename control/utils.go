@@ -318,11 +318,11 @@ func (c *controlPlaneCore) RetrieveTCPRoutingResult(src, dst netip.AddrPort, out
 	return nil
 }
 
-func (c *controlPlaneCore) RetrieveUDPRoutingResult(src netip.AddrPort, outResult *bpfRoutingResult) error {
-	tuples := obtainBpfTuplesKey(src, netip.AddrPort{}, unix.IPPROTO_UDP)
+func (c *controlPlaneCore) RetrieveUDPRoutingResult(src, dst netip.AddrPort, outResult *bpfRoutingResult) error {
+	tuples := obtainBpfTuplesKey(src, dst, unix.IPPROTO_UDP)
 	defer recycleBpfTuplesKey(tuples)
 	if err := c.bpf.RoutingTuplesMap.Lookup(tuples, outResult); err != nil {
-		return fmt.Errorf("reading map for udp: key [%v, udp, 0]: %w", src.String(), err)
+		return fmt.Errorf("reading map for udp: key [%v, udp, %v]: %w", src.String(), dst.String(), err)
 	}
 	return nil
 }
