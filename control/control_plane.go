@@ -1245,7 +1245,7 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 			routingResult = new(bpfRoutingResult)
 			// DNS routing is per-IP, not per-sport.
 			dnsSrc := netip.AddrPortFrom(src.Addr(), 0)
-			if err = c.core.RetrieveUDPRoutingResult(dnsSrc, routingResult); err != nil {
+			if err = c.core.RetrieveUDPRoutingResult(dnsSrc, dst, routingResult); err != nil {
 				if log.IsLevelEnabled(log.ErrorLevel) {
 					log.Errorf("%+v", common.Wrap(err, "Failed to retrieve udp 53 routing result, src: %v", src))
 				}

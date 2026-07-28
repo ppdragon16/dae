@@ -83,7 +83,8 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 	routingResult := ObtainBpfRoutingResult()
 	defer RecycleBpfRoutingResult(routingResult)
 
-	if err := c.core.RetrieveUDPRoutingResult(src, routingResult); err != nil {
+	dst := ueKey.Dst
+	if err := c.core.RetrieveUDPRoutingResult(src, dst, routingResult); err != nil {
 		return nil, common.Wrap(err, "No AddrPort presented")
 	}
 
@@ -104,7 +105,6 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 	// Dial
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
-	dst := ueKey.Dst
 	udpConn, err := dialOption.Dialer.ListenPacket(ctx, dialOption.DialTarget)
 	if err != nil {
 		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
