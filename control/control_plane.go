@@ -110,6 +110,12 @@ type ControlPlane struct {
 	inuseDialers    []*dialer.Dialer
 	muUpdateSub     sync.Mutex
 	UpdatingSub     atomic.Bool
+
+	// Routing update support.
+	UpdatingRouting   atomic.Bool
+	muUpdateRouting   sync.Mutex
+	locationFinder    *assets.LocationFinder
+	externGeoDataDirs []string
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -462,7 +468,9 @@ func NewControlPlane(
 		dnsRoutingResultCache: common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
 		udpTaskPool:           NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 
-		bpfMapJanitor: newBpfMapJanitor(func() *bpfObjects { return core.bpf }),
+		bpfMapJanitor:     newBpfMapJanitor(func() *bpfObjects { return core.bpf }),
+		locationFinder:    locationFinder,
+		externGeoDataDirs: externGeoDataDirs,
 	}
 	plane.inuseDialers = inuseDialers
 	if err := plane.rebuildOutboundRedirects(groups); err != nil {
@@ -1712,6 +1720,104 @@ func (c *ControlPlane) syncRedirectToEbpf(fromIdx, toIdx consts.OutboundIndex) e
 			return fmt.Errorf("outbound %v l4=%v ipv=%v: %w", fromIdx, networkType.L4Proto, networkType.IpVersion, err)
 		}
 	}
+	return nil
+}
+
+// buildOutboundName2Id reconstructs the outbound name→index mapping from
+// the ControlPlane's outbound groups. Used during hot routing updates.
+func (c *ControlPlane) buildOutboundName2Id() map[string]uint8 {
+	m := make(map[string]uint8, len(c.outbounds))
+	for i, g := range c.outbounds {
+		m[g.Name] = uint8(i)
+	}
+	return m
+}
+
+// reparseRoutingSection re-reads and merges the config file, then
+// extracts the routing section. It uses the merger (which resolves
+// includes) so that external rule files are properly handled.
+func (c *ControlPlane) reparseRoutingSection() (*config.Routing, error) {
+	merger := config.NewMerger(c.cfgFile)
+	sections, _, err := merger.Merge()
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge config: %w", err)
+	}
+	for _, sec := range sections {
+		if sec.Name == "routing" {
+			var routingCfg config.Routing
+			if err := config.SectionParser(reflect.ValueOf(&routingCfg), sec); err != nil {
+				return nil, fmt.Errorf("failed to parse routing section: %w", err)
+			}
+			return &routingCfg, nil
+		}
+	}
+	return nil, fmt.Errorf("routing section not found in config")
+}
+
+// UpdateRouting re-reads the routing section from the config file and
+// applies new rules in-place without closing dialers or disrupting
+// established connections. It mirrors UpdateSubscriptions in spirit:
+// only the routing layer is swapped; BPF objects, dialers, and DNS
+// state are preserved.
+func (c *ControlPlane) UpdateRouting() error {
+	c.muUpdateRouting.Lock()
+	defer c.muUpdateRouting.Unlock()
+
+	log.Warnln("[update-routing] Starting routing update...")
+
+	// Phase 0: Re-read routing section from config file.
+	routingCfg, err := c.reparseRoutingSection()
+	if err != nil {
+		return fmt.Errorf("re-reading routing config failed: %w", err)
+	}
+
+	// Phase 1: Apply rules optimizers (same pipeline as full reload).
+	rules, err := routing.ApplyRulesOptimizers(routingCfg.Rules,
+		&routing.AliasOptimizer{},
+		&routing.DatReaderOptimizer{LocationFinder: c.locationFinder},
+		&routing.MergeAndSortRulesOptimizer{},
+		&routing.DeduplicateParamsOptimizer{},
+	)
+	if err != nil {
+		return fmt.Errorf("ApplyRulesOptimizers: %w", err)
+	}
+
+	// Phase 2: Build userspace matcher (no kernel side effects).
+	outboundName2Id := c.buildOutboundName2Id()
+	builder, err := NewRoutingMatcherBuilder(rules, outboundName2Id, c.core.bpf, routingCfg.Fallback, c.core.ifmgr)
+	if err != nil {
+		return fmt.Errorf("NewRoutingMatcherBuilder: %w", err)
+	}
+	newRoutingMatcher, err := builder.BuildUserspace()
+	if err != nil {
+		return fmt.Errorf("BuildUserspace: %w", err)
+	}
+
+	// Phase 3: Build kernel space — overwrites RoutingMap + LpmArrayMap
+	// + RoutingMetaMap in-place inside the shared BPF object. Existing
+	// routing_tuples_map entries are untouched so established flows
+	// continue with their cached decisions.
+	if err = builder.BuildKernspace(); err != nil {
+		return fmt.Errorf("BuildKernspace: %w", err)
+	}
+
+	// Phase 4: Atomic swap of userspace routing matcher.
+	c.routingMatcher = newRoutingMatcher
+
+	// Phase 5: Replay DNS domain bitmaps through the new matcher.
+	// The MatchBitmap callback reads c.routingMatcher dynamically, so
+	// after the swap above it already uses the new domain matcher.
+	if c.dnsController != nil {
+		c.dnsController.ReplayDomainBitmaps(func(fqdn string, bitmap []uint32) {
+			c.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap)
+		})
+	}
+
+	// Phase 6: Clear routing-dependent ephemeral caches.
+	c.dnsRouteCache = common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil)
+
+	runtime.GC()
+	log.Warnln("[update-routing] Routing update completed successfully")
 	return nil
 }
 

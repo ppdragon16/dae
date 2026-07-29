@@ -301,24 +301,48 @@ loop:
 				startMetricsServer(conf.Global.MetricsPort)
 				startCommandServer(conf.Global.CommandPort, c)
 			case syscall.SIGHUP:
-				// Subscription update.
-				std.Warnln("[update-sub] Received update-sub signal")
-				if !c.UpdatingSub.CompareAndSwap(false, true) {
-					std.Warnln("[update-sub] Subscription update already in progress; skipping duplicate signal")
-					continue
-				}
-				_ = os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateSubProcessing}, 0644)
-				go func() {
-					defer c.UpdatingSub.Store(false)
-					if err := c.UpdateSubscriptions(); err != nil {
-						std.WithFields(log.Fields{
-							"err": err,
-						}).Errorln("[update-sub] Failed to update subscriptions")
-						_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateSubError}, []byte("\n"+err.Error())...), 0644)
-					} else {
-						_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateSubDone}, []byte("\nOK")...), 0644)
+				// Read discriminator to determine update operation.
+				code, _, _ := readSignalProgressFile()
+				switch code {
+				case consts.UpdateRoutingSend:
+					std.Warnln("[update-routing] Received update-routing signal")
+					if !c.UpdatingRouting.CompareAndSwap(false, true) {
+						std.Warnln("[update-routing] Routing update already in progress; skipping duplicate signal")
+						continue
 					}
-				}()
+					_ = os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateRoutingProcessing}, 0644)
+					go func() {
+						defer c.UpdatingRouting.Store(false)
+						if err := c.UpdateRouting(); err != nil {
+							std.WithFields(log.Fields{
+								"err": err,
+							}).Errorln("[update-routing] Failed to update routing")
+							_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateRoutingError}, []byte("\n"+err.Error())...), 0644)
+						} else {
+							_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateRoutingDone}, []byte("\nOK")...), 0644)
+						}
+					}()
+				default:
+					// Fall through to subscription update (backward compatible,
+					// UpdateSubSend or unknown codes all trigger update-sub).
+					std.Warnln("[update-sub] Received update-sub signal")
+					if !c.UpdatingSub.CompareAndSwap(false, true) {
+						std.Warnln("[update-sub] Subscription update already in progress; skipping duplicate signal")
+						continue
+					}
+					_ = os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateSubProcessing}, 0644)
+					go func() {
+						defer c.UpdatingSub.Store(false)
+						if err := c.UpdateSubscriptions(); err != nil {
+							std.WithFields(log.Fields{
+								"err": err,
+							}).Errorln("[update-sub] Failed to update subscriptions")
+							_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateSubError}, []byte("\n"+err.Error())...), 0644)
+						} else {
+							_ = os.WriteFile(SignalProgressFilePath, append([]byte{consts.UpdateSubDone}, []byte("\nOK")...), 0644)
+						}
+					}()
+				}
 			default:
 				std.Infof("Received signal: %v", sig.String())
 				break loop
