@@ -20,8 +20,9 @@ import (
 
 var (
 	updateSubCmd = &cobra.Command{
-		Use:   "update-sub [pid]",
-		Short: "Re-fetch subscriptions and update dialers without full reload.",
+		Use:     "sub [pid]",
+		Aliases: []string{"update-sub"},
+		Short:   "Re-fetch subscriptions and update dialers without full reload.",
 		Run: func(cmd *cobra.Command, args []string) {
 			internal.AutoSu()
 
@@ -84,5 +85,5 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(updateSubCmd)
+	updateCmd.AddCommand(updateSubCmd)
 }

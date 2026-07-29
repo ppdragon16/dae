@@ -20,8 +20,9 @@ import (
 
 var (
 	updateRoutingCmd = &cobra.Command{
-		Use:   "update-routing [pid]",
-		Short: "Apply routing rule changes without full reload.",
+		Use:     "routing [pid]",
+		Aliases: []string{"update-routing"},
+		Short:   "Apply routing rule changes without full reload.",
 		Run: func(cmd *cobra.Command, args []string) {
 			internal.AutoSu()
 
@@ -83,5 +84,5 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(updateRoutingCmd)
+	updateCmd.AddCommand(updateRoutingCmd)
 }

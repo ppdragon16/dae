@@ -20,8 +20,9 @@ import (
 
 var (
 	updateDnsCmd = &cobra.Command{
-		Use:   "update-dns [pid]",
-		Short: "Apply DNS configuration changes without full reload.",
+		Use:     "dns [pid]",
+		Aliases: []string{"update-dns"},
+		Short:   "Apply DNS configuration changes without full reload.",
 		Run: func(cmd *cobra.Command, args []string) {
 			internal.AutoSu()
 
@@ -81,5 +82,5 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(updateDnsCmd)
+	updateCmd.AddCommand(updateDnsCmd)
 }
