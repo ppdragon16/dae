@@ -29,34 +29,49 @@ var patches = []patch{
 // }
 
 func patchEmptyDns(params *Config) error {
-	if params.Dns.Routing.Request.Fallback == nil {
-		params.Dns.Routing.Request.Fallback = consts.DnsRequestOutboundIndex_AsIs.String()
-	}
-	if params.Dns.Routing.Response.Fallback == nil {
-		params.Dns.Routing.Response.Fallback = consts.DnsResponseOutboundIndex_Accept.String()
-	}
+	ApplyEmptyDnsDefaults(&params.Dns)
 	return nil
 }
 
 func patchMustOutbound(params *Config) error {
-	for i := range params.Routing.Rules {
-		if strings.HasPrefix(params.Routing.Rules[i].Outbound.Name, "must_") {
-			if params.Routing.Rules[i].Outbound.Name == "must_rules" {
-				// Reserve must_rules.
+	ApplyMustOutboundRewrite(&params.Routing)
+	return nil
+}
+
+// ApplyEmptyDnsDefaults fills in the same DNS routing fallback defaults
+// that config.New() applies via patches. Exported so that hot-update
+// paths (update-dns) can obtain the same result without parsing the
+// full Config.
+func ApplyEmptyDnsDefaults(dns *Dns) {
+	if dns.Routing.Request.Fallback == nil {
+		dns.Routing.Request.Fallback = consts.DnsRequestOutboundIndex_AsIs.String()
+	}
+	if dns.Routing.Response.Fallback == nil {
+		dns.Routing.Response.Fallback = consts.DnsResponseOutboundIndex_Accept.String()
+	}
+}
+
+// ApplyMustOutboundRewrite rewrites must_<name> outbound references
+// (e.g. must_direct) to <name>(must) so that the routing matcher can
+// resolve the base name against the outbound name→id map.
+// Exported for the same reason as ApplyEmptyDnsDefaults.
+func ApplyMustOutboundRewrite(routing *Routing) {
+	for i := range routing.Rules {
+		if strings.HasPrefix(routing.Rules[i].Outbound.Name, "must_") {
+			if routing.Rules[i].Outbound.Name == "must_rules" {
 				continue
 			}
-			params.Routing.Rules[i].Outbound.Name = strings.TrimPrefix(params.Routing.Rules[i].Outbound.Name, "must_")
-			params.Routing.Rules[i].Outbound.Params = append(params.Routing.Rules[i].Outbound.Params, &config_parser.Param{
+			routing.Rules[i].Outbound.Name = strings.TrimPrefix(routing.Rules[i].Outbound.Name, "must_")
+			routing.Rules[i].Outbound.Params = append(routing.Rules[i].Outbound.Params, &config_parser.Param{
 				Val: "must",
 			})
 		}
 	}
-	if f := FunctionOrStringToFunction(params.Routing.Fallback); strings.HasPrefix(f.Name, "must_") {
+	if f := FunctionOrStringToFunction(routing.Fallback); strings.HasPrefix(f.Name, "must_") {
 		f.Name = strings.TrimPrefix(f.Name, "must_")
 		f.Params = append(f.Params, &config_parser.Param{
 			Val: "must",
 		})
-		params.Routing.Fallback = f
+		routing.Fallback = f
 	}
-	return nil
 }

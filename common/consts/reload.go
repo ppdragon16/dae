@@ -20,6 +20,13 @@ const (
 )
 
 const (
+	UpdateDnsSend = '8' + iota
+	UpdateDnsProcessing
+	UpdateDnsDone
+	UpdateDnsError
+)
+
+const (
 	UpdateRoutingSend = '<' + iota
 	UpdateRoutingProcessing
 	UpdateRoutingDone
