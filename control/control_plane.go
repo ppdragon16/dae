@@ -110,11 +110,13 @@ type ControlPlane struct {
 	muUpdateSub     sync.Mutex
 	UpdatingSub     atomic.Bool
 
+	// DNS update support.
+	UpdatingDns atomic.Bool
+	muUpdateDns sync.Mutex
+
 	// Routing update support.
-	UpdatingRouting   atomic.Bool
-	muUpdateRouting   sync.Mutex
-	locationFinder    *assets.LocationFinder
-	externGeoDataDirs []string
+	UpdatingRouting atomic.Bool
+	muUpdateRouting sync.Mutex
 }
 
 // TODO: 统一 Outbound 中的DNS解析器
@@ -467,9 +469,7 @@ func NewControlPlane(
 		dnsRoutingResultCache: common.NewTimeWheelCache[netip.Addr, *bpfRoutingResult](1*time.Hour, 5*time.Second, nil),
 		udpTaskPool:           NewUdpTaskPool[netip.AddrPort, emitParam](AddrPortHash),
 
-		bpfMapJanitor:     newBpfMapJanitor(func() *bpfObjects { return core.bpf }),
-		locationFinder:    locationFinder,
-		externGeoDataDirs: externGeoDataDirs,
+		bpfMapJanitor: newBpfMapJanitor(func() *bpfObjects { return core.bpf }),
 	}
 	plane.inuseDialers = inuseDialers
 	if err := plane.rebuildOutboundRedirects(groups); err != nil {
@@ -531,7 +531,12 @@ func NewControlPlane(
 	}); err != nil {
 		return nil, err
 	}
-	plane.deferFuncs = append(deferFuncs, plane.dnsController.Close)
+	// Use an indirect closure so that when the DNS controller is
+	// hot-swapped (UpdateDns), the deferred Close targets the
+	// currently active controller rather than the initial one.
+	plane.deferFuncs = append(deferFuncs, func() error {
+		return plane.dnsController.Close()
+	})
 	// 规则改变不会使得记录失效, 因为程序仍会访问那个域名, 但我们需要保留记录的条目以便 GC
 	if _bpf != nil {
 		var key [4]uint32
@@ -1630,8 +1635,8 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 		d.ReactivateCheck()
 	}
 
-	runtime.GC()
 	log.Warnln("[update-sub] Subscription update completed successfully")
+	runtime.GC()
 	return nil
 }
 
@@ -1749,6 +1754,116 @@ func (c *ControlPlane) syncRedirectToEbpf(fromIdx, toIdx consts.OutboundIndex) e
 	return nil
 }
 
+// reparseDnsSection re-reads and merges the config file, then extracts
+// only the dns section via SectionParser to avoid allocating the full
+// Config (which includes multi-MB routing tables).
+func (c *ControlPlane) reparseDnsSection() (*config.Dns, error) {
+	merger := config.NewMerger(c.cfgFile)
+	sections, _, err := merger.Merge()
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge config: %w", err)
+	}
+	for _, sec := range sections {
+		if sec.Name == "dns" {
+			var dnsCfg config.Dns
+			if err := config.SectionParser(reflect.ValueOf(&dnsCfg), sec); err != nil {
+				return nil, fmt.Errorf("failed to parse dns section: %w", err)
+			}
+			config.ApplyEmptyDnsDefaults(&dnsCfg)
+			return &dnsCfg, nil
+		}
+	}
+	return nil, fmt.Errorf("dns section not found in config")
+}
+
+// UpdateDns re-reads the dns section from the config file and hot-swaps
+// the DNS controller without affecting routing, dialers, or established
+// connections. DNS response cache is preserved; only the request routing
+// matcher and upstream definitions are rebuilt.
+func (c *ControlPlane) UpdateDns() error {
+	c.muUpdateDns.Lock()
+	defer c.muUpdateDns.Unlock()
+
+	log.Warnln("[update-dns] Starting DNS update...")
+
+	// Phase 0: Re-read dns section from config file.
+	dnsCfg, err := c.reparseDnsSection()
+	if err != nil {
+		return fmt.Errorf("re-reading dns config failed: %w", err)
+	}
+
+	// Phase 1: Build new DNS upstream routing.
+	outboundName2Id := c.buildOutboundName2Id()
+	dnsUpstream, err := dns.New(dnsCfg, &dns.NewOption{
+		LocationFinder:          assets.NewLocationFinder([]string{filepath.Dir(c.cfgFile)}),
+		UpstreamReadyCallback:   c.cacheDnsUpstream,
+		UpstreamResolverNetwork: "udp",
+	}, outboundName2Id)
+	if err != nil {
+		return fmt.Errorf("building DNS upstream routing failed: %w", err)
+	}
+	if err = dnsUpstream.CheckUpstreamsFormat(); err != nil {
+		return fmt.Errorf("DNS upstream format check failed: %w", err)
+	}
+
+	// Phase 2: Update package-level pool globals.
+	fixedDomainTtl, err := ParseFixedDomainTtl(dnsCfg.FixedDomainTtl)
+	if err != nil {
+		return fmt.Errorf("parsing fixed domain TTLs: %w", err)
+	}
+	UdpPoolSize = dnsCfg.UdpPoolSize
+	UdpPoolTtl = dnsCfg.UdpPoolTtl
+	TcpPoolSize = dnsCfg.TcpPoolSize
+	TcpPoolTtl = dnsCfg.TcpPoolTtl
+
+	// Phase 3: Build new DnsController with callbacks wired to the
+	// ControlPlane's routing matcher and core — these do not change
+	// during a DNS-only update.
+	newController, err := NewDnsController(dnsUpstream, &DnsControllerOption{
+		MatchBitmap: func(fqdn string, bitmap []uint32) {
+			c.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap)
+		},
+		NewLookupCache: func(ip netip.Addr, domainBitmap *[32]uint32) error {
+			if err := c.core.BatchNewDomain(ip, domainBitmap); err != nil {
+				return common.Wrap(err, "BatchNewDomain")
+			}
+			return nil
+		},
+		LookupCacheTimeout: func(ip netip.Addr, domainBitmap *[32]uint32) error {
+			if err := c.core.BatchRemoveDomain(ip, domainBitmap); err != nil {
+				return common.Wrap(err, "BatchRemoveDomain")
+			}
+			return nil
+		},
+		BestDialerChooser: c.chooseBestDnsDialer,
+		IpVersionPrefer:   dnsCfg.IpVersionPrefer,
+		FixedDomainTtl:    fixedDomainTtl,
+		MinSniffingTtl:    dnsCfg.MinSniffingTtl,
+		EnableCache:       dnsCfg.EnableCache,
+		SniffVerifyMode:   c.sniffVerifyMode,
+	})
+	if err != nil {
+		return fmt.Errorf("building new DnsController: %w", err)
+	}
+
+	// Phase 4: Hot-swap the DNS controller. Transfer domain cache
+	// state from the old controller to keep BPF domain maps in sync.
+	oldController := c.dnsController
+	c.dnsController = newController
+
+	// Phase 5: Transfer domain state so BPF entries remain managed,
+	// then close old controller (forwarders, request cache).
+	if oldController != nil {
+		oldController.TransferDomainState(newController)
+		oldController.Close()
+		oldController = nil
+	}
+
+	log.Warnln("[update-dns] DNS update completed successfully")
+	runtime.GC()
+	return nil
+}
+
 // buildOutboundName2Id reconstructs the outbound name→index mapping from
 // the ControlPlane's outbound groups. Used during hot routing updates.
 func (c *ControlPlane) buildOutboundName2Id() map[string]uint8 {
@@ -1759,9 +1874,9 @@ func (c *ControlPlane) buildOutboundName2Id() map[string]uint8 {
 	return m
 }
 
-// reparseRoutingSection re-reads and merges the config file, then
-// extracts the routing section. It uses the merger (which resolves
-// includes) so that external rule files are properly handled.
+// reparseRoutingSection re-reads and merges the config file, then extracts
+// only the routing section via SectionParser to avoid allocating the full
+// Config (which includes multi-MB routing tables).
 func (c *ControlPlane) reparseRoutingSection() (*config.Routing, error) {
 	merger := config.NewMerger(c.cfgFile)
 	sections, _, err := merger.Merge()
@@ -1774,6 +1889,7 @@ func (c *ControlPlane) reparseRoutingSection() (*config.Routing, error) {
 			if err := config.SectionParser(reflect.ValueOf(&routingCfg), sec); err != nil {
 				return nil, fmt.Errorf("failed to parse routing section: %w", err)
 			}
+			config.ApplyMustOutboundRewrite(&routingCfg)
 			return &routingCfg, nil
 		}
 	}
@@ -1800,7 +1916,7 @@ func (c *ControlPlane) UpdateRouting() error {
 	// Phase 1: Apply rules optimizers (same pipeline as full reload).
 	rules, err := routing.ApplyRulesOptimizers(routingCfg.Rules,
 		&routing.AliasOptimizer{},
-		&routing.DatReaderOptimizer{LocationFinder: c.locationFinder},
+		&routing.DatReaderOptimizer{LocationFinder: assets.NewLocationFinder([]string{filepath.Dir(c.cfgFile)})},
 		&routing.MergeAndSortRulesOptimizer{},
 		&routing.DeduplicateParamsOptimizer{},
 	)
@@ -1840,10 +1956,11 @@ func (c *ControlPlane) UpdateRouting() error {
 	}
 
 	// Phase 6: Clear routing-dependent ephemeral caches.
+	c.dnsRouteCache.Close()
 	c.dnsRouteCache = common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil)
 
-	runtime.GC()
 	log.Warnln("[update-routing] Routing update completed successfully")
+	runtime.GC()
 	return nil
 }
 

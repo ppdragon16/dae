@@ -19,9 +19,9 @@ import (
 )
 
 var (
-	updateRoutingCmd = &cobra.Command{
-		Use:   "update-routing [pid]",
-		Short: "Apply routing rule changes without full reload.",
+	updateDnsCmd = &cobra.Command{
+		Use:   "update-dns [pid]",
+		Short: "Apply DNS configuration changes without full reload.",
 		Run: func(cmd *cobra.Command, args []string) {
 			internal.AutoSu()
 
@@ -50,18 +50,16 @@ var (
 				return
 			}
 
-			// Write discriminator so the SIGHUP handler knows this is a
-			// routing update, not a subscription update.
-			os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateRoutingSend}, 0644)
+			os.WriteFile(SignalProgressFilePath, []byte{consts.UpdateDnsSend}, 0644)
 
-			// Send SIGHUP to trigger routing update.
+			// Send SIGHUP to trigger DNS update.
 			if err = syscall.Kill(pid, syscall.SIGHUP); err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}
 			time.Sleep(500 * time.Millisecond)
 			code, _, _ = readSignalProgressFile()
-			if code == consts.UpdateRoutingSend {
+			if code == consts.UpdateDnsSend {
 				fmt.Println("OK")
 				return
 			}
@@ -73,7 +71,7 @@ var (
 					fmt.Println("OK")
 					return
 				}
-				if code == consts.UpdateRoutingDone || code == consts.UpdateRoutingError {
+				if code == consts.UpdateDnsDone || code == consts.UpdateDnsError {
 					fmt.Println(content)
 					return
 				}
@@ -83,5 +81,5 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(updateRoutingCmd)
+	rootCmd.AddCommand(updateDnsCmd)
 }

@@ -60,7 +60,9 @@ var (
 			// Read the first line of SignalProgressFilePath.
 			code, _, err := readSignalProgressFile()
 			if err == nil && code != consts.ReloadDone && code != consts.ReloadError &&
-			code != consts.UpdateSubDone && code != consts.UpdateSubError {
+			code != consts.UpdateSubDone && code != consts.UpdateSubError &&
+			code != consts.UpdateDnsDone && code != consts.UpdateDnsError &&
+			code != consts.UpdateRoutingDone && code != consts.UpdateRoutingError {
 				// In progress.
 				fmt.Printf("%v shows another reload operation is in progress.\n", SignalProgressFilePath)
 				return
