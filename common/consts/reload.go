@@ -18,3 +18,10 @@ const (
 	UpdateSubDone
 	UpdateSubError
 )
+
+const (
+	UpdateRoutingSend = '<' + iota
+	UpdateRoutingProcessing
+	UpdateRoutingDone
+	UpdateRoutingError
+)
