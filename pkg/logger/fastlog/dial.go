@@ -7,6 +7,7 @@ package fastlog
 
 import (
 	"net/netip"
+	"strconv"
 
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -58,7 +59,15 @@ func LogDial(
 	} else {
 		buf = append(buf, " <-> "...)
 	}
-	buf = append(buf, dialTarget...)
+	if sniffed != "" {
+		// Show sniffed domain:port for human readability.
+		// The original IP is preserved in the ip="..." field.
+		buf = append(buf, sniffed...)
+		buf = append(buf, ':')
+		buf = strconv.AppendUint(buf, uint64(dst.Port()), 10)
+	} else {
+		buf = append(buf, dialTarget...)
+	}
 	buf = append(buf, '"')
 
 	// Fields
