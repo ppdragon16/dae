@@ -6,13 +6,64 @@
 package sniffing
 
 import (
-	"bufio"
 	"bytes"
-	"strings"
 	"unicode"
 
 	"github.com/daeuniverse/dae/common"
 )
+
+var (
+	httpHeaderHost = []byte("host")
+	httpHeaderSep  = []byte{':'}
+)
+
+func sniffHTTPHostHeader(data []byte) (string, error) {
+	// The first line is the request line ("METHOD SP target SP version"); it is
+	// never a Host header, so jump past it to avoid a wasted scan per request.
+	start := 0
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		start = i + 1
+	} else {
+		return "", ErrNotFound
+	}
+	for start < len(data) {
+		// Split on LF. HTTP lines end with CRLF, and a single-byte search for
+		// '\n' is markedly cheaper than a two-byte search for "\r\n"; the
+		// preceding CR (if present) is stripped from the header content.
+		nl := bytes.IndexByte(data[start:], '\n')
+		var line []byte
+		if nl >= 0 {
+			lineEnd := start + nl
+			if lineEnd > start && data[lineEnd-1] == '\r' {
+				line = data[start : lineEnd-1]
+			} else {
+				line = data[start:lineEnd]
+			}
+			start = lineEnd + 1
+		} else {
+			line = data[start:]
+			start = len(data)
+		}
+
+		// Empty line marks end-of-headers.
+		if len(line) == 0 {
+			break
+		}
+		key, value, found := bytes.Cut(line, httpHeaderSep)
+		if !found {
+			// Bad key value.
+			continue
+		}
+		if bytes.EqualFold(bytes.TrimSpace(key), httpHeaderHost) {
+			host := string(bytes.TrimSpace(value))
+			if host == "" {
+				return "", ErrNotFound
+			}
+			return host, nil
+		}
+	}
+	return "", ErrNotFound
+}
 
 func (s *Sniffer) SniffHttp() (d string, err error) {
 	// First byte should be printable.
@@ -29,39 +80,11 @@ func (s *Sniffer) SniffHttp() (d string, err error) {
 	if !found {
 		return "", ErrNotApplicable
 	}
-	if !common.IsValidHttpMethod(string(method)) {
+	if !common.IsValidHttpMethodBytes(method) {
 		return "", ErrNotApplicable
 	}
 
 	// Now we assume it is an HTTP packet. We should not return NotApplicableError after here.
 
-	// Search Host.
-	scanner := bufio.NewScanner(bytes.NewReader(s.buf.Bytes()))
-	// \r\n
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
-		if i := bytes.Index(data, []byte("\r\n")); i >= 0 {
-			// We have a full newline-terminated line.
-			return i + 2, data[0:i], nil
-		}
-		// If we're at EOF, we have a final, non-terminated line. Return it.
-		if atEOF {
-			return len(data), data, nil
-		}
-		// Request more data.
-		return 0, nil, nil
-	})
-	for scanner.Scan() && len(scanner.Bytes()) > 0 {
-		key, value, found := bytes.Cut(scanner.Bytes(), []byte{':'})
-		if !found {
-			// Bad key value.
-			continue
-		}
-		if strings.EqualFold(string(key), "host") {
-			return string(value), nil
-		}
-	}
-	return "", ErrNotFound
+	return sniffHTTPHostHeader(s.buf.Bytes())
 }

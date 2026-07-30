@@ -66,7 +66,15 @@ func (s *Sniffer) SniffQuic() (d string, err error) {
 	}
 	// Is quic.
 	s.quicNextRead = s.buf.Len()
-	sni, err := extractSniFromTls(quicutils.NewLinearLocator(s.quicCryptos))
+	// Reuse the per-Sniffer LinearLocator across SniffQuic calls instead of
+	// allocating a new one each time (NewLinearLocator was a leading QUIC
+	// allocation). Reset repoints it at the current crypto frame offsets.
+	if s.quicLocator == nil {
+		s.quicLocator = quicutils.NewLinearLocator(s.quicCryptos)
+	} else {
+		s.quicLocator.Reset(s.quicCryptos)
+	}
+	sni, err := extractSniFromTls(s.quicLocator)
 	if err != nil {
 		// If read a full MTU, but still cannot find SNI, it's likely that there is no SNI.
 		if s.quicNextRead < 1500 {

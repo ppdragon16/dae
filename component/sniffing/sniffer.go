@@ -32,6 +32,9 @@ type Sniffer struct {
 	needMore     bool
 	quicNextRead int
 	quicCryptos  []*quicutils.CryptoFrameOffset
+	// quicLocator is reused across SniffQuic calls to avoid allocating a new
+	// LinearLocator each time. It is Reset (not reallocated) on reuse.
+	quicLocator *quicutils.LinearLocator
 }
 
 func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
