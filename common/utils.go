@@ -6,6 +6,7 @@
 package common
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
@@ -364,6 +365,27 @@ func IsValidHttpMethod(method string) bool {
 	default:
 		return false
 	}
+}
+
+// httpMethods lists valid HTTP request methods as []byte so that
+// IsValidHttpMethodBytes can validate without a string conversion.
+var httpMethods = [][]byte{
+	[]byte("GET"), []byte("POST"), []byte("PUT"), []byte("PATCH"),
+	[]byte("DELETE"), []byte("COPY"), []byte("HEAD"), []byte("OPTIONS"),
+	[]byte("LINK"), []byte("UNLINK"), []byte("PURGE"), []byte("LOCK"),
+	[]byte("UNLOCK"), []byte("PROPFIND"), []byte("CONNECT"), []byte("TRACE"),
+}
+
+// IsValidHttpMethodBytes reports whether method is a recognized HTTP method,
+// comparing bytes directly to avoid a string conversion on hot paths where
+// data is already []byte (e.g. packet sniffing).
+func IsValidHttpMethodBytes(method []byte) bool {
+	for _, m := range httpMethods {
+		if bytes.Equal(method, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func isFqdn(domain []byte) bool {
