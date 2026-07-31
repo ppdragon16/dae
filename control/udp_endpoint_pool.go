@@ -7,6 +7,8 @@ package control
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"sync"
@@ -101,7 +103,7 @@ func (ue *UdpEndpoint) run() {
 	deadlineTimer.Stop()
 	DefaultAnyfromPool.Recycle(ue.Dst, ue.af)
 	DefaultUdpEndpointPool.Remove(ue.UdpEndpointKey)
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
 		if !isNetError || isClosed || (!isTimeout && ue.dialer.NeedAliveState()) {
 			err = common.
