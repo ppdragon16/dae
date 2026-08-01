@@ -99,13 +99,18 @@ func (s *LatencyBasedSelector) PrintLatencies(networkType *common.NetworkType, l
 	dialerSlicePool.Put(aliveDialers[:0])
 }
 
-// TODO: 由于tolerance 的存在, 第一个 aliveDialer 并不一定是当前选定的 dialer, 该方法需要修改
 func (s *LatencyBasedSelector) printLatencies(aliveDialers []*dialer.Dialer, networkType *common.NetworkType, logfn func(args ...interface{})) {
+	// Note: the first aliveDialer may not be the selected one due to tolerance.
+	var selected *dialer.Dialer
+	if networkType != nil {
+		selected = s.networkIndexToDialer[common.NetworkTypeToIndex(networkType)]
+	}
+
 	var builder strings.Builder
 	if networkType != nil {
-		builder.WriteString(fmt.Sprintf("Group '%v' [%v]:\n", s.dialerGroup.Name, networkType.String()))
+		fmt.Fprintf(&builder, "Group '%v' [%v]:\n", s.dialerGroup.Name, networkType.String())
 	} else {
-		builder.WriteString(fmt.Sprintf("Group '%v':\n", s.dialerGroup.Name))
+		fmt.Fprintf(&builder, "Group '%v':\n", s.dialerGroup.Name)
 	}
 
 	if len(aliveDialers) == 0 {
@@ -120,7 +125,11 @@ func (s *LatencyBasedSelector) printLatencies(aliveDialers []*dialer.Dialer, net
 			if !dialer.NeedAliveState() {
 				latencyStr = fmt.Sprintf("Always Alive (%v)", latencyStr)
 			}
-			builder.WriteString(fmt.Sprintf("%4d.%v %v: %v%s\n", i+1, tagStr, dialer.Name, latencyStr, fmt.Sprintf(" (priority: %d)", s.dialerGroup.GetPriority(dialer, s.getSortingLatency(dialer)))))
+			pointer := "  "
+			if dialer == selected {
+				pointer = "* "
+			}
+			fmt.Fprintf(&builder, "%s%4d.%v %v: %v%s\n", pointer, i+1, tagStr, dialer.Name, latencyStr, fmt.Sprintf(" (priority: %d)", s.dialerGroup.GetPriority(dialer, s.getSortingLatency(dialer))))
 		}
 	}
 	logfn(strings.TrimSuffix(builder.String(), "\n"))
