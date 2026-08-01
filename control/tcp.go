@@ -364,8 +364,6 @@ func relayDirection(dst, src net.Conn) error {
 
 // Error1 is the error from lConn to rConn
 // Error2 is the error from rConn to lConn
-// TODO: 引入 ctx, 在 dialer 不可用时取消 relay
-// 进一步的, 给 lConn 发送 rst
 func RelayTCP(lConn, rConn net.Conn) error {
 	var (
 		r2lErr   error

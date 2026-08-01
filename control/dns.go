@@ -42,7 +42,6 @@ var (
 	TcpPoolTtl  = 60 * time.Second
 )
 
-// TODO: Connection reuse
 type DnsForwarder interface {
 	ForwardDNS(msg *dnsmessage.Msg) error
 }
@@ -390,7 +389,6 @@ func NewUdpForwarder(dialArg dialArgument) *DoTcpOrUdp {
 	}
 }
 
-// TODO: Connection reuse
 func (d *DoTcpOrUdp) ForwardDNS(msg *dnsmessage.Msg) (err error) {
 	// Retry once on net.ErrClosed which may happen when race condition between DnsManager's Resolve() and read().
 	maxRetries := 1

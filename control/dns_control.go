@@ -32,7 +32,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// TODO: Lookup Cache 的 GC
 // TODO: reload时保留lookup cache
 
 const (
@@ -281,7 +280,6 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 				dnsMessage2.Question[0].Qtype = dnsmessage.TypeA
 			}
 
-			// TODO: ignoreFixedTTL?
 			errCh := make(chan error, 1)
 			go func() {
 				err = c.handleDNSRequest(dnsMessage2, req, queryInfo)
@@ -328,9 +326,6 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	}
 }
 
-// TODO: 除了dialSend, 不应该有可预期的 err
-// TODO: qname=. qtype=2 的查询是什么, 为什么没有缓存, 因为AsIs?
-// TODO: 如果AsIs都不缓存的话，如果一个server可用一个不可用，那就是远端sever的问题?
 func (c *DnsController) handleDNSRequest(
 	dnsMessage *dnsmessage.Msg,
 	req *dnsRequest,
