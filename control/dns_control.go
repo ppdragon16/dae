@@ -91,6 +91,7 @@ type DnsController struct {
 	mu                sync.Mutex
 	lookupCache       map[HashKey]uint16                                      // Key: Hash by qname
 	coreIpDomainCache *common.TimeWheelCache[HashKey, coreIpDomainCacheValue] // Key: Hash by qname + ip
+	sniffDomainCache  *common.TimeWheelCache[HashKey, struct{}]               // Key: Hash by qname; populated by DNS pipeline, used by VerifySniff for fast domain verification
 	sniffVerifyMode   consts.SniffVerifyMode
 
 	singleFlightGroup common.SingleFlight[HashKey, *dnsmessage.Msg, singleFlightParam]
@@ -133,6 +134,7 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsCache:           newCommonDnsCache(),
 		dnsCacheHashSeed:   maphash.MakeSeed(),
 		requestSelectCache: common.NewTimeWheelCache[HashKey, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
+		sniffDomainCache:   common.NewTimeWheelCache[HashKey, struct{}](1*time.Hour, 5*time.Second, nil),
 		lookupCache:        make(map[HashKey]uint16),
 	}
 	c.coreIpDomainCache = common.NewTimeWheelCache(
@@ -469,7 +471,6 @@ Dial:
 		upstream = nextUpstream
 		reqMsg.CopyTo(dnsMessage)
 	}
-
 	// Update lookup cache.
 	switch {
 	case !dnsMessage.Response,
@@ -479,24 +480,77 @@ Dial:
 		return nil
 	}
 	if isNew {
+		var ttl uint32
+		var ips []netip.Addr
+		for _, rr := range dnsMessage.Answer {
+			if ttl == 0 {
+				ttl = rr.Header().Ttl
+			}
+			ip, ok := GetIp(rr)
+			if ok {
+				ips = append(ips, ip)
+			}
+		}
+		// Populate sniffDomainCache for fast VerifySniff lookup.
+		// This cache is independent of routing rules — it only tracks
+		// whether a domain has valid DNS records, regardless of qtype,
+		// outbound, or dialer.
+		if len(ips) > 0 {
+			qHash := c.QnameHash(queryInfo.qname)
+			lookupTTL := max(time.Duration(ttl)*time.Second, c.minSniffingTtl)
+			c.sniffDomainCache.SaveWithTTL(qHash, struct{}{}, lookupTTL)
+		}
+		// Update eBPF lookup cache.
 		domainBitmap := common.ObtainDomainBitmap()
 		defer common.RecycleDomainBitmap(domainBitmap)
 		if allZero, shouldUpdate := c.checkDomainBitmap(queryInfo.qname, domainBitmap); shouldUpdate {
-			var ttl uint32
-			var ips []netip.Addr
-			for _, rr := range dnsMessage.Answer {
-				if ttl == 0 {
-					ttl = rr.Header().Ttl
-				}
-				ip, ok := GetIp(rr)
-				if ok {
-					ips = append(ips, ip)
-				}
-			}
 			return c.updateLookupCache(queryInfo.qname, domainBitmap, allZero, ips, time.Duration(ttl)*time.Second)
 		}
 	}
 	return nil
+}
+
+// ResolveForVerification triggers a real DNS query through DAE's full DNS pipeline
+// (routing, upstream selection, forwarding, caching, and eBPF domain sync).
+// It is used by VerifySniff as the slow path when sniffDomainCache misses,
+// replacing the old netutils.ResolveIp46 which bypassed DAE and leaked DNS.
+func (c *DnsController) ResolveForVerification(fqdn string) (ok bool) {
+	// fqdn may be an IP literal (e.g. from SNI when connecting to an IP
+	// directly). Skip DNS lookup — IPs don't have A/AAAA records.
+	if _, err := netip.ParseAddr(strings.TrimSuffix(fqdn, ".")); err == nil {
+		return false
+	}
+
+	// Try A first; if it resolves, skip AAAA. Verification only needs to
+	// confirm the domain has DNS records — one record type is sufficient.
+	for _, qtype := range []uint16{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
+		msg := new(dnsmessage.Msg)
+		msg.SetQuestion(dnsmessage.Fqdn(fqdn), qtype)
+		msg.RecursionDesired = true
+
+		// handleDNSRequest handles routing (RequestSelect, race groups),
+		// upstream resolution, forwarding, and auto-populates
+		// sniffDomainCache, dnsCache, lookupCache, coreIpDomainCache,
+		// and eBPF maps. Zero MAC and source IP because VerifySniff has
+		// no client context; source-based rules fall through to default.
+		req := ObtainDnsRequest(netip.AddrPort{}, netip.AddrPort{}, &bpfRoutingResult{}, false)
+		qi := queryInfo{qname: fqdn, qtype: qtype}
+		pipeErr := c.handleDNSRequest(msg, req, qi)
+		RecycleDnsRequest(req)
+		if pipeErr != nil {
+			log.WithField("qname", fqdn).WithField("qtype", qtype).
+				Warnf("ResolveForVerification: %v", pipeErr)
+			continue
+		}
+		for _, rr := range msg.Answer {
+			if _, ok := GetIp(rr); ok {
+				return true
+			}
+		}
+		log.WithField("qname", fqdn).WithField("qtype", qtype).
+			Warnf("ResolveForVerification: no IPs resolved")
+	}
+	return false
 }
 
 // handleDNSRequestRace sends DNS queries to multiple upstreams concurrently and uses the
