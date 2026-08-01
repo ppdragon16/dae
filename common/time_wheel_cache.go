@@ -171,16 +171,19 @@ func (c *TimeWheelCache[K, V]) GetWithKey(key K) (V, K, bool) {
 	return zeroV, key, false
 }
 
-// Range calls fn for each (key, value) currently in the cache.
-// Iteration order is unspecified. The cache's read lock is held for
-// the duration of iteration; fn must not call Save/SaveWithTTL on the
-// same cache (would deadlock). Returning false stops iteration early.
+// Range calls fn for each (key, value, ttl) currently in the cache.
+// ttl is the remaining time until the entry expires from the time wheel.
+// Iteration order is unspecified. The cache's read lock is held for the
+// duration of iteration; fn must not call Save/SaveWithTTL on the same
+// cache (would deadlock). Returning false stops iteration early.
 // Safe for concurrent Get callers.
-func (c *TimeWheelCache[K, V]) Range(fn func(key K, value V) bool) {
+func (c *TimeWheelCache[K, V]) Range(fn func(key K, value V, ttl time.Duration) bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for k, e := range c.data {
-		if !fn(k, e.value) {
+		remainingTicks := uint64(e.roundCount)*uint64(c.slotSize) + uint64((e.slotIndex-c.cursor)&c.slotMask)
+		remaining := time.Duration(remainingTicks) * c.tick
+		if !fn(k, e.value, remaining) {
 			return
 		}
 	}

@@ -869,9 +869,14 @@ func (c *DnsController) UpdateStaticEntry(name string, entry *config.DnsStaticEn
 func (c *DnsController) ReplayDomainBitmaps(matchBitmap func(fqdn string, bitmap []uint32)) {
 	// Collect entries whose bitmap changed; SaveWithTTL takes the cache
 	// write-lock, which must not be called inside Range (which holds RLock).
-	updates := make(map[HashKey]coreIpDomainCacheValue)
+	type updateEntry struct {
+		key HashKey
+		val coreIpDomainCacheValue
+		ttl time.Duration
+	}
+	updates := make([]updateEntry, 0, 16)
 
-	c.coreIpDomainCache.Range(func(key HashKey, v coreIpDomainCacheValue) bool {
+	c.coreIpDomainCache.Range(func(key HashKey, v coreIpDomainCacheValue, ttl time.Duration) bool {
 		if v.qname == "" || v.bitmap == nil {
 			return true
 		}
@@ -903,17 +908,21 @@ func (c *DnsController) ReplayDomainBitmaps(matchBitmap func(fqdn string, bitmap
 					Warn("ReplayDomainBitmaps: failed to add new domain state")
 			}
 		}
-		updates[key] = coreIpDomainCacheValue{
-			qHash:  v.qHash,
-			qname:  v.qname,
-			ip:     v.ip,
-			bitmap: newBitmap,
-		}
+		updates = append(updates, updateEntry{
+			key: key,
+			val: coreIpDomainCacheValue{
+				qHash:  v.qHash,
+				qname:  v.qname,
+				ip:     v.ip,
+				bitmap: newBitmap,
+			},
+			ttl: ttl,
+		})
 		return true
 	})
 
-	for key, val := range updates {
-		c.coreIpDomainCache.SaveWithTTL(key, val, 1*time.Hour)
+	for _, entry := range updates {
+		c.coreIpDomainCache.SaveWithTTL(entry.key, entry.val, entry.ttl)
 	}
 }
 
@@ -931,15 +940,10 @@ func (c *DnsController) TransferDomainState(dst *DnsController) {
 	c.lookupCache = nil // prevent Close from clearing it
 
 	// Transfer all coreIpDomainCache entries.
-	c.coreIpDomainCache.Range(func(key HashKey, v coreIpDomainCacheValue) bool {
-		// Use a long TTL so entries survive until the next real DNS
-		// lookup refreshes them with the correct TTL from the new
-		// controller's requestSelectCache.
-		dst.coreIpDomainCache.SaveWithTTL(key, v, 1*time.Hour)
+	c.coreIpDomainCache.Range(func(key HashKey, v coreIpDomainCacheValue, ttl time.Duration) bool {
+		dst.coreIpDomainCache.SaveWithTTL(key, v, ttl)
 		return true
 	})
-	// Stop the old cache's janitor but don't let it walk over entries
-	// that have already been moved — close it after Range.
 	c.coreIpDomainCache.Close()
 	c.coreIpDomainCache = nil
 }

@@ -112,6 +112,11 @@ func (c *commonDnsCache) Get(cacheKey HashKey) (rr []dnsmessage.RR, fetchedAt ti
 	return cache.Answers, cache.FetchedAt, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
 }
 
+// Range iterates over every cached DNS response. See common.TimeWheelCache.Range.
+func (c *commonDnsCache) Range(fn func(key HashKey, value *dnsCache, ttl time.Duration) bool) {
+	c.cache.Range(fn)
+}
+
 func (c *commonDnsCache) Save(key HashKey, answers []dnsmessage.RR, fixedTtl int) {
 	if len(answers) == 0 {
 		return
