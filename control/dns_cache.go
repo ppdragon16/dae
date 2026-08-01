@@ -54,7 +54,7 @@ func (c *commonDnsCache) Get(key HashKey) (resp []byte, expired bool, isNew bool
 }
 
 // Range iterates over every cached DNS response. See common.TimeWheelCache.Range.
-func (c *commonDnsCache) Range(fn func(key HashKey, value *dnsCache) bool) {
+func (c *commonDnsCache) Range(fn func(key HashKey, value *dnsCache, ttl time.Duration) bool) {
 	c.cache.Range(fn)
 }
 
