@@ -69,7 +69,6 @@ func (c *ControlPlane) RouteDialOption(
 	networkType *common.NetworkType,
 	routingResult *bpfRoutingResult,
 	dialOptionOut *DialOption) (err error) {
-	// TODO: Why not directly transfer routingResult
 	outboundIndex := consts.OutboundIndex(routingResult.Outbound)
 	// mark := p.routingResult.Mark
 
@@ -102,7 +101,6 @@ func (c *ControlPlane) RouteDialOption(
 	// if mark == 0 {
 	// 	mark = c.soMarkFromDae
 	// }
-	// TODO: Set-up ip to domain mapping and show domain if possible.
 	if int(outboundIndex) >= len(c.outbounds) {
 		if len(c.outbounds) == int(consts.OutboundUserDefinedMin) {
 			err = common.Errf("traffic was dropped due to no-load configuration")

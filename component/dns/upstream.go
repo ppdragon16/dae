@@ -93,7 +93,6 @@ type Upstream struct {
 	Outbound consts.OutboundIndex // 0xFF = unspecified (use traffic routing)
 }
 
-// TODO: Sync with outbound
 func NewUpstream(ctx context.Context, upstream *url.URL, resolverNetwork string) (up *Upstream, err error) {
 	scheme, hostname, port, path, err := ParseRawUpstream(upstream)
 	if err != nil {

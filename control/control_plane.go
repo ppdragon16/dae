@@ -65,7 +65,7 @@ type ControlPlane struct {
 	deferFuncs []func() error
 	listenIp   string
 
-	// TODO: add mutex?
+	// no need mutex for outbounds.
 	outbounds              []*outbound.DialerGroup
 	noConnectivityOutbound consts.OutboundIndex
 	inConnections          sync.Map
@@ -121,8 +121,7 @@ type ControlPlane struct {
 
 // TODO: 统一 Outbound 中的DNS解析器
 // TODO: Hy2 的 mark 支持
-// TODO: Connectivity Check Failed 仅将状态变更作为 Warning、
-// HandlePkt HandleConn 分割 Route 和 Dial
+// TODO: HandlePkt HandleConn 分割 Route 和 Dial
 func NewControlPlane(
 	_bpf interface{},
 	tagToNodeList map[string][]string,
@@ -1049,7 +1048,6 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 			c.muRealDomainSet.Unlock()
 			if !verified {
 				// Lookup A/AAAA to make sure it is a real domain.
-				// TODO: 这里可能可以直接使用正常的 DNS 解析流程, 从而可以得到缓存
 				if ip46, err := netutils.ResolveIp46(fqdn); err == nil && ip46.IsValid() {
 					// Has A/AAAA records. It is a real domain.
 					// Add it to real-domain set.

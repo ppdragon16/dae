@@ -230,9 +230,6 @@ type CheckOption struct {
 // 	}
 // }
 
-// checkFunc 创建DNS检查函数
-// TODO: Context 应该随情况生成, 而非传入
-// TODO: 为什么不直接编写一个 CheckFUnc
 func checkFunc(d *Dialer, server string, network string, data []byte) func() (ok bool, err error) {
 	return func() (ok bool, err error) {
 		return netutils.DnsCheck(d, server, network, data)
@@ -261,7 +258,6 @@ func (d *Dialer) createCheckOptions() []*CheckOption {
 
 	return []*CheckOption{
 		// 优先 TCP, 因为 TCP 可以避免长时间占用 NAT 端口
-		// TODO: UDP?
 		{
 			networkType: common.NETWORK_TCP6,
 			CheckFunc:   checkFunc(d, server6, "tcp", newMsgData()),
@@ -318,6 +314,7 @@ func (d *Dialer) ActivateCheck() {
 		default:
 		}
 		go d.startCheckTicker()
+		// TODO: 是否应该对所有网络类型进行检查? runInitialCheck 是不是没意义了? udp 53 能通不一定 udp 443 也能通
 		go d.runCheckLoop(checkOpt)
 	}()
 }
