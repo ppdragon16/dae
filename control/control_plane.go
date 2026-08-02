@@ -963,7 +963,7 @@ func (c *ControlPlane) cacheDnsUpstream(dnsUpstream *dns.Upstream) {
 // shouldReroute 返回 Kernel 是否有可能没有正确 Route
 // SniffVerifyMode_Loose 在这个域名存在时, 通过认证
 // SniffVerifyMode_Strict 在这个域名尝试过对应的 DNS 解析时, 通过认证
-func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.AddrPort, domain string) (verified bool, shouldRerouteFunc func() bool) {
+func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.AddrPort, domain string, src netip.AddrPort, routingResult *bpfRoutingResult) (verified bool, shouldRerouteFunc func() bool) {
 	if domain == "" {
 		return
 	}
@@ -1018,7 +1018,7 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 				verified = true
 			} else {
 				// Slow path: trigger real DNS query through DAE pipeline.
-				verified = c.dnsController.ResolveForVerification(fqdn)
+				verified = c.dnsController.ResolveForVerification(fqdn, src, routingResult)
 			}
 		}
 	}
