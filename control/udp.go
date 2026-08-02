@@ -175,6 +175,7 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"src":    RefineSourceToShow(src, dst.Addr()),
+				"dst":    dst,
 				"dialer": ue.dialer.Name,
 			}).Debugln("Old udp endpoint was not alive and removed.")
 		}

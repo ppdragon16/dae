@@ -79,14 +79,14 @@ func (ue *UdpEndpoint) run() {
 			return n, ToAddrPort(from), err
 		}
 	}
-	var err error
+	var readErr error
 	for {
 		n, from, e := readFunc(buf)
 		if e != nil {
 			if ue.IsClosed() {
 				break
 			}
-			err = common.Wrap(e, "failed to ReadFromAddrPort")
+			readErr = common.Wrap(e, "failed to ReadFromAddrPort")
 			break
 		}
 		ue.counterTraffic.Add(int64(n))
@@ -95,33 +95,35 @@ func (ue *UdpEndpoint) run() {
 		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) && fastlog.Enabled() {
 			fastlog.LogUdpReply(ue.Src, from)
 		}
-		if _, err = ue.af.WriteToUDPAddrPort(buf[:n], ue.Src); err != nil {
-			break
+		if _, writeErr := ue.af.WriteToUDPAddrPort(buf[:n], ue.Src); writeErr != nil {
+			// Write to client failed (NAT rebinding, etc.) — continue;
+			// don't kill the endpoint because the proxy side is still alive.
+			continue
 		}
 		ue.receivedReply = true
 	}
 	deadlineTimer.Stop()
 	DefaultAnyfromPool.Recycle(ue.Dst, ue.af)
 	DefaultUdpEndpointPool.Remove(ue.UdpEndpointKey)
-	if err != nil && !errors.Is(err, io.EOF) {
-		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(readErr)
 		if !isNetError || isClosed || (!isTimeout && ue.dialer.NeedAliveState()) {
-			err = common.
+			readErr = common.
 				In("UdpEndpoint r -> l relay").
 				With("Is NetError", isNetError).
 				With("Is Temporary", isTemporary).
 				With("Is Timeout", isTimeout).
 				With("Dialer", ue.dialer.Name).
-				Wrap(err)
+				Wrap(readErr)
 			if !isNetError {
-				log.Warnf("%+v", err)
+				log.Warnf("%+v", readErr)
 			} else if isClosed {
 				// Endpoint was closed locally; normal termination.
-				log.Debugf("%+v", err)
+				log.Debugf("%+v", readErr)
 			} else if !isTimeout && ue.dialer.NeedAliveState() {
 				common.Metrics.ErrorCount.With4(ue.labels).Inc()
 				ue.dialer.ReportUnavailable()
-				log.Warnf("%+v", err)
+				log.Warnf("%+v", readErr)
 			}
 		}
 	}
