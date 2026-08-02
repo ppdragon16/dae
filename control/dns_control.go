@@ -560,20 +560,22 @@ Dial:
 // (routing, upstream selection, forwarding, caching, and eBPF domain sync).
 // It is used by VerifySniff as the slow path when sniffDomainCache misses,
 // replacing the old netutils.ResolveIp46 which bypassed DAE and leaked DNS.
-func (c *DnsController) ResolveForVerification(fqdn string) (ok bool) {
+func (c *DnsController) ResolveForVerification(fqdn string, src netip.AddrPort, routingResult *bpfRoutingResult) (ok bool) {
 	// fqdn may be an IP literal (e.g. from SNI when connecting to an IP
 	// directly). Skip DNS lookup — IPs don't have A/AAAA records.
 	if _, err := netip.ParseAddr(strings.TrimSuffix(fqdn, ".")); err == nil {
 		return false
 	}
 
+	dataBuf := pool.GetBuffer(consts.EthernetMtu)
+	defer pool.PutBuffer(dataBuf)
 	// Try A first; if it resolves, skip AAAA. Verification only needs to
 	// confirm the domain has DNS records — one record type is sufficient.
 	for _, qtype := range []uint16{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
 		msg := new(dnsmessage.Msg)
 		msg.SetQuestion(dnsmessage.Fqdn(fqdn), qtype)
 		msg.RecursionDesired = true
-		data, packErr := msg.Pack()
+		data, packErr := msg.PackBuffer(dataBuf)
 		if packErr != nil {
 			log.WithField("qname", fqdn).WithField("qtype", qtype).
 				Errorf("ResolveForVerification: failed to pack DNS message: %v", packErr)
@@ -583,10 +585,10 @@ func (c *DnsController) ResolveForVerification(fqdn string) (ok bool) {
 		// handleDNSRequest handles routing (RequestSelect, race groups),
 		// upstream resolution, forwarding, and auto-populates
 		// sniffDomainCache, dnsCache, lookupCache, coreIpDomainCache,
-		// and eBPF maps. Zero MAC and source IP because VerifySniff has
-		// no client context; source-based rules fall through to default.
+		// and eBPF maps.
 		dnsResp := dnsResponseDataPool.Get().(*dnsResponseData)
-		req := ObtainDnsRequest(netip.AddrPort{}, netip.AddrPort{}, &bpfRoutingResult{}, false)
+		// Dst is only used in case of ASIS, hard-code localhost:53 here.
+		req := ObtainDnsRequest(src, netip.MustParseAddrPort("127.0.0.1:53"), routingResult, false)
 		qi := queryInfo{qname: fqdn, qtype: qtype}
 		pipeErr := c.handleDNSRequest(data, req, qi, dnsResp)
 		RecycleDnsRequest(req)
