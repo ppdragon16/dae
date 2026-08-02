@@ -991,7 +991,8 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 	}
 	fqdn := common.CanonicalName(domain)
 	qHash := c.dnsController.QnameHash(fqdn)
-	_, wentThroughKernelDomainRules := c.dnsController.coreIpDomainCache.Get(QnameIpHash(qHash, dst.Addr()))
+	ipHash := QnameIpHash(qHash, dst.Addr())
+	_, wentThroughKernelDomainRules := c.dnsController.coreIpDomainCache.Get(ipHash)
 	if wentThroughKernelDomainRules {
 		shouldRerouteFunc = func() bool { return false }
 	} else {
@@ -1006,9 +1007,7 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 	case consts.SniffVerifyMode_Strict:
 		verified = wentThroughKernelDomainRules
 		if !verified {
-			if ipSet, _ := c.dnsController.sniffDomainCache.Get(qHash); ipSet != nil {
-				_, verified = ipSet[dst.Addr()]
-			}
+			_, verified = c.dnsController.sniffDomainCache.Get(ipHash)
 		}
 	case consts.SniffVerifyMode_Loose:
 		verified = wentThroughKernelDomainRules
