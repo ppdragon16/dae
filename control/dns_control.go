@@ -87,8 +87,8 @@ type DnsController struct {
 	dnsCacheHashSeed   maphash.Seed
 	dnsForwarderCache  sync.Map // map[dnsForwarderKey]DnsForwarder
 	requestSelectCache *common.TimeWheelCache[HashKey, consts.DnsRequestOutboundIndex]
-	coreIpDomainCache  *common.TimeWheelCache[HashKey, coreIpDomainCacheValue]  // Key: Hash by qname + ip
-	sniffDomainCache   *common.TimeWheelCache[HashKey, map[netip.Addr]struct{}] // Key: Hash by qname; recently resolved IPs, used by VerifySniff
+	coreIpDomainCache  *common.TimeWheelCache[HashKey, coreIpDomainCacheValue] // Key: Hash by qname + ip
+	sniffDomainCache   *common.TimeWheelCache[HashKey, struct{}]               // Key: Loose mode hashes by qname; Strict mode hashes by qname+ip. Used by VerifySniff.
 	sniffVerifyMode    consts.SniffVerifyMode
 
 	singleFlightGroup common.SingleFlight[HashKey, *dnsmessage.Msg, singleFlightParam]
@@ -131,7 +131,7 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsCache:           newCommonDnsCache(),
 		dnsCacheHashSeed:   maphash.MakeSeed(),
 		requestSelectCache: common.NewTimeWheelCache[HashKey, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
-		sniffDomainCache:   common.NewTimeWheelCache[HashKey, map[netip.Addr]struct{}](1*time.Hour, 5*time.Second, nil),
+		sniffDomainCache:   common.NewTimeWheelCache[HashKey, struct{}](1*time.Hour, 5*time.Second, nil),
 	}
 	c.coreIpDomainCache = common.NewTimeWheelCache(
 		1*time.Hour, 5*time.Second, func(_ HashKey, v coreIpDomainCacheValue, replaced bool) {
@@ -491,20 +491,16 @@ Dial:
 		if len(ips) > 0 && c.sniffVerifyMode != consts.SniffVerifyMode_None {
 			qHash := c.QnameHash(queryInfo.qname)
 			lookupTTL := max(time.Duration(ttl)*time.Second, c.minSniffingTtl)
-			var ipSet map[netip.Addr]struct{}
-			// IPs are only needed for Strict mode; Loose mode just
-			// needs the key's existence as a "was resolved" signal.
-			if c.sniffVerifyMode == consts.SniffVerifyMode_Strict {
-				if existing, ok := c.sniffDomainCache.Get(qHash); ok && existing != nil {
-					ipSet = existing
-				} else {
-					ipSet = make(map[netip.Addr]struct{}, len(ips))
-				}
+			switch c.sniffVerifyMode {
+			case consts.SniffVerifyMode_Loose:
+				// Loose mode: key by qname only; existence signals "was resolved".
+				c.sniffDomainCache.SaveWithTTL(qHash, struct{}{}, lookupTTL)
+			case consts.SniffVerifyMode_Strict:
+				// Strict mode: key by qname+ip for per-IP exact matching.
 				for _, ip := range ips {
-					ipSet[ip] = struct{}{}
+					c.sniffDomainCache.SaveWithTTL(QnameIpHash(qHash, ip), struct{}{}, lookupTTL)
 				}
 			}
-			c.sniffDomainCache.SaveWithTTL(qHash, ipSet, lookupTTL)
 		}
 		// Update eBPF lookup cache.
 		domainBitmap := common.ObtainDomainBitmap()
