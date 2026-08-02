@@ -161,6 +161,13 @@ func (s *Sniffer) NeedMore() bool {
 	return s.needMore
 }
 
+func (s *Sniffer) BufLen() int {
+	if s.buf == nil {
+		return 0
+	}
+	return s.buf.Len()
+}
+
 func (s *Sniffer) Read(p []byte) (n int, err error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()

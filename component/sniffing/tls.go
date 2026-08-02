@@ -63,11 +63,9 @@ func extractSniFromTls(search quicutils.Locator) (sni string, err error) {
 		return "", ErrNotApplicable
 	}
 
-	// Three bytes length.
-	length2 := (int(b[1]) << 16) + (int(b[2]) << 8) + int(b[3])
-	if search.Len() > length2+4 {
-		return "", ErrNotApplicable
-	}
+	// Three bytes length (unused — we rely on the individual field parsing
+	// to bound the search; the explicit size check was removed because it
+	// incorrectly rejected QUIC CRYPTO frames with trailing data).
 
 	if !bytes.Equal(b[4:], Version_Tls1_2) {
 		return "", ErrNotApplicable

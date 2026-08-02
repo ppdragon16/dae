@@ -119,7 +119,11 @@ func ExtractCryptoFrameOffset(remainder []byte, transportOffset int) (offset *Cr
 	case Quic_FrameType_ConnectionClose, Quic_FrameType_ConnectionClose2:
 		return nil, 0, fmt.Errorf("connection closed: %w", fs.ErrClosed)
 	default:
-		return nil, 0, fmt.Errorf("%w: %v", ErrUnknownFrameType, frameType)
+		// Unknown frame type (e.g. ACK, STREAM, etc.) — skip the
+		// remainder of the payload rather than failing. Failing here
+		// would reject the entire QUIC packet as non-QUIC, breaking
+		// sniffing when Initial packets carry non-CRYPTO frames.
+		return nil, len(remainder), nil
 	}
 }
 
@@ -220,14 +224,21 @@ func (l *LinearLocator) Range(i, j int) ([]byte, error) {
 		n := copy(b[k:], l.baseData[i-l.baseStart:])
 		k += n
 		i += n
-		if l.iOuter+1 >= len(l.o) || l.o[l.iOuter].UpperAppOffset+len(l.o[l.iOuter+1].Data) != l.o[l.iOuter].UpperAppOffset {
-			// Some crypto is missing.
+		if l.iOuter+1 >= len(l.o) {
 			return nil, ErrMissingCrypto
 		}
 		l.iOuter++
+		// Advance to the next frame, then use relocate to skip past
+		// any overlapping/duplicate frames whose data range is already
+		// covered.  (Retransmitted QUIC Initials produce CRYPTO frames
+		// with the same offsets that the old contiguity check
+		// incorrectly treated as gaps.)
 		l.baseData = l.o[l.iOuter].Data
 		l.baseStart = l.o[l.iOuter].UpperAppOffset
 		l.baseEnd = l.baseStart + len(l.baseData)
+		if err := l.relocate(i); err != nil {
+			return nil, err
+		}
 	}
 	copy(b[k:], l.baseData[i-l.baseStart:j-l.baseStart+1])
 	return b, nil

@@ -38,32 +38,27 @@ const (
 
 func (s *Sniffer) SniffQuic() (d string, err error) {
 	nextBlock := s.buf.Bytes()[s.quicNextRead:]
-	isQuic := false
-	for {
+
+	// Consume as many consecutive QUIC blocks as we can find.
+	for len(nextBlock) > 0 {
 		s.quicCryptos, nextBlock, err = sniffQuicBlock(s.quicCryptos, nextBlock)
 		if err != nil {
-			// If block is not a quic block, return it.
-			if errors.Is(err, ErrNotApplicable) {
-				// But if we have found quic block before, correct it.
-				if isQuic {
-					// Unexpected non-block
-					break
-				}
-				return "", err
-			}
 			if errors.Is(err, fs.ErrClosed) {
-				// ConnectionClose sniffed.
 				return "", ErrNotFound
 			}
-			// The code should NOT run here.
-			return "", err
-		}
-		// Should be quic block.
-		isQuic = true
-		if len(nextBlock) == 0 {
+			// ErrNotApplicable (not a QUIC block) or any other error:
+			// stop consuming. The block may still be QUIC — we just
+			// can't parse this particular payload.
 			break
 		}
 	}
+
+	// If no crypto frames were found (in this call or prior calls),
+	// this isn't QUIC traffic.
+	if len(s.quicCryptos) == 0 {
+		return "", ErrNotApplicable
+	}
+
 	// Is quic.
 	s.quicNextRead = s.buf.Len()
 	// Reuse the per-Sniffer LinearLocator across SniffQuic calls instead of
@@ -76,8 +71,15 @@ func (s *Sniffer) SniffQuic() (d string, err error) {
 	}
 	sni, err := extractSniFromTls(s.quicLocator)
 	if err != nil {
-		// If read a full MTU, but still cannot find SNI, it's likely that there is no SNI.
-		if s.quicNextRead < 1500 {
+		// Determine whether more data might help.
+		if errors.Is(err, quicutils.ErrMissingCrypto) {
+			// CRYPTO frames have gaps — more Initial packets may fill them.
+			// Allow up to ~3 full-size Initial packets before giving up.
+			if s.quicNextRead < 3600 {
+				s.needMore = true
+			}
+		} else if s.quicNextRead < 1500 {
+			// Other error and we haven't read much data yet.
 			s.needMore = true
 		}
 		return "", ErrNotFound
