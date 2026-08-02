@@ -974,15 +974,7 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 		shouldRerouteFunc = func() bool { return false }
 	} else {
 		shouldRerouteFunc = func() bool {
-			bitmap := common.ObtainDomainBitmap()
-			defer common.RecycleDomainBitmap(bitmap)
-			c.routingMatcher.domainMatcher.MatchDomainBitmapInplace(fqdn, bitmap)
-			for _, v := range bitmap {
-				if v != 0 {
-					return true
-				}
-			}
-			return false
+			return !c.dnsController.isDomainBitmapAllZero(fqdn, nil)
 		}
 	}
 
