@@ -580,7 +580,7 @@ func (s *StaticForwarder) ForwardDNS(data []byte) ([]byte, error) {
 	}
 
 	if len(msg.Question) == 0 {
-		return nil, nil // Return empty response for invalid requests
+		return nil, fmt.Errorf("DNS request has no question section")
 	}
 
 	q := msg.Question[0]
