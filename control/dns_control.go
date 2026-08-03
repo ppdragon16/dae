@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -564,40 +565,28 @@ func (c *DnsController) handleDNSRequestRace(
 	queryInfo queryInfo,
 	raceUpstreams []*dns.Upstream,
 ) error {
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var winnerMsg *dnsmessage.Msg
-	var firstErr error
+	var winner atomic.Bool
+	errCh := make(chan error, len(raceUpstreams))
 
 	for _, upstream := range raceUpstreams {
-		wg.Add(1)
 		go func(upstream *dns.Upstream, msg *dnsmessage.Msg) {
-			defer wg.Done()
-
 			err := c.handleDNSRequestByUpstream(msg, req, queryInfo, upstream)
-
-			mu.Lock()
-			if err == nil && winnerMsg == nil && msg.Response && len(msg.Answer) > 0 {
-				winnerMsg = msg
+			if err == nil && msg.Response && len(msg.Answer) > 0 && winner.CompareAndSwap(false, true) {
+				msg.CopyTo(dnsMessage)
 			}
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			mu.Unlock()
+			errCh <- err
 		}(upstream, dnsMessage.Copy())
 	}
-	wg.Wait()
 
-	if winnerMsg == nil {
-		if firstErr != nil {
-			return fmt.Errorf("all %d race upstreams failed: %w", len(raceUpstreams), firstErr)
+	var firstErr error
+	for range len(raceUpstreams) {
+		if err := <-errCh; err == nil {
+			return nil
+		} else if firstErr == nil {
+			firstErr = err
 		}
-		return fmt.Errorf("all %d race upstreams failed", len(raceUpstreams))
 	}
-
-	// Copy the winner's response back to the original message.
-	winnerMsg.CopyTo(dnsMessage)
-	return nil
+	return fmt.Errorf("all %d race upstreams failed: %w", len(raceUpstreams), firstErr)
 }
 
 func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgument, queryInfo queryInfo, accepted bool) {
