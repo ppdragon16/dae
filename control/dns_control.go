@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -627,60 +628,35 @@ func (c *DnsController) handleDNSRequestRace(
 	dnsResp *dnsResponseData,
 	raceUpstreams []*dns.Upstream,
 ) error {
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var winnerResp *dnsResponseData
-	var firstErr error
+	var winner atomic.Bool
+	errCh := make(chan error, len(raceUpstreams))
 
 	for _, upstream := range raceUpstreams {
-		wg.Add(1)
 		go func(upstream *dns.Upstream) {
-			defer wg.Done()
-
 			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
-			isWinner := false
-			defer func() {
-				if isWinner {
-					// Ownership transferred to main goroutine; skip cleanup.
-					return
-				}
+			err := c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, localResp)
+			if err == nil && winner.CompareAndSwap(false, true) {
+				*dnsResp = *localResp
+			} else {
 				if localResp.respData != nil && localResp.fromPool {
 					pool.PutBuffer(localResp.respData)
 				}
-				*localResp = dnsResponseData{}
-				dnsResponseDataPool.Put(localResp)
-			}()
-
-			err := c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, localResp)
-
-			mu.Lock()
-			if err == nil && winnerResp == nil {
-				winnerResp = localResp
-				isWinner = true
 			}
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			mu.Unlock()
+			*localResp = dnsResponseData{}
+			dnsResponseDataPool.Put(localResp)
+			errCh <- err
 		}(upstream)
 	}
-	wg.Wait()
 
-	if winnerResp == nil {
-		if firstErr != nil {
-			return fmt.Errorf("all %d race upstreams failed: %w", len(raceUpstreams), firstErr)
+	var firstErr error
+	for range len(raceUpstreams) {
+		if err := <-errCh; err == nil {
+			return nil
+		} else if firstErr == nil {
+			firstErr = err
 		}
-		return fmt.Errorf("all %d race upstreams failed", len(raceUpstreams))
 	}
-
-	// Transfer winner's data to caller's dnsResp, then recycle the struct.
-	dnsResp.respData = winnerResp.respData
-	dnsResp.fromPool = winnerResp.fromPool
-	dnsResp.isNew = winnerResp.isNew
-	dnsResp.upstreamFrom = winnerResp.upstreamFrom
-	*winnerResp = dnsResponseData{}
-	dnsResponseDataPool.Put(winnerResp)
-	return nil
+	return fmt.Errorf("all %d race upstreams failed: %w", len(raceUpstreams), firstErr)
 }
 
 func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgument, queryInfo queryInfo, accepted bool) {
