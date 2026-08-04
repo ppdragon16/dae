@@ -13,6 +13,11 @@ import (
 	dnsmessage "github.com/miekg/dns"
 )
 
+// dnsDefaultUDPSize is the classic DNS-over-UDP response size limit
+// (RFC 1035 section 4.2.1). Responses exceeding this limit must be
+// truncated with the TC bit set so the client retries over TCP.
+const dnsDefaultUDPSize = 512
+
 type RscWrapper struct {
 	Rsc dnsmessage.RR
 }

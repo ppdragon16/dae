@@ -262,6 +262,16 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	// Avoids duplicated id from clients, so make the id unique.
 	dnsMessage.Id = uint16(fastrand.Intn(math.MaxUint16))
 
+	// Capture the client's UDP size limit before dnsMessage is modified by
+	// upstream responses (which may overwrite Extra). EDNS0 is preserved
+	// at this point since only the ID was changed.
+	udpLimit := dnsDefaultUDPSize
+	if opt := dnsMessage.IsEdns0(); opt != nil {
+		if s := int(opt.UDPSize()); s > udpLimit {
+			udpLimit = s
+		}
+	}
+
 	var err error
 	// Check ip version preference and qtype.
 	switch queryInfo.qtype {
@@ -306,6 +316,16 @@ func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
 	// Keep the id the same with request.
 	dnsMessage.Id = id
 	dnsMessage.Compress = true
+
+	// Truncate oversized UDP DNS responses with TC bit set (RFC 1035)
+	// so the client retries over TCP. Without this, the client receives a
+	// "noerror, 0 answer, tc=0" reply and may believe the name has no
+	// addresses. TCP DNS has no size limit (RFC 7766), so truncation is
+	// skipped for TCP clients.
+	if !req.isTcp {
+		dnsMessage.Truncate(udpLimit)
+	}
+
 	buf := pool.GetBuffer(512)
 	defer pool.PutBuffer(buf)
 	data, err := dnsMessage.PackBuffer(buf)
