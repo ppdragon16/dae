@@ -45,9 +45,23 @@ func NewConnSniffer(conn net.Conn, timeout time.Duration) ConnSnifferInterface {
 }
 
 func (s *ConnSniffer) Read(p []byte) (n int, err error) {
-	return s.Sniffer.Read(p)
+	if s.Sniffer == nil {
+		return s.Conn.Read(p)
+	}
+	n, err = s.Sniffer.Read(p)
+	// Once the sniffer has served all buffered sniff data, it becomes a
+	// useless pass-through — detach it so subsequent reads hit s.Conn
+	// directly without overhead.
+	if s.Sniffer.IsDrained() {
+		s.Sniffer.Close()
+		s.Sniffer = nil
+	}
+	return
 }
 
 func (s *ConnSniffer) Close() error {
-	return errors.Join(s.Conn.Close(), s.Sniffer.Close())
+	if s.Sniffer != nil {
+		return errors.Join(s.Conn.Close(), s.Sniffer.Close())
+	}
+	return s.Conn.Close()
 }

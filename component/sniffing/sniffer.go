@@ -189,6 +189,12 @@ func (s *Sniffer) Read(p []byte) (n int, err error) {
 	return s.r.Read(p)
 }
 
+// IsDrained reports whether the sniffer has consumed all buffered sniff data
+// and is now just a pass-through to the underlying reader.
+func (s *Sniffer) IsDrained() bool {
+	return s.buf == nil
+}
+
 func (s *Sniffer) Close() (err error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()

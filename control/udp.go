@@ -67,6 +67,9 @@ func (c *ControlPlane) sniffPkt(key PacketSnifferKey, data []byte) (result *snif
 			// Skip the first empty and the last (self).
 			pending: sniffer.Data()[1 : len(sniffer.Data())-1],
 		}
+		// Sniffing is complete — reclaim the sniffer immediately instead
+		// of waiting for the TTL timer to expire.
+		DefaultPacketSnifferSessionMgr.Remove(key)
 	}
 	return result, nil
 }
