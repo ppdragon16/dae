@@ -37,104 +37,24 @@ const (
 	routingTuplesTimeoutClosing  = 10 * time.Second
 	routingTuplesTimeoutUdp      = 1 * time.Minute
 
-	janitorBatchLookupSize = 1024
-	janitorDeleteInitCap   = 256
-	janitorDeleteRetainMax = 8192
+	janitorBatchLookupSize = 64
+	janitorDeleteInitCap   = 32
+	janitorDeleteRetainMax = 256
 )
 
-// ---- cookie_pid scratch ----
+// ---- scratch helpers ----
 
-type cookiePidJanitorScratch struct {
-	keys   []uint64
-	values []bpfPidPname
-	delete []uint64
+type janitorScratch[K, V any] struct {
+	keys   [janitorBatchLookupSize]K
+	values [janitorBatchLookupSize]V
+	delete []K
 }
 
-func (j *bpfMapJanitor) obtainCookiePidScratch() *cookiePidJanitorScratch {
-	s := &j.cookiePidScratch
-	if cap(s.keys) < janitorBatchLookupSize {
-		s.keys = make([]uint64, janitorBatchLookupSize)
-	}
-	if cap(s.values) < janitorBatchLookupSize {
-		s.values = make([]bpfPidPname, janitorBatchLookupSize)
-	}
-	if cap(s.delete) < janitorDeleteInitCap {
-		s.delete = make([]uint64, 0, janitorDeleteInitCap)
+func recycleScratchDelete[S ~[]E, E any](s *S) {
+	if cap(*s) > janitorDeleteRetainMax {
+		*s = make(S, 0, janitorDeleteInitCap)
 	} else {
-		s.delete = s.delete[:0]
-	}
-	return s
-}
-
-func recycleCookiePidScratch(s *cookiePidJanitorScratch) {
-	if cap(s.delete) > janitorDeleteRetainMax {
-		s.delete = make([]uint64, 0, janitorDeleteInitCap)
-	} else {
-		s.delete = s.delete[:0]
-	}
-}
-
-// ---- redirect_track scratch ----
-
-type redirectTrackJanitorScratch struct {
-	keys   []bpfRedirectTuple
-	values []bpfRedirectEntry
-	delete []bpfRedirectTuple
-}
-
-func (j *bpfMapJanitor) obtainRedirectTrackScratch() *redirectTrackJanitorScratch {
-	s := &j.redirectScratch
-	if cap(s.keys) < janitorBatchLookupSize {
-		s.keys = make([]bpfRedirectTuple, janitorBatchLookupSize)
-	}
-	if cap(s.values) < janitorBatchLookupSize {
-		s.values = make([]bpfRedirectEntry, janitorBatchLookupSize)
-	}
-	if cap(s.delete) < janitorDeleteInitCap {
-		s.delete = make([]bpfRedirectTuple, 0, janitorDeleteInitCap)
-	} else {
-		s.delete = s.delete[:0]
-	}
-	return s
-}
-
-func recycleRedirectTrackScratch(s *redirectTrackJanitorScratch) {
-	if cap(s.delete) > janitorDeleteRetainMax {
-		s.delete = make([]bpfRedirectTuple, 0, janitorDeleteInitCap)
-	} else {
-		s.delete = s.delete[:0]
-	}
-}
-
-// ---- routing_tuples scratch ----
-
-type routingTuplesJanitorScratch struct {
-	keys   []bpfTuplesKey
-	values []bpfRoutingResult
-	delete []bpfTuplesKey
-}
-
-func (j *bpfMapJanitor) obtainRoutingTuplesScratch() *routingTuplesJanitorScratch {
-	s := &j.routingTuplesScratch
-	if cap(s.keys) < janitorBatchLookupSize {
-		s.keys = make([]bpfTuplesKey, janitorBatchLookupSize)
-	}
-	if cap(s.values) < janitorBatchLookupSize {
-		s.values = make([]bpfRoutingResult, janitorBatchLookupSize)
-	}
-	if cap(s.delete) < janitorDeleteInitCap {
-		s.delete = make([]bpfTuplesKey, 0, janitorDeleteInitCap)
-	} else {
-		s.delete = s.delete[:0]
-	}
-	return s
-}
-
-func recycleRoutingTuplesScratch(s *routingTuplesJanitorScratch) {
-	if cap(s.delete) > janitorDeleteRetainMax {
-		s.delete = make([]bpfTuplesKey, 0, janitorDeleteInitCap)
-	} else {
-		s.delete = s.delete[:0]
+		*s = (*s)[:0]
 	}
 }
 
@@ -145,9 +65,9 @@ type bpfMapJanitor struct {
 
 	wake                 chan bool // true=cleanup now, false/closed=stop
 	done                 chan struct{}
-	cookiePidScratch     cookiePidJanitorScratch
-	redirectScratch      redirectTrackJanitorScratch
-	routingTuplesScratch routingTuplesJanitorScratch
+	cookiePidScratch     janitorScratch[uint64, bpfPidPname]
+	redirectScratch      janitorScratch[bpfRedirectTuple, bpfRedirectEntry]
+	routingTuplesScratch janitorScratch[bpfTuplesKey, bpfRoutingResult]
 }
 
 func newBpfMapJanitor(bpf func() *bpfObjects) bpfMapJanitor {
@@ -155,6 +75,15 @@ func newBpfMapJanitor(bpf func() *bpfObjects) bpfMapJanitor {
 		bpf:  bpf,
 		wake: make(chan bool, 1),
 		done: make(chan struct{}),
+		cookiePidScratch: janitorScratch[uint64, bpfPidPname]{
+			delete: make([]uint64, 0, janitorDeleteInitCap),
+		},
+		redirectScratch: janitorScratch[bpfRedirectTuple, bpfRedirectEntry]{
+			delete: make([]bpfRedirectTuple, 0, janitorDeleteInitCap),
+		},
+		routingTuplesScratch: janitorScratch[bpfTuplesKey, bpfRoutingResult]{
+			delete: make([]bpfTuplesKey, 0, janitorDeleteInitCap),
+		},
 	}
 }
 
@@ -255,12 +184,12 @@ func (j *bpfMapJanitor) cleanupCookiePidMap() int {
 	}
 	timeoutNano := cookiePidMapTimeout.Nanoseconds()
 
-	scratch := j.obtainCookiePidScratch()
-	defer recycleCookiePidScratch(scratch)
+	scratch := &j.cookiePidScratch
+	defer recycleScratchDelete(&scratch.delete)
 
 	var cursor ebpf.MapBatchCursor
 	for {
-		count, err := m.BatchLookup(&cursor, scratch.keys, scratch.values, nil)
+		count, err := m.BatchLookup(&cursor, scratch.keys[:], scratch.values[:], nil)
 		if count > 0 {
 			for i := range count {
 				if nowNano-int64(scratch.values[i].LastSeenNs) > timeoutNano {
@@ -299,12 +228,12 @@ func (j *bpfMapJanitor) cleanupRedirectTrackMap() int {
 	}
 	timeoutNano := redirectTrackTimeout.Nanoseconds()
 
-	scratch := j.obtainRedirectTrackScratch()
-	defer recycleRedirectTrackScratch(scratch)
+	scratch := &j.redirectScratch
+	defer recycleScratchDelete(&scratch.delete)
 
 	var cursor ebpf.MapBatchCursor
 	for {
-		count, err := m.BatchLookup(&cursor, scratch.keys, scratch.values, nil)
+		count, err := m.BatchLookup(&cursor, scratch.keys[:], scratch.values[:], nil)
 		if count > 0 {
 			for i := range count {
 				if nowNano-int64(scratch.values[i].LastSeenNs) > timeoutNano {
@@ -345,12 +274,12 @@ func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 	udpTimeout := routingTuplesTimeoutUdp.Nanoseconds()
 	closingTimeout := routingTuplesTimeoutClosing.Nanoseconds()
 
-	scratch := j.obtainRoutingTuplesScratch()
-	defer recycleRoutingTuplesScratch(scratch)
+	scratch := &j.routingTuplesScratch
+	defer recycleScratchDelete(&scratch.delete)
 
 	var cursor ebpf.MapBatchCursor
 	for {
-		count, err := m.BatchLookup(&cursor, scratch.keys, scratch.values, nil)
+		count, err := m.BatchLookup(&cursor, scratch.keys[:], scratch.values[:], nil)
 		if count > 0 {
 			for i := range count {
 				val := scratch.values[i]
