@@ -20,6 +20,144 @@ const (
 	maxJumpCount = 10 // 限制跳转次数，防止死循环
 )
 
+// dnsDefaultUDPSize is the classic DNS-over-UDP response size limit
+// (RFC 1035 section 4.2.1) applied when the client does not advertise
+// EDNS0. Responses larger than the limit must be truncated with the TC
+// bit set so the client retries over TCP instead of silently dropping
+// the answers (which manifests as "noerror, 0 answer, tc=0").
+const dnsDefaultUDPSize = 512
+
+// dnsUDPPayloadSize reads the EDNS0 advertised UDP payload size directly
+// from raw DNS request bytes by scanning the additional section for an
+// OPT record (type 41). Returns 0 if no EDNS0 OPT record is found. This
+// avoids a full dnsmessage.Msg.Unpack and is suitable for the hot path.
+func dnsUDPPayloadSize(data []byte) int {
+	if len(data) < 12 {
+		return 0
+	}
+	arCount := int(binary.BigEndian.Uint16(data[10:12]))
+	if arCount == 0 {
+		return 0
+	}
+
+	// Skip 12-byte header.
+	off := 12
+
+	// Skip question section.
+	qdCount := int(binary.BigEndian.Uint16(data[4:6]))
+	for range qdCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil {
+			return 0
+		}
+		off = nextOff + 4 // QTYPE(2) + QCLASS(2)
+	}
+
+	// Skip answer section.
+	anCount := int(binary.BigEndian.Uint16(data[6:8]))
+	for range anCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil || nextOff+10 > len(data) {
+			return 0
+		}
+		rdLen := int(binary.BigEndian.Uint16(data[nextOff+8 : nextOff+10]))
+		off = nextOff + 10 + rdLen
+	}
+
+	// Skip authority section.
+	nsCount := int(binary.BigEndian.Uint16(data[8:10]))
+	for range nsCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil || nextOff+10 > len(data) {
+			return 0
+		}
+		rdLen := int(binary.BigEndian.Uint16(data[nextOff+8 : nextOff+10]))
+		off = nextOff + 10 + rdLen
+	}
+
+	// Scan additional section for an OPT record (TYPE=41).
+	for range arCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil || nextOff+4 > len(data) {
+			return 0
+		}
+		rtype := binary.BigEndian.Uint16(data[nextOff : nextOff+2])
+		if rtype == 41 { // dnsmessage.TypeOPT
+			// CLASS field is the UDP payload size (RFC 6891).
+			return int(binary.BigEndian.Uint16(data[nextOff+2 : nextOff+4]))
+		}
+		if nextOff+10 > len(data) {
+			return 0
+		}
+		rdLen := int(binary.BigEndian.Uint16(data[nextOff+8 : nextOff+10]))
+		off = nextOff + 10 + rdLen
+	}
+	return 0
+}
+
+// truncateDNSResponse truncates resp to fit within the client's UDP size
+// limit (512, or the EDNS0 advertised size from req per RFC 6891). Returns
+// resp unchanged if no truncation is needed. The TC bit is set on oversized
+// responses so the client retries over TCP (RFC 1035 section 4.2.1).
+// Only complete answer RRs are kept; authority and additional sections are
+// dropped. All operations are raw-byte to avoid dnsmessage.Msg allocations.
+func truncateDNSResponse(req []byte, resp []byte) []byte {
+	// Fast path: most responses fit within the classic 512-byte limit.
+	if len(resp) <= dnsDefaultUDPSize {
+		return resp
+	}
+
+	// Determine the client's UDP size limit from its request.
+	limit := dnsDefaultUDPSize
+	if s := dnsUDPPayloadSize(req); s > limit {
+		limit = s
+	}
+
+	if len(resp) <= limit {
+		return resp
+	}
+	if len(resp) < 12 {
+		return resp
+	}
+
+	qdCount := int(binary.BigEndian.Uint16(resp[4:6]))
+	anCount := int(binary.BigEndian.Uint16(resp[6:8]))
+
+	// Skip 12-byte header + question section to reach the first answer RR.
+	off := 12
+	for range qdCount {
+		nextOff, err := dnsSkipDomain(resp, off)
+		if err != nil || nextOff+4 > len(resp) {
+			return resp
+		}
+		off = nextOff + 4 // QTYPE(2) + QCLASS(2)
+	}
+
+	// Walk answer RRs; keep only those that fit completely within limit.
+	kept := 0
+	for range anCount {
+		nextOff, err := dnsSkipDomain(resp, off)
+		if err != nil || nextOff+10 > len(resp) {
+			break
+		}
+		rdLen := int(binary.BigEndian.Uint16(resp[nextOff+8 : nextOff+10]))
+		rrEnd := nextOff + 10 + rdLen
+		if rrEnd > limit {
+			break
+		}
+		off = rrEnd
+		kept++
+	}
+
+	// Set TC bit (RFC 1035) and update counts.
+	resp[2] |= 0x02
+	binary.BigEndian.PutUint16(resp[6:8], uint16(kept))
+	binary.BigEndian.PutUint16(resp[8:10], 0)  // NSCOUNT = 0
+	binary.BigEndian.PutUint16(resp[10:12], 0) // ARCOUNT = 0
+
+	return resp[:off]
+}
+
 type RscWrapper struct {
 	Rsc dnsmessage.RR
 }

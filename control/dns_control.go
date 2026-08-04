@@ -364,6 +364,13 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	// Keep the id the same with request.
 	dnsIdSet(dataToWrite, id)
 
+	// Truncate oversized UDP DNS responses with TC bit set (RFC 1035)
+	// so the client retries over TCP. The function reads the client's
+	// EDNS0 size from the request bytes and truncates only when needed.
+	if !req.isTcp {
+		dataToWrite = truncateDNSResponse(data, dataToWrite)
+	}
+
 	// Send back the dns response.
 	// Never recycle anyfrom for Non-ASIS upstreams because they are limited.
 	// Note: zero-ttl means "immortal".
