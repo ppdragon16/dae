@@ -566,24 +566,29 @@ func (c *DnsController) handleDNSRequestRace(
 	raceUpstreams []*dns.Upstream,
 ) error {
 	var winner atomic.Bool
-	errCh := make(chan error, len(raceUpstreams))
+	type result struct {
+		err error
+		win bool
+	}
+	ch := make(chan result, len(raceUpstreams))
 
 	for _, upstream := range raceUpstreams {
 		go func(upstream *dns.Upstream, msg *dnsmessage.Msg) {
 			err := c.handleDNSRequestByUpstream(msg, req, queryInfo, upstream)
-			if err == nil && msg.Response && len(msg.Answer) > 0 && winner.CompareAndSwap(false, true) {
+			win := err == nil && msg.Response && len(msg.Answer) > 0 && winner.CompareAndSwap(false, true)
+			if win {
 				msg.CopyTo(dnsMessage)
 			}
-			errCh <- err
+			ch <- result{err: err, win: win}
 		}(upstream, dnsMessage.Copy())
 	}
 
 	var firstErr error
 	for range len(raceUpstreams) {
-		if err := <-errCh; err == nil {
+		if res := <-ch; res.win {
 			return nil
-		} else if firstErr == nil {
-			firstErr = err
+		} else if firstErr == nil && res.err != nil {
+			firstErr = res.err
 		}
 	}
 	return fmt.Errorf("all %d race upstreams failed: %w", len(raceUpstreams), firstErr)
@@ -830,7 +835,7 @@ func (c *DnsController) singleFlightForwardDNS(
 		}
 		return msg, nil
 	})
-	if err != nil || resp == nil {
+	if err != nil {
 		return nil, err
 	}
 	if !resp.Response {
