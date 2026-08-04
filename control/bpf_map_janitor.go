@@ -20,6 +20,8 @@ import (
 const (
 	// Base tick interval for the janitor goroutine.
 	janitorTickInterval = 10 * time.Second
+	// Max interval when the janitor is calm (no entries to clean up).
+	janitorMaxInterval = 5 * time.Minute
 
 	// cookiePidMap scan and timeout constants.
 	cookiePidJanitorInterval = 30 * time.Second
@@ -141,7 +143,7 @@ func recycleRoutingTuplesScratch(s *routingTuplesJanitorScratch) {
 type bpfMapJanitor struct {
 	bpf func() *bpfObjects
 
-	stop                 chan struct{}
+	wake                 chan bool // true=cleanup now, false/closed=stop
 	done                 chan struct{}
 	cookiePidScratch     cookiePidJanitorScratch
 	redirectScratch      redirectTrackJanitorScratch
@@ -151,14 +153,24 @@ type bpfMapJanitor struct {
 func newBpfMapJanitor(bpf func() *bpfObjects) bpfMapJanitor {
 	return bpfMapJanitor{
 		bpf:  bpf,
-		stop: make(chan struct{}),
+		wake: make(chan bool, 1),
 		done: make(chan struct{}),
+	}
+}
+
+// Wake signals the janitor to perform a cleanup round immediately. Safe
+// to call concurrently from any goroutine.
+func (j *bpfMapJanitor) Wake() {
+	select {
+	case j.wake <- true:
+	default:
 	}
 }
 
 func (j *bpfMapJanitor) Start(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(janitorTickInterval)
+		interval := janitorTickInterval
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		defer close(j.done)
 
@@ -166,30 +178,51 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 
 		for {
 			select {
-			case <-j.stop:
-				return
+			case shouldCleanup := <-j.wake:
+				if !shouldCleanup {
+					return
+				}
+				// External signal (e.g. connection set to CLOSING):
+				// run a cleanup round immediately.
 			case <-ctx.Done():
 				return
-			case now := <-ticker.C:
-				if lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
-					j.cleanupCookiePidMap()
-					lastCookiePidCleanup = now
-				}
-				if lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
-					j.cleanupRedirectTrackMap()
-					lastRedirectCleanup = now
-				}
-				if lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
-					j.cleanupRoutingTuplesMap()
-					lastRoutingTuplesCleanup = now
-				}
+			case <-ticker.C:
 			}
+
+			now := time.Now()
+			cleaned := 0
+
+			if lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
+				n := j.cleanupCookiePidMap()
+				cleaned += n
+				lastCookiePidCleanup = now
+			}
+			if lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
+				n := j.cleanupRedirectTrackMap()
+				cleaned += n
+				lastRedirectCleanup = now
+			}
+			if lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
+				n := j.cleanupRoutingTuplesMap()
+				cleaned += n
+				lastRoutingTuplesCleanup = now
+			}
+
+			// Calm-state backoff: when nothing was expired, double
+			// the poll interval up to janitorMaxInterval. As soon
+			// as any entry was cleaned, reset to the base cadence.
+			if cleaned > 0 {
+				interval = janitorTickInterval
+			} else {
+				interval = min(interval*2, janitorMaxInterval)
+			}
+			ticker.Reset(interval)
 		}
 	}()
 }
 
 func (j *bpfMapJanitor) Stop() {
-	close(j.stop)
+	close(j.wake)
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
