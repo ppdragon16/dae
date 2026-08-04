@@ -353,7 +353,7 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 		err = c.handleDNSRequest(data, req, queryInfo, dnsResp)
 	}
 	dataToWrite := dnsResp.respData
-	if err != nil {
+	if err != nil || !dnsResponse(dataToWrite) {
 		isNetError, _, _, isTemporary := GetNetErrorInfo(err)
 		if !isNetError || !isTemporary {
 			log.Errorf("%+v", err)
@@ -629,31 +629,34 @@ func (c *DnsController) handleDNSRequestRace(
 	raceUpstreams []*dns.Upstream,
 ) error {
 	var winner atomic.Bool
-	errCh := make(chan error, len(raceUpstreams))
+	type result struct {
+		err error
+		win bool
+	}
+	ch := make(chan result, len(raceUpstreams))
 
 	for _, upstream := range raceUpstreams {
 		go func(upstream *dns.Upstream) {
 			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
 			err := c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, localResp)
-			if err == nil && winner.CompareAndSwap(false, true) {
+			win := err == nil && winner.CompareAndSwap(false, true)
+			if win {
 				*dnsResp = *localResp
-			} else {
-				if localResp.respData != nil && localResp.fromPool {
-					pool.PutBuffer(localResp.respData)
-				}
+			} else if localResp.respData != nil && localResp.fromPool {
+				pool.PutBuffer(localResp.respData)
 			}
 			*localResp = dnsResponseData{}
 			dnsResponseDataPool.Put(localResp)
-			errCh <- err
+			ch <- result{err: err, win: win}
 		}(upstream)
 	}
 
 	var firstErr error
 	for range len(raceUpstreams) {
-		if err := <-errCh; err == nil {
+		if res := <-ch; res.win {
 			return nil
-		} else if firstErr == nil {
-			firstErr = err
+		} else if firstErr == nil && res.err != nil {
+			firstErr = res.err
 		}
 	}
 	return fmt.Errorf("all %d race upstreams failed: %w", len(raceUpstreams), firstErr)
@@ -885,6 +888,9 @@ func (c *DnsController) singleFlightForwardDNS(
 		if err != nil {
 			return nil, err
 		}
+		if r == nil {
+			return nil, fmt.Errorf("empty DNS response from %v", upstream.String())
+		}
 		rcode := dnsRcode(r)
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
@@ -921,7 +927,7 @@ func (c *DnsController) singleFlightForwardDNS(
 		}
 		return r, nil
 	})
-	if err != nil || r == nil {
+	if err != nil {
 		return nil, false, false, err
 	}
 	if !dnsResponse(r) {
