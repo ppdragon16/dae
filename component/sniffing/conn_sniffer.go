@@ -45,23 +45,28 @@ func NewConnSniffer(conn net.Conn, timeout time.Duration) ConnSnifferInterface {
 }
 
 func (s *ConnSniffer) Read(p []byte) (n int, err error) {
-	if s.Sniffer == nil {
+	// Snapshot the sniffer pointer once to avoid racing with Close() which
+	// may nil it out concurrently.
+	sniffer := s.Sniffer
+	if sniffer == nil {
 		return s.Conn.Read(p)
 	}
-	n, err = s.Sniffer.Read(p)
+	n, err = sniffer.Read(p)
 	// Once the sniffer has served all buffered sniff data, it becomes a
 	// useless pass-through — detach it so subsequent reads hit s.Conn
 	// directly without overhead.
-	if s.Sniffer.IsDrained() {
-		s.Sniffer.Close()
+	if sniffer.IsDrained() {
+		sniffer.Close()
 		s.Sniffer = nil
 	}
 	return
 }
 
 func (s *ConnSniffer) Close() error {
-	if s.Sniffer != nil {
-		return errors.Join(s.Conn.Close(), s.Sniffer.Close())
+	// Snapshot the sniffer pointer once to avoid racing with Read() which
+	// may nil it out concurrently (causing a nil-pointer dereference).
+	if sniffer := s.Sniffer; sniffer != nil {
+		return errors.Join(s.Conn.Close(), sniffer.Close())
 	}
 	return s.Conn.Close()
 }
