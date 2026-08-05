@@ -23,6 +23,7 @@ import (
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/direct"
+	quicpool "github.com/daeuniverse/quic-go/pool"
 	utls "github.com/refraction-networking/utls"
 	"gopkg.in/natefinch/lumberjack.v2"
 
@@ -617,5 +618,7 @@ func emptyConfig() (conf *config.Config, err error) {
 func init() {
 	utls.SetBufferPool(pool.GetBuffer, pool.PutBuffer)
 	utls.NewBytesBufferFunc = func() utls.BytesBuffer { return pool.NewPooledBuffer() }
+	quicpool.GetBuffer = pool.GetBuffer
+	quicpool.PutBuffer = pool.PutBuffer
 	rootCmd.AddCommand(runCmd)
 }
