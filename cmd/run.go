@@ -23,6 +23,7 @@ import (
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/direct"
+	"github.com/daeuniverse/quic-go"
 	quicpool "github.com/daeuniverse/quic-go/pool"
 	utls "github.com/refraction-networking/utls"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -620,5 +621,11 @@ func init() {
 	utls.NewBytesBufferFunc = func() utls.BytesBuffer { return pool.NewPooledBuffer() }
 	quicpool.GetBuffer = pool.GetBuffer
 	quicpool.PutBuffer = pool.PutBuffer
+
+	// Inject logrus adapter so quic-go logs (e.g. frame sorter peak stats)
+	// flow through dae's logging. Level controlled by QUIC_GO_LOG_LEVEL env var;
+	// defaults to silent (matching quic-go's own default).
+	quic.SetLogger(common.NewQuicLogger())
+
 	rootCmd.AddCommand(runCmd)
 }
