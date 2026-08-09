@@ -14,11 +14,19 @@ type quicLogAdapter struct {
 }
 
 // NewQuicLogger creates a quic.Logger backed by logrus' standard logger.
-// Use quic.SetLogger to inject it.
+// The initial quic log level is derived from logrus' current level so it stays
+// in sync with dae's log_level config. Use quic.SetLogger to inject it.
 func NewQuicLogger() quic.Logger {
+	quicLevel := quic.LogLevelInfo
+	switch log.GetLevel() {
+	case log.TraceLevel, log.DebugLevel:
+		quicLevel = quic.LogLevelDebug
+	case log.ErrorLevel, log.FatalLevel, log.PanicLevel:
+		quicLevel = quic.LogLevelError
+	}
 	return &quicLogAdapter{
 		entry:    log.NewEntry(log.StandardLogger()),
-		logLevel: quic.LogLevelInfo,
+		logLevel: quicLevel,
 	}
 }
 
@@ -43,18 +51,18 @@ func (l *quicLogAdapter) Debug() bool {
 
 func (l *quicLogAdapter) Errorf(format string, args ...interface{}) {
 	if l.logLevel >= quic.LogLevelError {
-		l.entry.Errorf(format, args...)
+		l.entry.Errorf("[QUIC] "+format, args...)
 	}
 }
 
 func (l *quicLogAdapter) Infof(format string, args ...interface{}) {
 	if l.logLevel >= quic.LogLevelInfo {
-		l.entry.Infof(format, args...)
+		l.entry.Infof("[QUIC] "+format, args...)
 	}
 }
 
 func (l *quicLogAdapter) Debugf(format string, args ...interface{}) {
 	if l.logLevel >= quic.LogLevelDebug {
-		l.entry.Debugf(format, args...)
+		l.entry.Debugf("[QUIC] "+format, args...)
 	}
 }
