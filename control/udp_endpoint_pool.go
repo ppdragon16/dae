@@ -80,6 +80,14 @@ func (ue *UdpEndpoint) run() {
 		}
 	}
 	var readErr error
+	var writeFunc func(buf []byte, dst netip.AddrPort) (int, error)
+	if ue.Dst.Port() == 443 {
+		// QUIC: auto direct for sparse flows, batch for heavy.
+		writeFunc = ue.af.WriteToAddrPort
+	} else {
+		// non-QUIC (e.g. Games): always direct, no batching for latency.
+		writeFunc = ue.af.WriteToUDPAddrPort
+	}
 	for {
 		n, from, e := readFunc(buf)
 		if e != nil {
@@ -95,7 +103,8 @@ func (ue *UdpEndpoint) run() {
 		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) && fastlog.Enabled() {
 			fastlog.LogUdpReply(ue.Src, from)
 		}
-		if _, writeErr := ue.af.WriteToUDPAddrPort(buf[:n], ue.Src); writeErr != nil {
+
+		if _, writeErr := writeFunc(buf[:n], ue.Src); writeErr != nil {
 			// Write to client failed (NAT rebinding, etc.) — continue;
 			// don't kill the endpoint because the proxy side is still alive.
 			continue
