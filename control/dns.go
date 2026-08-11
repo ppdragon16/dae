@@ -26,6 +26,8 @@ import (
 	"github.com/daeuniverse/quic-go/http3"
 	dnsmessage "github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 const (
@@ -157,7 +159,7 @@ func getHttpRoundTripper(hostname string, dialer *dialer.Dialer, target netip.Ad
 
 func getHttp3RoundTripper(hostname string, dialer *dialer.Dialer, target netip.AddrPort) *http3.Transport {
 	roundTripper := &http3.Transport{
-		TLSClientConfig: &tls.Config{
+		TLSClientConfig: &utls.Config{
 			ServerName:         hostname,
 			NextProtos:         []string{"h3"},
 			InsecureSkipVerify: false,
@@ -166,7 +168,7 @@ func getHttp3RoundTripper(hostname string, dialer *dialer.Dialer, target netip.A
 			KeepAlivePeriod: 30 * time.Second,
 			MaxIdleTimeout:  45 * time.Second,
 		},
-		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		Dial: func(ctx context.Context, addr string, tlsCfg *utls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			udpAddr := net.UDPAddrFromAddrPort(target)
 			conn, err := dialer.ListenPacket(ctx, target.String())
 			if err != nil {
@@ -203,7 +205,7 @@ func (d *DoQ) createConnection(ctx context.Context) (quic.EarlyConnection, error
 		return nil, err
 	}
 
-	tlsCfg := &tls.Config{
+	tlsCfg := &utls.Config{
 		NextProtos:         []string{"doq"},
 		InsecureSkipVerify: false,
 		ServerName:         d.Upstream.Hostname,
@@ -283,25 +285,25 @@ type DoTLS struct {
 	dns.Upstream
 	dialArgument dialArgument
 
-	pool chan *tls.Conn
+	pool chan *utls.Conn
 }
 
 func NewDoTLS(upstream *dns.Upstream, dialArgument dialArgument) *DoTLS {
 	return &DoTLS{
 		Upstream:     *upstream,
 		dialArgument: dialArgument,
-		pool:         make(chan *tls.Conn, TcpPoolSize),
+		pool:         make(chan *utls.Conn, TcpPoolSize),
 	}
 }
 
-func (d *DoTLS) createNewConn() (*tls.Conn, error) {
+func (d *DoTLS) createNewConn() (*utls.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.TODO(), consts.DefaultDialTimeout)
 	defer cancel()
 	conn, err := d.dialArgument.Dialer.DialContext(ctx, "tcp", d.dialArgument.Target.String())
 	if err != nil {
 		return nil, err
 	}
-	tlsConn := tls.Client(conn, &tls.Config{
+	tlsConn := utls.Client(conn, &utls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         d.Upstream.Hostname,
 	})
@@ -313,7 +315,7 @@ func (d *DoTLS) createNewConn() (*tls.Conn, error) {
 	return tlsConn, nil
 }
 
-func (d *DoTLS) getConn() (*tls.Conn, error) {
+func (d *DoTLS) getConn() (*utls.Conn, error) {
 	select {
 	case conn := <-d.pool:
 		return conn, nil
@@ -322,7 +324,7 @@ func (d *DoTLS) getConn() (*tls.Conn, error) {
 	}
 }
 
-func (d *DoTLS) putConn(conn *tls.Conn) {
+func (d *DoTLS) putConn(conn *utls.Conn) {
 	select {
 	case d.pool <- conn:
 	default:
