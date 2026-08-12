@@ -6,12 +6,22 @@
 package control
 
 import (
-	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+// UdpTaskPool executes tasks keyed by UDP flow, one convoy goroutine per key.
+// Tasks sharing a key are drained from a bounded channel in FIFO order, so
+// they reach handlePkt in the same order EmitTask enqueued them.
+//
+// Note this only preserves order from EmitTask onward. The enqueue order is
+// whatever order callers invoke EmitTask in, so to keep same-flow packets in
+// wire (arrival) order, EmitTask MUST be called from the single serial read
+// loop (loopUdp). Calling it from concurrent workers would reorder packets
+// before they ever reach the queue, defeating the purpose — which is why the
+// ordering-sensitive path emits directly from loopUdp rather than through the
+// udpWorker pool.
 const UdpTaskQueueLength = 128
 const shardingCount = 128
 
@@ -107,7 +117,9 @@ func NewUdpTaskPool[K comparable, P any](hasher Hasher[K]) *UdpTaskPool[K, P] {
 	return p
 }
 
-// EmitTask: Make sure packets with the same key (4 tuples) will be sent in order.
+// EmitTask enqueues a task for key. Tasks sharing a key run in FIFO enqueue
+// order via a single convoy goroutine; see the UdpTaskPool doc comment for the
+// ordering guarantee's precondition (call from the serial read loop).
 func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) bool {
 	h := p.hasher(key)
 	shard := p.shards[h%uint32(shardingCount)]
@@ -158,22 +170,8 @@ func (p *UdpTaskPool[K, P]) EmitTask(key K, task *UdpTask[P]) bool {
 	return true
 }
 
-func AddrPortHash(k netip.AddrPort) uint32 {
-	addr := k.Addr()
-	// FNV-1a like hash for 16 bytes addr + 2 bytes port
-	// We can't access internal fields efficiently without allocation if we use Interface()
-	// But AddrPort is comparable.
-	// As16() returns [16]byte array
-	b16 := addr.As16()
-	var h uint32 = 2166136261
-	for _, b := range b16 {
-		h ^= uint32(b)
-		h *= 16777619
-	}
-	port := k.Port()
-	h ^= uint32(port >> 8)
-	h *= 16777619
-	h ^= uint32(port & 0xFF)
-	h *= 16777619
-	return h
+func AddrPortPairHash(k AddrPortPair) uint32 {
+	// Reuse the sharded hash with a full mask to obtain the unmasked 32-bit
+	// hash of the {src,dst} pair.
+	return AddrPortPairShard(k, ^uint32(0))
 }

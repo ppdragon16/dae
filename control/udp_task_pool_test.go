@@ -21,11 +21,11 @@ func TestUdpTaskPool(t *testing.T) {
 	t.Log(c)
 	DefaultNatTimeoutUDP = 1000 * time.Millisecond
 
-	pool := NewUdpTaskPool[netip.AddrPort, struct{}](AddrPortHash)
+	pool := NewUdpTaskPool[AddrPortPair, struct{}](AddrPortPairHash)
 
-	key1 := netip.MustParseAddrPort("1.1.1.1:1")
-	key2 := netip.MustParseAddrPort("1.1.1.1:2")
-	key3 := netip.MustParseAddrPort("1.1.1.1:3")
+	key1 := AddrPortPair{Src: netip.MustParseAddrPort("1.1.1.1:1")}
+	key2 := AddrPortPair{Src: netip.MustParseAddrPort("1.1.1.1:2")}
+	key3 := AddrPortPair{Src: netip.MustParseAddrPort("1.1.1.1:3")}
 
 	// Test task execution
 	for i := 0; i <= UdpTaskQueueLength; i++ {
