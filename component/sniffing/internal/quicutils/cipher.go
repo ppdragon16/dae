@@ -6,15 +6,15 @@
 package quicutils
 
 import (
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha256"
 	"encoding/binary"
 	"io"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/outbound/pool"
-	"golang.org/x/crypto/hkdf"
+	utls "github.com/refraction-networking/utls"
 )
 
 const (
@@ -25,7 +25,7 @@ const (
 )
 
 var (
-	InitialClientLabel = []byte("client in")
+	InitialClientLabel = "client in"
 )
 
 type Keys struct {
@@ -47,11 +47,8 @@ func (k *Keys) Close() error {
 
 func NewKeys(clientDstConnectionId []byte, version Version, newAead func(key []byte) (cipher.AEAD, error)) (keys *Keys, err error) {
 	// https://datatracker.ietf.org/doc/html/rfc9001#name-keys
-	initialSecret := hkdf.Extract(sha256.New, clientDstConnectionId, version.InitialSalt())
-	clientInitialSecret, err := HkdfExpandLabelFromPool(sha256.New, initialSecret, InitialClientLabel, nil, 32)
-	if err != nil {
-		return nil, err
-	}
+	initialSecret := utls.HKDFExtract(crypto.SHA256, clientDstConnectionId, version.InitialSalt())
+	clientInitialSecret := utls.HKDFExpandLabel(crypto.SHA256, initialSecret, InitialClientLabel, nil, 32)
 
 	keys = &Keys{
 		clientInitialSecret: clientInitialSecret,
@@ -68,18 +65,9 @@ func NewKeys(clientDstConnectionId []byte, version Version, newAead func(key []b
 }
 
 func (k *Keys) deriveKeys() (err error) {
-	k.key, err = HkdfExpandLabelFromPool(sha256.New, k.clientInitialSecret, k.version.KeyLabel(), nil, 16)
-	if err != nil {
-		return err
-	}
-	k.iv, err = HkdfExpandLabelFromPool(sha256.New, k.clientInitialSecret, k.version.IvLabel(), nil, 12)
-	if err != nil {
-		return err
-	}
-	k.headerProtectionKey, err = HkdfExpandLabelFromPool(sha256.New, k.clientInitialSecret, k.version.HpLabel(), nil, 16)
-	if err != nil {
-		return err
-	}
+	k.key = utls.HKDFExpandLabel(crypto.SHA256, k.clientInitialSecret, string(k.version.KeyLabel()), nil, 16)
+	k.iv = utls.HKDFExpandLabel(crypto.SHA256, k.clientInitialSecret, string(k.version.IvLabel()), nil, 12)
+	k.headerProtectionKey = utls.HKDFExpandLabel(crypto.SHA256, k.clientInitialSecret, string(k.version.HpLabel()), nil, 16)
 	return nil
 }
 
