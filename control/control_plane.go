@@ -1235,10 +1235,16 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 		}
 	}
 
-	emitTask := obtainUdpEmitTask(src, dst, data, c)
-	if !c.udpTaskPool.EmitTask(src, emitTask) {
-		recycleUdpEmitTask(emitTask)
+	if err := c.handlePkt(data, src, dst); err != nil {
+		if log.IsLevelEnabled(log.ErrorLevel) {
+			log.Errorf("%+v", common.Wrap(err, "handlePkt"))
+		}
 	}
+
+	// emitTask := obtainUdpEmitTask(src, dst, data, c)
+	// if !c.udpTaskPool.EmitTask(src, emitTask) {
+	// 	recycleUdpEmitTask(emitTask)
+	// }
 }
 
 type emitParam struct {
