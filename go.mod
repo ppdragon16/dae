@@ -25,7 +25,6 @@ require (
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
 	github.com/x-cray/logrus-prefixed-formatter v0.5.2
-	golang.org/x/crypto v0.53.0
 	golang.org/x/exp v0.0.0-20251125195548-87e1e737ad39
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11
@@ -72,6 +71,7 @@ require (
 	go.opentelemetry.io/otel v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
@@ -106,7 +106,7 @@ require (
 
 //replace github.com/daeuniverse/outbound => ../outbound_ppdn
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls.1
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
@@ -114,7 +114,7 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-n
 
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
-replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.10
+replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.11
 
 //replace github.com/cilium/ebpf => /home/mzz/goProjects/ebpf
 //replace github.com/daeuniverse/dae-config-dist/go/dae_config => /home/mzz/antlrProjects/dae-config/build/go/dae_config
