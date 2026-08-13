@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -247,6 +248,7 @@ func NewControlPlane(
 	}()
 
 	common.InitMetrics()
+	startBufferPoolMetrics()
 
 	/// DialerGroups (outbounds).
 	if global.AllowInsecure {
@@ -827,8 +829,71 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	case "buffer":
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET method required", http.StatusMethodNotAllowed)
+			return
+		}
+		var stats pool.StatsSnapshot
+		pool.PoolStats(&stats)
+		tw := tabwriter.NewWriter(writer, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "CLASS\tGETS\tRING\tPOOL\tALLOC\tHIT%\tRING%\tOCC/MAX")
+		var (
+			totalGets, totalRing, totalPool, totalAlloc uint64
+			totalOcc, totalBytes                        int
+		)
+		active := 0
+		for i, s := range stats {
+			if s.Gets == 0 && s.Occupancy == 0 {
+				continue
+			}
+			active++
+			class := 1 << i
+			fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d/%d\n",
+				formatClassSize(class), s.Gets, s.RingHit, s.PoolHit, s.Alloc,
+				s.HitRate()*100, s.RingHitRate()*100, s.Occupancy, s.Max)
+			totalGets += s.Gets
+			totalRing += s.RingHit
+			totalPool += s.PoolHit
+			totalAlloc += s.Alloc
+			totalOcc += s.Occupancy
+			totalBytes += s.Occupancy * class
+		}
+		if active == 0 {
+			fmt.Fprintf(writer, "no pooled buffers\n")
+			return
+		}
+		var totalHit, totalRingRate float64
+		if totalGets > 0 {
+			totalHit = float64(totalGets-totalAlloc) / float64(totalGets) * 100
+			totalRingRate = float64(totalRing) / float64(totalGets) * 100
+		}
+		fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d\n",
+			totalGets, totalRing, totalPool, totalAlloc, totalHit, totalRingRate, totalOcc)
+		tw.Flush()
+		fmt.Fprintf(writer, "retained: %d buffers, %s\n", totalOcc, formatBytes(totalBytes))
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// formatClassSize renders a power-of-two class size compactly (e.g. "4K", "64K").
+func formatClassSize(size int) string {
+	if size < 1<<10 {
+		return fmt.Sprintf("%dB", size)
+	}
+	return fmt.Sprintf("%dK", size>>10)
+}
+
+// formatBytes renders a byte count with a binary unit suffix.
+func formatBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1fMiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1fKiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", n)
 	}
 }
 
