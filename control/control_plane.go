@@ -859,10 +859,10 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var stats pool.StatsSnapshot
 		pool.PoolStats(&stats)
 		tw := tabwriter.NewWriter(writer, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "CLASS\tGETS\tRING\tPOOL\tALLOC\tDEMOTE\tHIT%\tRING%\tOCC/MAX")
+		fmt.Fprintln(tw, "CLASS\tGETS\tPUTS\tRING\tPOOL\tALLOC\tDEMOTE\tHIT%\tRING%\tOCC/MAX")
 		var (
-			totalGets, totalRing, totalPool, totalAlloc, totalDemoted uint64
-			totalOcc, totalBytes                                      int
+			totalGets, totalPuts, totalRing, totalPool, totalAlloc, totalDemoted uint64
+			totalOcc, totalBytes                                                 int
 		)
 		active := 0
 		for i, s := range stats {
@@ -871,10 +871,11 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			active++
 			class := 1 << i
-			fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d/%d\n",
-				formatClassSize(class), s.Gets, s.RingHit, s.PoolHit, s.Alloc, s.Demoted,
+			fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d/%d\n",
+				formatClassSize(class), s.Gets, s.Puts, s.RingHit, s.PoolHit, s.Alloc, s.Demoted,
 				s.HitRate()*100, s.RingHitRate()*100, s.Occupancy, s.Max)
 			totalGets += s.Gets
+			totalPuts += s.Puts
 			totalRing += s.RingHit
 			totalPool += s.PoolHit
 			totalAlloc += s.Alloc
@@ -891,8 +892,8 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			totalHit = float64(totalGets-totalAlloc) / float64(totalGets) * 100
 			totalRingRate = float64(totalRing) / float64(totalGets) * 100
 		}
-		fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d\n",
-			totalGets, totalRing, totalPool, totalAlloc, totalDemoted, totalHit, totalRingRate, totalOcc)
+		fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d\n",
+			totalGets, totalPuts, totalRing, totalPool, totalAlloc, totalDemoted, totalHit, totalRingRate, totalOcc)
 		tw.Flush()
 		fmt.Fprintf(writer, "retained: %d buffers, %s\n", totalOcc, formatBytes(totalBytes))
 	default:
