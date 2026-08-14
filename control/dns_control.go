@@ -712,7 +712,8 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, i
 		return nil
 	}
 	lookupTTL := max(ttl, c.minSniffingTtl)
-	bitmap := (*[32]uint32)(domainBitmap)
+	// Avoid caching bytes from pool.
+	var bitmapToCache *[32]uint32
 
 	qHash := c.QnameHash(qname)
 
@@ -723,8 +724,12 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, i
 			c.coreIpDomainCache.SaveWithTTL(hashKey, v, lookupTTL)
 			continue
 		}
-		go newLookupCacheAsync(c, ip, bitmap)
-		c.coreIpDomainCache.SaveWithTTL(hashKey, coreIpDomainCacheValue{qHash: qHash, qname: qname, ip: ip, bitmap: bitmap}, lookupTTL)
+		if bitmapToCache == nil {
+			bitmapToCache = new([32]uint32)
+			copy(bitmapToCache[:], domainBitmap[:])
+		}
+		go newLookupCacheAsync(c, ip, bitmapToCache)
+		c.coreIpDomainCache.SaveWithTTL(hashKey, coreIpDomainCacheValue{qHash: qHash, qname: qname, ip: ip, bitmap: bitmapToCache}, lookupTTL)
 		common.Metrics.CoreIpDomainBitmap.With0().Inc()
 	}
 	return nil
@@ -1081,8 +1086,8 @@ func (c *DnsController) ReplayDomainBitmaps(matchBitmap func(fqdn string, bitmap
 		}
 		oldBitmap := v.bitmap
 		newSlice := common.ObtainDomainBitmap()
-		matchBitmap(v.qname, newSlice)
 		newBitmap := (*[32]uint32)(newSlice)
+		matchBitmap(v.qname, newSlice)
 
 		if *oldBitmap == *newBitmap {
 			common.RecycleDomainBitmap(newSlice)
@@ -1094,15 +1099,21 @@ func (c *DnsController) ReplayDomainBitmaps(matchBitmap func(fqdn string, bitmap
 			log.WithField("ip", v.ip).WithField("err", err).
 				Warn("ReplayDomainBitmaps: failed to remove old domain state")
 		}
+		// Copy the new bitmap out of the pooled buffer into a heap array so
+		// the cache never holds pooled memory. The old (heap) bitmap is left
+		// to the GC; the pooled buffer is recycled here.
+		bitmapToCache := new([32]uint32)
+		copy(bitmapToCache[:], newSlice[:])
+		common.RecycleDomainBitmap(newSlice)
 		allZero := true
-		for _, w := range newBitmap {
+		for _, w := range bitmapToCache {
 			if w != 0 {
 				allZero = false
 				break
 			}
 		}
 		if !allZero {
-			if err := c.newLookupCache(v.ip, newBitmap); err != nil {
+			if err := c.newLookupCache(v.ip, bitmapToCache); err != nil {
 				log.WithField("ip", v.ip).WithField("err", err).
 					Warn("ReplayDomainBitmaps: failed to add new domain state")
 			}
@@ -1113,7 +1124,7 @@ func (c *DnsController) ReplayDomainBitmaps(matchBitmap func(fqdn string, bitmap
 				qHash:  v.qHash,
 				qname:  v.qname,
 				ip:     v.ip,
-				bitmap: newBitmap,
+				bitmap: bitmapToCache,
 			},
 			ttl: ttl,
 		})
