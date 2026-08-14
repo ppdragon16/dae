@@ -183,8 +183,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 h1:o4JXh1EVt9k/+g42oCprj/FisM4qX9L3sZB3upGN2ZU=
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55/go.mod h1:OmDBASR4679mdNQnz2pUhc2G8CO2JrUAVFDRBDP/hJE=
-github.com/ppdragon16/outbound v0.0.0-next.utls.4 h1:Om26AYa2d550iaKQ1p2D4AAJwJU8LhBZNU+yUMv3QrA=
-github.com/ppdragon16/outbound v0.0.0-next.utls.4/go.mod h1:Y1HBHj0xNFCeOQxO2uZBp+4HynSFULdbgmQHbAuAjBE=
+github.com/ppdragon16/outbound v0.0.0-next.utls.5 h1:avGaQ170TLP+4Py5TR7Wwk74j5+MBP8Mmp0K3F1XNGg=
+github.com/ppdragon16/outbound v0.0.0-next.utls.5/go.mod h1:Y1HBHj0xNFCeOQxO2uZBp+4HynSFULdbgmQHbAuAjBE=
 github.com/ppdragon16/quic-go v0.0.0-next.utls.1 h1:5j+fFrDhAnKaTW/iiB2NdfTjXrRMKTlQXMXaoZDcduM=
 github.com/ppdragon16/quic-go v0.0.0-next.utls.1/go.mod h1:kladjzdb1evtZspr9w7A8ubFAjmII3pn7mA9j6LU3ws=
 github.com/ppdragon16/utls v1.8.2-pooled.11 h1:THa3HRsY8nDK4A+O25kfAi7MjAC5JXkrEvrRFf2wrSg=
