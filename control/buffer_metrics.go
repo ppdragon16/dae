@@ -39,6 +39,7 @@ func startBufferPoolMetrics() {
 				common.Metrics.BufferPoolRingHits.With1(labels[i]).Set(int64(s.RingHit))
 				common.Metrics.BufferPoolPoolHits.With1(labels[i]).Set(int64(s.PoolHit))
 				common.Metrics.BufferPoolAllocs.With1(labels[i]).Set(int64(s.Alloc))
+				common.Metrics.BufferPoolDemoted.With1(labels[i]).Set(int64(s.Demoted))
 				common.Metrics.BufferPoolOccupancy.With1(labels[i]).Set(int64(s.Occupancy))
 				common.Metrics.BufferPoolMax.With1(labels[i]).Set(int64(s.Max))
 			}
