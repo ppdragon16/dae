@@ -253,6 +253,7 @@ var Metrics = struct {
 	HeapIdle            *Gauge
 	HeapReleased        *Gauge
 	BufferPoolGets      *Gauge
+	BufferPoolPuts      *Gauge
 	BufferPoolRingHits  *Gauge
 	BufferPoolPoolHits  *Gauge
 	BufferPoolAllocs    *Gauge
@@ -276,6 +277,7 @@ func InitMetrics() {
 	Metrics.HeapIdle = NewGauge("dae_heap_idle_kb")
 	Metrics.HeapReleased = NewGauge("dae_heap_released_kb")
 	Metrics.BufferPoolGets = NewGauge("dae_buffer_pool_gets", "class")
+	Metrics.BufferPoolPuts = NewGauge("dae_buffer_pool_puts", "class")
 	Metrics.BufferPoolRingHits = NewGauge("dae_buffer_pool_ring_hits", "class")
 	Metrics.BufferPoolPoolHits = NewGauge("dae_buffer_pool_pool_hits", "class")
 	Metrics.BufferPoolAllocs = NewGauge("dae_buffer_pool_allocs", "class")

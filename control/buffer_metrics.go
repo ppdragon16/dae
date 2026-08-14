@@ -36,6 +36,7 @@ func startBufferPoolMetrics() {
 			pool.PoolStats(&stats)
 			for i, s := range stats {
 				common.Metrics.BufferPoolGets.With1(labels[i]).Set(int64(s.Gets))
+				common.Metrics.BufferPoolPuts.With1(labels[i]).Set(int64(s.Puts))
 				common.Metrics.BufferPoolRingHits.With1(labels[i]).Set(int64(s.RingHit))
 				common.Metrics.BufferPoolPoolHits.With1(labels[i]).Set(int64(s.PoolHit))
 				common.Metrics.BufferPoolAllocs.With1(labels[i]).Set(int64(s.Alloc))
