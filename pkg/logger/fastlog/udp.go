@@ -21,7 +21,7 @@ func LogUdpReply(src, from netip.AddrPort) {
 		return
 	}
 
-	buf := pool.GetBuffer(128)[:0]
+	buf := pool.GetBuffer(512)[:0]
 	ts := std.getTs()
 
 	// Header: time + level
