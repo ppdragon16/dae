@@ -610,11 +610,6 @@ func NewControlPlane(
 		if err = core.setupSkPidMonitor(); err != nil {
 			log.Warnf("%+v", common.Wrap(err, "cgroup2 is not enabled; pname routing cannot be used"))
 		}
-		if global.EnableLocalTcpFastRedirect {
-			if err = core.setupLocalTcpFastRedirect(); err != nil {
-				log.Warnf("%+v", common.Wrap(err, "failed to setup local tcp fast redirect"))
-			}
-		}
 		for _, ifname := range global.WanInterface {
 			if len(global.LanInterface) > 0 {
 				// FIXME: Code is not elegant here.
