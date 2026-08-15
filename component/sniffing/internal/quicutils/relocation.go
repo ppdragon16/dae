@@ -133,7 +133,6 @@ var (
 
 type Locator interface {
 	Range(i, j int) ([]byte, error)
-	Slice(i, j int) (Locator, error)
 	At(i int) (byte, error)
 	Len() int
 	Bytes() ([]byte, error)
@@ -141,7 +140,6 @@ type Locator interface {
 
 // LinearLocator only searches forward and have no boundary check.
 type LinearLocator struct {
-	left      int
 	length    int
 	iOuter    int
 	baseEnd   int
@@ -161,7 +159,6 @@ func NewLinearLocator(o []*CryptoFrameOffset) *LinearLocator {
 // retain the locator across sniffing calls (e.g. a pooled Sniffer) should use
 // this instead of constructing a new locator each time.
 func (l *LinearLocator) Reset(o []*CryptoFrameOffset) {
-	l.left = 0
 	l.iOuter = 0
 	if len(o) == 0 {
 		l.length = 0
@@ -205,8 +202,7 @@ func (l *LinearLocator) Range(i, j int) ([]byte, error) {
 	size := j - i
 
 	// We find bytes including i and j, so we should sub j with 1.
-	i += l.left
-	j += l.left - 1
+	j -= 1
 	if err := l.relocate(i); err != nil {
 		return nil, err
 	}
@@ -248,21 +244,12 @@ func (l *LinearLocator) At(i int) (byte, error) {
 	if len(l.o) == 0 {
 		return 0, ErrMissingCrypto
 	}
-	i += l.left
 
 	if err := l.relocate(i); err != nil {
 		return 0, err
 	}
 	b := l.baseData[i-l.baseStart]
 	return b, nil
-}
-
-func (l *LinearLocator) Slice(i, j int) (Locator, error) {
-	// We do not care about right.
-	newLL := *l
-	newLL.left += i
-	newLL.length = j - i + 1
-	return &newLL, nil
 }
 
 func (l *LinearLocator) Bytes() ([]byte, error) {
@@ -282,9 +269,6 @@ func (l BuiltinBytesLocator) Range(i, j int) ([]byte, error) {
 }
 func (l BuiltinBytesLocator) At(i int) (byte, error) {
 	return l[i], nil
-}
-func (l BuiltinBytesLocator) Slice(i, j int) (Locator, error) {
-	return l[i:j], nil
 }
 func (l BuiltinBytesLocator) Len() int {
 	return len(l)

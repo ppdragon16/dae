@@ -111,11 +111,10 @@ func extractSniFromTls(search quicutils.Locator) (sni string, err error) {
 		return "", ErrNotApplicable
 	}
 	// Search SNI. Operate over the extensions region with absolute indices
-	// instead of slicing the locator: slicing would box a new value into the
-	// Locator interface on every call (BuiltinBytesLocator.Slice and
-	// LinearLocator.Slice were a leading source of TLS/QUIC allocations).
-	// base is the absolute offset where the extensions block starts and length
-	// is its size; findSniExtension bounds iteration against length.
+	// (base + length) instead of slicing the locator: the Locator interface's
+	// Slice method was removed as dead code. base is the absolute offset where
+	// the extensions block starts and length is its size; findSniExtension
+	// bounds iteration against length.
 	base := boundary - extensionsLength
 	return findSniExtension(search, base, extensionsLength)
 }
