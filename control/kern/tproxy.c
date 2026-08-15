@@ -1643,16 +1643,18 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 	}
 
 	bool isdns = tuples.five.dport == bpf_htons(53) && (l4proto == IPPROTO_UDP || l4proto == IPPROTO_TCP);
+	struct routing_result *routing_result = NULL;
 
 	if (l4proto == IPPROTO_TCP && !(tcph.syn && !tcph.ack)) {
 		// Established TCP Connection.
-		struct routing_result *routing_result =
-			bpf_map_lookup_elem(&routing_tuples_map, &tuples.five);
+		routing_result = bpf_map_lookup_elem(&routing_tuples_map, &tuples.five);
 
 		if (routing_result) {
 			routing_result->last_seen_ns = bpf_ktime_get_ns();
 			if (tcph.fin || tcph.rst)
 				routing_result->state = STATE_CLOSING;
+			if (routing_result->outbound == OUTBOUND_DIRECT)
+				goto direct;
 			goto control_plane;
 		}
 
@@ -1669,8 +1671,7 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 		// sport to differentiate routing for UDP 53.
 		if (isdns)
 			udp_tuples_key.sport = 0;
-		struct routing_result *routing_result =
-			bpf_map_lookup_elem(&routing_tuples_map, &udp_tuples_key);
+		routing_result = bpf_map_lookup_elem(&routing_tuples_map, &udp_tuples_key);
 		if (routing_result) {
 			routing_result->last_seen_ns = bpf_ktime_get_ns();
 			switch (routing_result->outbound) {
@@ -1741,52 +1742,60 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 	}
 
 	// Fill routing result.
-	struct routing_result routing_result = { 0 };
+	struct routing_result r = { 0 };
+	routing_result = &r;
 
-	routing_result.outbound = s64_ret;
-	routing_result.mark = s64_ret >> 8;
-	routing_result.must = (s64_ret >> 40) & 1;
-	routing_result.dscp = tuples.dscp;
-	routing_result.ifindex = ifindex;
-	__builtin_memcpy(routing_result.mac, ethh.h_source,
-			 sizeof(routing_result.mac));
-	routing_result.last_seen_ns = bpf_ktime_get_ns();
+	routing_result->outbound = s64_ret;
+	routing_result->mark = s64_ret >> 8;
+	routing_result->must = (s64_ret >> 40) & 1;
+	routing_result->dscp = tuples.dscp;
+	routing_result->ifindex = ifindex;
+	__builtin_memcpy(routing_result->mac, ethh.h_source,
+			 sizeof(routing_result->mac));
+	routing_result->last_seen_ns = bpf_ktime_get_ns();
 
 	if (l4proto == IPPROTO_UDP) {
-		bpf_map_update_elem(&routing_tuples_map, &udp_tuples_key,
-					&routing_result, BPF_ANY);
+		bpf_map_update_elem(&routing_tuples_map, &udp_tuples_key, routing_result, BPF_ANY);
 	}
 
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 	if (is_wan) {
 		if (l4proto == IPPROTO_TCP) {
 			bpf_printk("tcp(wan): outbound: %u, target: %pI6:%u",
-				   routing_result.outbound, tuples.five.dip.u6_addr32,
+				   routing_result->outbound, tuples.five.dip.u6_addr32,
 				bpf_ntohs(tuples.five.dport));
 		} else {
 			bpf_printk("udp(wan): outbound: %u, target: %pI6:%u",
-				   routing_result.outbound, tuples.five.dip.u6_addr32,
+				   routing_result->outbound, tuples.five.dip.u6_addr32,
 				bpf_ntohs(tuples.five.dport));
 		}
 	} else {
 		if (l4proto == IPPROTO_TCP) {
 			bpf_printk("tcp(lan): outbound: %u, target: %pI6:%u",
-				   routing_result.outbound, tuples.five.dip.u6_addr32,
+				   routing_result->outbound, tuples.five.dip.u6_addr32,
 				bpf_ntohs(tuples.five.dport));
 		} else {
 			bpf_printk("udp(lan): outbound: %u, target: %pI6:%u",
-				   routing_result.outbound, tuples.five.dip.u6_addr32,
+				   routing_result->outbound, tuples.five.dip.u6_addr32,
 				bpf_ntohs(tuples.five.dport));
 		}
 	}
 #endif
 
 	// Direct / Block.
-	switch (routing_result.outbound) {
+	switch (routing_result->outbound) {
 	case OUTBOUND_DIRECT:
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
 		bpf_printk("GO OUTBOUND_DIRECT");
 #endif
+		if (l4proto == IPPROTO_TCP && routing_result->mark != 0) {
+			// Marked TCP direct route, must be saved to map for subsequent packets.
+			if (bpf_map_update_elem(&routing_tuples_map, &tuples.five,
+						routing_result, BPF_ANY)) {
+				bpf_printk("shot save direct routing result: %d", s64_ret);
+				return TC_ACT_SHOT;
+			}
+		}
 		goto direct;
 	case OUTBOUND_BLOCK:
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
@@ -1798,7 +1807,7 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 	if (!isdns) {
 		// Check connectivity — redirect based on alive state.
 
-		switch (check_connectivity_map(&routing_result, skb, l4proto)) {
+		switch (check_connectivity_map(routing_result, skb, l4proto)) {
 		case 1:
 			goto direct;
 		case 2:
@@ -1806,15 +1815,14 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 		}
 	}
 
-	// Only proxy traffic should be saved.
+	// TCP proxy traffic should be saved.
 	if (l4proto == IPPROTO_TCP) {
 		if (bpf_map_update_elem(&routing_tuples_map, &tuples.five,
-					&routing_result, BPF_ANY)) {
+					routing_result, BPF_ANY)) {
 			bpf_printk("shot save routing result: %d", s64_ret);
 			return TC_ACT_SHOT;
 		}
 	}
-
 control_plane:
 	// Assign to control plane.
 	// Set cb[] before prep so dae0peer_ingress can filter on TPROXY_MARK.
@@ -1828,6 +1836,7 @@ control_plane:
 	return redirect_to_control_plane_ingress();
 
 direct:
+	skb->mark = routing_result->mark;
 	return TC_ACT_PIPE;
 
 block:
