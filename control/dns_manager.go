@@ -14,7 +14,6 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	dnsmessage "github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -129,7 +128,7 @@ func AsTrace(err error, format string, args ...any) error {
 type DnsManager struct {
 	conn    net.Conn
 	mu      sync.Mutex
-	recvMap map[uint16]chan *dnsmessage.Msg
+	recvMap map[uint16]chan []byte
 	ctx     context.Context
 	cancel  context.CancelFunc
 
@@ -141,7 +140,7 @@ func NewDnsManager(conn net.Conn, stream bool, dialer string) *DnsManager {
 	ctx, cancel := context.WithCancel(context.TODO())
 	m := &DnsManager{
 		conn:    conn,
-		recvMap: make(map[uint16]chan *dnsmessage.Msg),
+		recvMap: make(map[uint16]chan []byte),
 		ctx:     ctx,
 		cancel:  cancel,
 		stream:  stream,
@@ -152,12 +151,10 @@ func NewDnsManager(conn net.Conn, stream bool, dialer string) *DnsManager {
 }
 
 func (m *DnsManager) run() {
-	buf := pool.GetBuffer(consts.EthernetMtu)
-	defer pool.PutBuffer(buf)
 	for {
 		var data []byte
 		var err error
-		if data, err = m.read(buf); err != nil {
+		if data, err = m.read(); err != nil {
 			if le, ok := err.(*leveledError); ok {
 				if log.IsLevelEnabled(le.Level()) {
 					log.WithError(err).Logf(le.Level(), "DnsManager closed, dialer: %v", m.dialer)
@@ -171,52 +168,59 @@ func (m *DnsManager) run() {
 	}
 }
 
-func (m *DnsManager) read(buf []byte) (data []byte, err error) {
+func (m *DnsManager) read() (data []byte, err error) {
 	if m.stream {
-		msgLenBuf := buf[:2]
+		var lenBuf [2]byte
 		// Read two byte length.
-		if _, err = io.ReadFull(m.conn, msgLenBuf); err != nil {
-			return data, AsDebug(err, "failed to read tcp DNS resp payload length")
+		if _, err = io.ReadFull(m.conn, lenBuf[:]); err != nil {
+			return nil, AsDebug(err, "failed to read tcp DNS resp payload length")
 		}
-		msgLen := int(binary.BigEndian.Uint16(msgLenBuf))
-		if msgLen > len(buf) {
-			return data, AsWarn(err, "tcp dns msg len too large: %d > %d", msgLen, len(buf))
+		msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+		if msgLen > consts.EthernetMtu {
+			return nil, AsWarn(err, "tcp dns msg len too large: %d > %d", msgLen, consts.EthernetMtu)
 		}
-		data = buf[:msgLen]
+		data = make([]byte, msgLen)
 		if _, err = io.ReadFull(m.conn, data); err != nil {
-			return data, AsDebug(err, "failed to read tcp DNS resp payload")
+			return nil, AsDebug(err, "failed to read tcp DNS resp payload")
 		}
 	} else {
+		buf := pool.GetBuffer(consts.EthernetMtu)
 		var n int
 		if n, err = m.conn.Read(buf); err != nil {
-			return data, AsDebug(err, "failed to read udp DNS resp payload")
+			pool.PutBuffer(buf)
+			return nil, AsDebug(err, "failed to read udp DNS resp payload")
 		}
-		data = buf[:n]
+		data = make([]byte, n)
+		copy(data, buf[:n])
+		pool.PutBuffer(buf)
 	}
 	return data, nil
 }
 
 func (m *DnsManager) feed(data []byte) {
-	var msg dnsmessage.Msg
-	err := msg.Unpack(data)
-	if err != nil {
-		log.Warnf("Failed to unpack dns resp, stream: %v, err: %v, data: %v", m.stream, err, data)
+	if len(data) < 12 {
+		log.Errorf("Wrong DNS response: length %d too short, data: %v", len(data), data)
 		return
 	}
+	id := dnsId(data)
 	m.mu.Lock()
-	ch, ok := m.recvMap[msg.Id]
+	ch, ok := m.recvMap[id]
 	m.mu.Unlock()
 	if !ok {
-		log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, id)
+		}
 		// Ignore message from unknown session
 		return
 	}
 
 	select {
-	case ch <- &msg:
+	case ch <- data:
 		// OK
 	default:
-		log.Debugf("Drop dns resp msg, stream: %v, id: %v", m.stream, msg.Id)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.Debugf("Drop dns resp msg, stream: %v, id: %v", m.stream, id)
+		}
 		// Channel full, drop the message
 	}
 }
@@ -230,9 +234,22 @@ func (m *DnsManager) IsClosed() bool {
 	return m.ctx.Err() != nil
 }
 
+func writeData(conn net.Conn, data []byte, isStream bool) error {
+	if isStream {
+		var head [2]byte
+		binary.BigEndian.PutUint16(head[:], uint16(len(data)))
+		v := net.Buffers{head[:], data}
+		_, err := v.WriteTo(conn)
+		return err
+	} else {
+		_, err := conn.Write(data)
+		return err
+	}
+}
+
 var recvChannelPool = sync.Pool{
 	New: func() any {
-		return make(chan *dnsmessage.Msg, 1)
+		return make(chan []byte, 1)
 	},
 }
 
@@ -244,30 +261,14 @@ var resolveTimerPool = sync.Pool{
 	},
 }
 
-func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
-	origMsgId := msg.Id
-	msg.Id = uint16(fastrand.Intn(math.MaxUint16))
-	defer func() { msg.Id = origMsgId }()
-	buf := pool.GetBuffer(1024)
-	defer pool.PutBuffer(buf)
-	var data []byte
-	var err error
-	if m.stream {
-		if data, err = msg.PackBuffer(buf[2:]); err == nil {
-			dataLen := uint16(len(data))
-			binary.BigEndian.PutUint16(buf, dataLen)
-			data = buf[:dataLen+2]
-		}
-	} else {
-		data, err = msg.PackBuffer(buf)
-	}
-	if err != nil {
-		return common.Wrap(err, "pack DNS packet")
-	}
+func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
+	origMsgId := dnsId(data)
+	newId := uint16(fastrand.Intn(math.MaxUint16))
+	dnsIdSet(data, newId)
 
-	recvCh := recvChannelPool.Get().(chan *dnsmessage.Msg)
+	recvCh := recvChannelPool.Get().(chan []byte)
 	m.mu.Lock()
-	m.recvMap[msg.Id] = recvCh
+	m.recvMap[newId] = recvCh
 	m.mu.Unlock()
 
 	var timer *time.Timer
@@ -283,7 +284,7 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 			resolveTimerPool.Put(timer)
 		}
 		m.mu.Lock()
-		delete(m.recvMap, msg.Id)
+		delete(m.recvMap, newId)
 		m.mu.Unlock()
 		// Cleanup recvCh
 		select {
@@ -291,12 +292,13 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 		default:
 		}
 		recvChannelPool.Put(recvCh)
+		dnsIdSet(data, origMsgId)
 	}()
 
 	for range dnsRetryCount {
 		m.conn.SetWriteDeadline(time.Now().Add(defaultDNSAttemptDeadline))
-		if _, err := m.conn.Write(data); err != nil {
-			return err
+		if err := writeData(m.conn, data, m.stream); err != nil {
+			return nil, err
 		}
 		m.conn.SetReadDeadline(time.Now().Add(defaultDNSAttemptDeadline))
 		if timer == nil {
@@ -306,22 +308,18 @@ func (m *DnsManager) Resolve(ctx context.Context, msg *dnsmessage.Msg) error {
 
 		select {
 		case <-m.ctx.Done():
-			return net.ErrClosed
+			return nil, net.ErrClosed
 		case <-ctx.Done():
-			return context.Canceled
+			return nil, context.Canceled
 		case recvMsg := <-recvCh:
-			*msg = *recvMsg
-			return nil
+			return recvMsg, nil
 		case <-timer.C:
 		}
 	}
 
-	var qname string
-	var qtype uint16
-	if len(msg.Question) > 0 {
-		qname = msg.Question[0].Name
-		qtype = msg.Question[0].Qtype
+	if log.IsLevelEnabled(log.WarnLevel) {
+		qInfo := dnsQueryInfo(data)
+		log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qInfo.qname, qInfo.qtype)
 	}
-	log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qname, qtype)
-	return context.DeadlineExceeded
+	return nil, context.DeadlineExceeded
 }

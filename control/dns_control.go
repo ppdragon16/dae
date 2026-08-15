@@ -92,7 +92,7 @@ type DnsController struct {
 	sniffDomainCache   *common.TimeWheelCache[HashKey, struct{}]               // Key: Loose mode hashes by qname; Strict mode hashes by qname+ip. Used by VerifySniff.
 	sniffVerifyMode    consts.SniffVerifyMode
 
-	singleFlightGroup common.SingleFlight[HashKey, *dnsmessage.Msg, singleFlightParam]
+	singleFlightGroup common.SingleFlight[HashKey, []byte, singleFlightParam] // Key: Hash by qname + ip + *outbound
 }
 
 func parseIpVersionPreference(prefer int) (uint16, error) {
@@ -129,7 +129,7 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		enableCache:        option.EnableCache,
 		sniffVerifyMode:    option.SniffVerifyMode,
 		dnsForwarderCache:  sync.Map{},
-		dnsCache:           newCommonDnsCache(),
+		dnsCache:           NewCommonDnsCache(),
 		dnsCacheHashSeed:   maphash.MakeSeed(),
 		requestSelectCache: common.NewTimeWheelCache[HashKey, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
 		sniffDomainCache:   common.NewTimeWheelCache[HashKey, struct{}](1*time.Hour, 5*time.Second, nil),
@@ -181,9 +181,10 @@ var dialArgumentPool = sync.Pool{
 
 type singleFlightParam struct {
 	dnsForwarderKey
-	c   *DnsController
-	msg *dnsmessage.Msg
-	qi  queryInfo
+	c            *DnsController
+	data         []byte
+	qi           queryInfo
+	isBackground bool
 }
 
 type dnsForwarderKey struct {
@@ -194,6 +195,20 @@ type dnsForwarderKey struct {
 type queryInfo struct {
 	qname string
 	qtype uint16
+}
+
+type dnsResponseData struct {
+	respData []byte
+	fromPool bool
+	isNew    bool
+
+	upstreamFrom *dns.Upstream
+}
+
+var dnsResponseDataPool = sync.Pool{
+	New: func() any {
+		return &dnsResponseData{}
+	},
 }
 
 func (c *DnsController) GetHashKey(qname string, qtype uint16, outbound *outbound.DialerGroup, dialer *dialer.Dialer) HashKey {
@@ -228,134 +243,164 @@ func QnameIpHash(qhash HashKey, ip netip.Addr) HashKey {
 	return HashKey(h1)
 }
 
-func (c *DnsController) prepareQueryInfo(dnsMessage *dnsmessage.Msg) (queryInfo queryInfo) {
-	if len(dnsMessage.Question) != 0 {
-		q := dnsMessage.Question[0]
-		queryInfo.qname = common.CanonicalName(q.Name)
-		queryInfo.qtype = q.Qtype
+func (c *DnsController) hashKeyForDnsRequest(qname string, qtype uint16, srcMac [6]byte, srcIp netip.Addr) HashKey {
+	h1 := uint64(c.GetHashKey(qname, qtype, nil, nil))
+	if !c.routing.HasClientRequestRules() {
+		return HashKey(h1)
 	}
+	// Mix in MAC (6 bytes, zero-padded to 8).
+	var mac8 [8]byte
+	copy(mac8[:], srcMac[:])
+	h1 ^= binary.LittleEndian.Uint64(mac8[:])
+	if srcIp.IsValid() {
+		// Mix in source IP (16 bytes as two uint64).
+		addr := srcIp.As16()
+		h1 ^= binary.LittleEndian.Uint64(addr[0:8])
+		h1 ^= binary.LittleEndian.Uint64(addr[8:16])
+	}
+	return HashKey(h1)
+}
+
+func dnsQueryInfo(data []byte) (queryInfo queryInfo) {
+	qname, qtype, ok := dnsQuestion(data)
+	if !ok {
+		return
+	}
+	queryInfo.qname = qname
+	queryInfo.qtype = qtype
 	return
 }
 
-func (c *DnsController) Handle(dnsMessage *dnsmessage.Msg, req *dnsRequest) {
-	if log.IsLevelEnabled(log.TraceLevel) && len(dnsMessage.Question) > 0 {
-		q := dnsMessage.Question[0]
+func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
+	if len(data) < 12 {
+		return false
+	}
+
+	dnsResponseSet(data, false)
+
+	queryInfo := dnsQueryInfo(data)
+	if log.IsLevelEnabled(log.TraceLevel) {
 		log.Tracef("Received UDP(DNS) %v <-> %v: %v %v",
-			RefineSourceToShow(req.Src, req.Dst.Addr()), req.Dst.String(), strings.ToLower(q.Name), QtypeToString(q.Qtype),
-		)
+			RefineSourceToShow(req.Src, req.Dst.Addr()), req.Dst.String(), queryInfo.qname, queryInfo.qtype)
 	}
-
-	if dnsMessage.Response {
-		log.Errorln("DNS request expected but DNS response received")
-	}
-
-	queryInfo := c.prepareQueryInfo(dnsMessage)
 
 	// qname is empty when dnsQuestion failed to parse the question section
 	// (malformed packet, non-INET class, etc.). Return false so the data
 	// falls through to regular UDP routing.
 	if queryInfo.qname == "" {
-		return
+		return false
 	}
 
-	id := dnsMessage.Id
+	id := dnsId(data)
 	// Avoids duplicated id from clients, so make the id unique.
-	dnsMessage.Id = uint16(fastrand.Intn(math.MaxUint16))
+	dnsIdSet(data, uint16(fastrand.Intn(math.MaxUint16)))
 
-	// Capture the client's UDP size limit before dnsMessage is modified by
-	// upstream responses (which may overwrite Extra). EDNS0 is preserved
-	// at this point since only the ID was changed.
-	udpLimit := dnsDefaultUDPSize
-	if opt := dnsMessage.IsEdns0(); opt != nil {
-		if s := int(opt.UDPSize()); s > udpLimit {
-			udpLimit = s
+	// Get pooled dnsResponseData and pass it as output parameter.
+	dnsResp := dnsResponseDataPool.Get().(*dnsResponseData)
+	defer func() {
+		if dnsResp.respData != nil && dnsResp.fromPool {
+			pool.PutBuffer(dnsResp.respData)
 		}
-	}
+		*dnsResp = dnsResponseData{}
+		dnsResponseDataPool.Put(dnsResp)
+	}()
 
 	var err error
 	// Check ip version preference and qtype.
 	switch queryInfo.qtype {
 	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
 		if c.qtypePrefer == 0 {
-			err = c.handleDNSRequest(dnsMessage, req, queryInfo)
+			err = c.handleDNSRequest(data, req, queryInfo, dnsResp)
 		} else {
 			// Try to make both A and AAAA lookups.
-			dnsMessage2 := dnsMessage.Copy()
-			dnsMessage2.Id = uint16(fastrand.Intn(math.MaxUint16))
-			switch queryInfo.qtype {
-			case dnsmessage.TypeA:
-				dnsMessage2.Question[0].Qtype = dnsmessage.TypeAAAA
-			case dnsmessage.TypeAAAA:
-				dnsMessage2.Question[0].Qtype = dnsmessage.TypeA
+			type alternateResult struct {
+				err       error
+				hasAnswer bool
 			}
-
-			errCh := make(chan error, 1)
+			resultCh := make(chan *alternateResult, 1)
 			go func() {
-				err = c.handleDNSRequest(dnsMessage2, req, queryInfo)
-				errCh <- err
+				dnsResp2 := dnsResponseDataPool.Get().(*dnsResponseData)
+				data2 := pool.GetBuffer(len(data))
+				defer func() {
+					pool.PutBuffer(data2)
+					if dnsResp2.respData != nil && dnsResp2.fromPool {
+						pool.PutBuffer(dnsResp2.respData)
+					}
+					*dnsResp2 = dnsResponseData{}
+					dnsResponseDataPool.Put(dnsResp2)
+				}()
+				copy(data2, data)
+				dnsSwitchQtype(data2)
+				err := c.handleDNSRequest(data2, req, queryInfo, dnsResp2)
+				if err != nil {
+					resultCh <- &alternateResult{err: err}
+					return
+				}
+				ips, _ := dnsAnswers(dnsResp2.respData)
+				resultCh <- &alternateResult{hasAnswer: len(ips) > 0}
 			}()
-			err = common.Join(c.handleDNSRequest(dnsMessage, req, queryInfo), <-errCh)
+			err = c.handleDNSRequest(data, req, queryInfo, dnsResp)
+			result := <-resultCh
+			err = common.Join(err, result.err)
 			if err != nil {
 				break
 			}
-			if c.qtypePrefer != queryInfo.qtype && dnsMessage2 != nil && IncludeAnyIpInMsg(dnsMessage2) {
-				c.reject(dnsMessage)
+			if c.qtypePrefer != queryInfo.qtype && result.hasAnswer && dnsResp.respData != nil {
+				c.reject(dnsResp.respData)
 			}
 		}
 	default:
-		err = c.handleDNSRequest(dnsMessage, req, queryInfo)
+		err = c.handleDNSRequest(data, req, queryInfo, dnsResp)
 	}
-	if err != nil {
+	dataToWrite := dnsResp.respData
+	if err != nil || !dnsResponse(dataToWrite) {
 		isNetError, _, _, isTemporary := GetNetErrorInfo(err)
 		if !isNetError || !isTemporary {
-			log.Warningf("%+v", err)
+			log.Errorf("%+v", err)
 		}
-		dnsMessage.Rcode = dnsmessage.RcodeServerFailure
-		dnsMessage.Response = true
+		dataToWrite = data
+		dnsRcodeSet(dataToWrite, dnsmessage.RcodeServerFailure)
 	}
 	// Keep the id the same with request.
-	dnsMessage.Id = id
-	dnsMessage.Compress = true
+	dnsIdSet(dataToWrite, id)
 
 	// Truncate oversized UDP DNS responses with TC bit set (RFC 1035)
-	// so the client retries over TCP. Without this, the client receives a
-	// "noerror, 0 answer, tc=0" reply and may believe the name has no
-	// addresses. TCP DNS has no size limit (RFC 7766), so truncation is
-	// skipped for TCP clients.
+	// so the client retries over TCP. The function reads the client's
+	// EDNS0 size from the request bytes and truncates only when needed.
 	if !req.isTcp {
-		dnsMessage.Truncate(udpLimit)
-	}
-
-	buf := pool.GetBuffer(512)
-	defer pool.PutBuffer(buf)
-	data, err := dnsMessage.PackBuffer(buf)
-	if err != nil {
-		log.Errorf("%+v", common.Wrap(err, "failed to pack dns message"))
-		return
+		dataToWrite = truncateDNSResponse(data, dataToWrite)
 	}
 
 	// Send back the dns response.
-	af, err := DefaultAnyfromPool.Obtain(req.Dst, AnyfromTimeoutDefault)
+	// Never recycle anyfrom for Non-ASIS upstreams because they are limited.
+	// Note: zero-ttl means "immortal".
+	var ttl time.Duration
+	if dnsResp.upstreamFrom != nil && dnsResp.upstreamFrom.IsAsIs {
+		ttl = AnyfromTimeoutDefault
+	}
+	af, err := DefaultAnyfromPool.Obtain(req.Dst, ttl)
 	if err == nil {
-		_, err = af.WriteToUDPAddrPort(data, req.Src)
+		_, err = af.WriteToUDPAddrPort(dataToWrite, req.Src)
 		DefaultAnyfromPool.Recycle(req.Dst, af)
 	}
 	if err != nil {
 		log.Warningf("failed to send dns message back: %v", err)
 	}
+	return true
 }
 
 func (c *DnsController) handleDNSRequest(
-	dnsMessage *dnsmessage.Msg,
+	data []byte,
 	req *dnsRequest,
 	queryInfo queryInfo,
+	dnsResp *dnsResponseData,
 ) error {
-	// Route Request
-	hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, nil, nil)
+	// Route Request.
+	hashKey := c.hashKeyForDnsRequest(queryInfo.qname, queryInfo.qtype, req.routingResult.Mac, req.Src.Addr())
 	RequestIndex, ok := c.requestSelectCache.Get(hashKey)
 	if !ok {
 		var err error
-		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype)
+		RequestIndex, err = c.routing.RequestSelect(queryInfo.qname, queryInfo.qtype, req.routingResult.Mac, req.Src.Addr())
 		if err != nil {
 			return err
 		}
@@ -363,19 +408,21 @@ func (c *DnsController) handleDNSRequest(
 	}
 
 	if RequestIndex == consts.DnsRequestOutboundIndex_Reject {
-		c.reject(dnsMessage)
+		c.reject(data)
+		dnsResp.respData = data
+		dnsResp.fromPool = false
+		dnsResp.isNew = false
 		return nil
 	}
 
 	// Check for race group: race(upstream1, upstream2, ...)
 	if raceUpstreams := c.routing.GetRaceUpstreams(RequestIndex); len(raceUpstreams) > 0 {
-		return c.handleDNSRequestRace(dnsMessage, req, queryInfo, raceUpstreams)
+		return c.handleDNSRequestRace(data, req, queryInfo, dnsResp, raceUpstreams)
 	}
 
 	// Resolve the single upstream and dial.
 	var upstream *dns.Upstream
 	if RequestIndex == consts.DnsRequestOutboundIndex_AsIs {
-		// As-is should not be valid in response routing, thus using connection realDest is reasonable.
 		upstream = &dns.Upstream{
 			Scheme:   "udp",
 			Hostname: req.Dst.Addr().String(),
@@ -384,7 +431,6 @@ func (c *DnsController) handleDNSRequest(
 			IsAsIs:   true,
 		}
 	} else {
-		// Get corresponding upstream.
 		var err error
 		upstream, err = c.routing.GetUpstream(RequestIndex)
 		if err != nil {
@@ -392,35 +438,28 @@ func (c *DnsController) handleDNSRequest(
 		}
 	}
 
-	return c.handleDNSRequestByUpstream(dnsMessage, req, queryInfo, upstream)
+	return c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, dnsResp)
 }
 
 // handleDNSRequestByUpstream selects the best dialer, sends DNS query, handles response
 // routing, logging, and lookup cache update. It manages dialArgument lifecycle internally.
-// The dnsMessage is modified in-place by dialSend and response routing.
+// Caller provides a pre-allocated dnsResp as the output parameter.
 func (c *DnsController) handleDNSRequestByUpstream(
-	dnsMessage *dnsmessage.Msg,
+	data []byte,
 	req *dnsRequest,
 	queryInfo queryInfo,
 	upstream *dns.Upstream,
+	dnsResp *dnsResponseData,
 ) error {
 	dialArgument := dialArgumentPool.Get().(*dialArgument)
 	defer dialArgumentPool.Put(dialArgument)
-
-	var isNew bool
-	var reqMsg *dnsmessage.Msg
-	if !c.routing.HasResponseRules() {
-		reqMsg = dnsMessage
-	} else {
-		reqMsg = dnsMessage.Copy()
-	}
 
 	var err error
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
-				"question": dnsMessage.Question,
+				"qname":    queryInfo.qname,
 				"upstream": upstream.String(),
 			}).Debugln("Request to DNS upstream")
 		}
@@ -429,10 +468,9 @@ Dial:
 		if err = c.bestDialerChooser(req, upstream, dialArgument); err != nil {
 			return err
 		}
-		isNew, err = c.dialSend(dnsMessage, upstream, dialArgument, queryInfo)
-		if err != nil {
+		if err = c.dialSend(data, upstream, dialArgument, queryInfo, dnsResp); err != nil {
 			isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
-			if !isNetError || isClosed || !dnsMessage.Response || (!isTimeout && dialArgument.Dialer.NeedAliveState()) {
+			if !isNetError || isClosed || !dnsResponse(dnsResp.respData) || (!isTimeout && dialArgument.Dialer.NeedAliveState()) {
 				err = common.
 					In("DialContext").
 					With("Is NetError", isNetError).
@@ -443,7 +481,7 @@ Dial:
 					With("Outbound", dialArgument.Outbound.Name).
 					With("Dialer", dialArgument.Dialer.Name).
 					Wrapf(err, "DNS dialSend error")
-				if !isNetError || isClosed || !dnsMessage.Response {
+				if !isNetError || isClosed || !dnsResponse(dnsResp.respData) {
 					return err
 				} else if !isTimeout && dialArgument.Dialer.NeedAliveState() {
 					labels := [...]string{
@@ -458,16 +496,27 @@ Dial:
 				}
 			}
 		}
+		if !c.routing.HasResponseRules() {
+			if dnsResp.isNew {
+				c.logDnsResponse(req, dialArgument, queryInfo, true)
+			}
+			break Dial
+		}
 		// Route response.
-		ResponseIndex, nextUpstream, err := c.routing.ResponseSelect(dnsMessage, upstream)
+		var ResponseIndex consts.DnsResponseOutboundIndex
+		var nextUpstream *dns.Upstream
+		ips, _ := dnsAnswers(dnsResp.respData)
+		ResponseIndex, nextUpstream, err = c.routing.ResponseSelect(queryInfo.qname, queryInfo.qtype, ips, upstream)
 		if err != nil {
 			return err
 		}
 		if ResponseIndex.IsReserved() {
-			c.logDnsResponse(req, dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
+			if dnsResp.isNew {
+				c.logDnsResponse(req, dialArgument, queryInfo, ResponseIndex == consts.DnsResponseOutboundIndex_Accept)
+			}
 			switch ResponseIndex {
 			case consts.DnsResponseOutboundIndex_Reject:
-				c.reject(dnsMessage)
+				c.reject(dnsResp.respData)
 				fallthrough
 			case consts.DnsResponseOutboundIndex_Accept:
 				break Dial
@@ -480,34 +529,18 @@ Dial:
 		}
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
-				"question":      dnsMessage.Question,
+				"qname":         queryInfo.qname,
 				"last_upstream": upstream.String(),
 				"next_upstream": nextUpstream.String(),
 			}).Debugln("Change DNS upstream and resend")
 		}
 		upstream = nextUpstream
-		reqMsg.CopyTo(dnsMessage)
-	}
-	// Update lookup cache.
-	switch {
-	case !dnsMessage.Response,
-		len(dnsMessage.Answer) == 0,
-		len(dnsMessage.Question) == 0,               // Check healthy resp.
-		dnsMessage.Rcode != dnsmessage.RcodeSuccess: // Check suc resp.
-		return nil
-	}
-	if isNew {
-		var ttl uint32
-		var ips []netip.Addr
-		for _, rr := range dnsMessage.Answer {
-			if ttl == 0 {
-				ttl = rr.Header().Ttl
-			}
-			ip, ok := GetIp(rr)
-			if ok {
-				ips = append(ips, ip)
-			}
+		if dnsResp.respData != nil && dnsResp.fromPool {
+			pool.PutBuffer(dnsResp.respData)
 		}
+	}
+	if dnsResp.isNew && isDnsResponseValid(dnsResp.respData) {
+		ips, ttl := dnsAnswers(dnsResp.respData)
 		// SniffVerifyMode_None never uses sniffDomainCache — skip entirely.
 		if len(ips) > 0 && c.sniffVerifyMode != consts.SniffVerifyMode_None {
 			qHash := c.QnameHash(queryInfo.qname)
@@ -527,10 +560,10 @@ Dial:
 		domainBitmap := common.ObtainDomainBitmap()
 		defer common.RecycleDomainBitmap(domainBitmap)
 		if !c.isDomainBitmapAllZero(queryInfo.qname, domainBitmap) {
-			return c.updateLookupCache(queryInfo.qname, domainBitmap, ips, time.Duration(ttl)*time.Second)
+			err = c.updateLookupCache(queryInfo.qname, domainBitmap, ips, time.Duration(ttl)*time.Second)
 		}
 	}
-	return nil
+	return err
 }
 
 // ResolveForVerification triggers a real DNS query through DAE's full DNS pipeline
@@ -544,34 +577,50 @@ func (c *DnsController) ResolveForVerification(fqdn string, src netip.AddrPort, 
 		return false
 	}
 
+	dataBuf := pool.GetBuffer(consts.EthernetMtu)
+	defer pool.PutBuffer(dataBuf)
 	// Try A first; if it resolves, skip AAAA. Verification only needs to
 	// confirm the domain has DNS records — one record type is sufficient.
 	for _, qtype := range []uint16{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
 		msg := new(dnsmessage.Msg)
 		msg.SetQuestion(dnsmessage.Fqdn(fqdn), qtype)
 		msg.RecursionDesired = true
+		data, packErr := msg.PackBuffer(dataBuf)
+		if packErr != nil {
+			log.WithField("qname", fqdn).WithField("qtype", qtype).
+				Errorf("ResolveForVerification: failed to pack DNS message: %v", packErr)
+			return false
+		}
 
 		// handleDNSRequest handles routing (RequestSelect, race groups),
 		// upstream resolution, forwarding, and auto-populates
 		// sniffDomainCache, dnsCache, lookupCache, coreIpDomainCache,
 		// and eBPF maps.
+		dnsResp := dnsResponseDataPool.Get().(*dnsResponseData)
 		// Dst is only used in case of ASIS, hard-code localhost:53 here.
 		req := ObtainDnsRequest(src, netip.MustParseAddrPort("127.0.0.1:53"), routingResult, false)
 		qi := queryInfo{qname: fqdn, qtype: qtype}
-		pipeErr := c.handleDNSRequest(msg, req, qi)
+		pipeErr := c.handleDNSRequest(data, req, qi, dnsResp)
 		RecycleDnsRequest(req)
 		if pipeErr != nil {
 			log.WithField("qname", fqdn).WithField("qtype", qtype).
 				Warnf("ResolveForVerification: %v", pipeErr)
-			continue
-		}
-		for _, rr := range msg.Answer {
-			if _, ok := GetIp(rr); ok {
-				return true
+		} else {
+			resolvedIps, _ := dnsAnswers(dnsResp.respData)
+			if len(resolvedIps) == 0 {
+				log.WithField("qname", fqdn).WithField("qtype", qtype).
+					Warnf("ResolveForVerification: no IPs resolved")
+				pipeErr = io.EOF // Sasify the nil check below.
 			}
 		}
-		log.WithField("qname", fqdn).WithField("qtype", qtype).
-			Warnf("ResolveForVerification: no IPs resolved")
+		if dnsResp.respData != nil && dnsResp.fromPool {
+			pool.PutBuffer(dnsResp.respData)
+		}
+		*dnsResp = dnsResponseData{}
+		dnsResponseDataPool.Put(dnsResp)
+		if pipeErr == nil {
+			return true
+		}
 	}
 	return false
 }
@@ -580,9 +629,10 @@ func (c *DnsController) ResolveForVerification(fqdn string, src netip.AddrPort, 
 // first successful response. Each sub-upstream independently goes through the full
 // handleDNSRequestByUpstream path (including response routing).
 func (c *DnsController) handleDNSRequestRace(
-	dnsMessage *dnsmessage.Msg,
+	data []byte,
 	req *dnsRequest,
 	queryInfo queryInfo,
+	dnsResp *dnsResponseData,
 	raceUpstreams []*dns.Upstream,
 ) error {
 	var winner atomic.Bool
@@ -593,14 +643,19 @@ func (c *DnsController) handleDNSRequestRace(
 	ch := make(chan result, len(raceUpstreams))
 
 	for _, upstream := range raceUpstreams {
-		go func(upstream *dns.Upstream, msg *dnsmessage.Msg) {
-			err := c.handleDNSRequestByUpstream(msg, req, queryInfo, upstream)
-			win := err == nil && msg.Response && len(msg.Answer) > 0 && winner.CompareAndSwap(false, true)
+		go func(upstream *dns.Upstream) {
+			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
+			err := c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, localResp)
+			win := err == nil && winner.CompareAndSwap(false, true)
 			if win {
-				msg.CopyTo(dnsMessage)
+				*dnsResp = *localResp
+			} else if localResp.respData != nil && localResp.fromPool {
+				pool.PutBuffer(localResp.respData)
 			}
+			*localResp = dnsResponseData{}
+			dnsResponseDataPool.Put(localResp)
 			ch <- result{err: err, win: win}
-		}(upstream, dnsMessage.Copy())
+		}(upstream)
 	}
 
 	var firstErr error
@@ -709,17 +764,20 @@ func (c *DnsController) MaybeUpdateLookupCache(qname string, ips []netip.Addr, t
 	return nil
 }
 
-func (c *DnsController) reject(msg *dnsmessage.Msg) {
-	// Reject with empty answer.
-	msg.Answer = []dnsmessage.RR{}
-	msg.Rcode = dnsmessage.RcodeSuccess
-	msg.Response = true
-	msg.RecursionAvailable = true
-	msg.Truncated = false
+func (c *DnsController) reject(data []byte) {
+	if len(data) < 12 {
+		return
+	}
+	data[2] |= 0x80           // 设置 QR = 1
+	data[2] &= 0xFD           // 强制设置 TC = 0 (0xFD 是 11111101)
+	data[3] = 0x80            // RA=1
+	data[6], data[7] = 0, 0   // ANCOUNT = 0
+	data[8], data[9] = 0, 0   // NSCOUNT = 0
+	data[10], data[11] = 0, 0 // ARCOUNT = 0
 }
 
 type dnsRefreshParam struct {
-	data     *dnsmessage.Msg
+	data     []byte
 	qi       queryInfo
 	upstream *dns.Upstream
 	dialArg  dialArgument
@@ -729,9 +787,11 @@ var dnsRefreshParamPool = sync.Pool{
 	New: func() any { return &dnsRefreshParam{} },
 }
 
-func obtainDnsRefreshParam(data *dnsmessage.Msg, qi queryInfo, upstream *dns.Upstream, dialArg *dialArgument) *dnsRefreshParam {
+func obtainDnsRefreshParam(data []byte, qi queryInfo, upstream *dns.Upstream, dialArg *dialArgument) *dnsRefreshParam {
 	p := dnsRefreshParamPool.Get().(*dnsRefreshParam)
-	p.data = data
+	dataCopy := pool.GetBuffer(len(data))
+	copy(dataCopy, data)
+	p.data = dataCopy
 	p.qi = qi
 	p.upstream = upstream
 	p.dialArg = *dialArg
@@ -739,6 +799,7 @@ func obtainDnsRefreshParam(data *dnsmessage.Msg, qi queryInfo, upstream *dns.Ups
 }
 
 func recycleDnsRefreshParam(p *dnsRefreshParam) {
+	pool.PutBuffer(p.data)
 	p.data = nil
 	p.upstream = nil
 	p.qi = queryInfo{}
@@ -746,63 +807,71 @@ func recycleDnsRefreshParam(p *dnsRefreshParam) {
 	dnsRefreshParamPool.Put(p)
 }
 
-func (c *DnsController) dialSend(msg *dnsmessage.Msg, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo) (bool, error) {
+func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
 	// Lookup Cache
 	if c.enableCache {
-		if rr, fetchedAt, isNew := c.dnsCache.Get(c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)); rr != nil {
-			originalMsgForExpiredFetch := FillMsgByCache(msg, rr, fetchedAt)
-			if originalMsgForExpiredFetch != nil {
+		if respData, expired, isNew := c.dnsCache.Get(c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)); respData != nil {
+			if expired {
 				// Refresh cache asynchronously.
 				go func(c *DnsController, p *dnsRefreshParam) {
 					defer recycleDnsRefreshParam(p)
-					if _, err := c.singleFlightForwardDNS(p.qi, p.data, p.upstream, &p.dialArg); err != nil {
+					if _, _, _, err := c.singleFlightForwardDNS(p.qi, p.data, p.upstream, &p.dialArg, true); err != nil {
 						log.Warnf("failed to refresh dns cache for %v: %+v", p.qi, err)
 					}
-				}(c, obtainDnsRefreshParam(originalMsgForExpiredFetch, queryInfo, upstream, dialArg))
+				}(c, obtainDnsRefreshParam(data, queryInfo, upstream, dialArg))
 			}
-			if log.IsLevelEnabled(log.DebugLevel) && len(msg.Question) > 0 {
+			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
-					"answer": msg.Answer,
+					"answer": FormatDnsRsc(respData),
 				}).Debugf("UDP(DNS) <-> Cache: %v %v", queryInfo.qname, queryInfo.qtype)
 			}
-			return isNew, nil
+			// Use the caller's pooled dnsResp to avoid extra allocation.
+			dnsResp.respData = respData
+			dnsResp.fromPool = true
+			dnsResp.isNew = isNew
+			dnsResp.upstreamFrom = upstream
+			dnsIdSet(dnsResp.respData, dnsId(data))
+			return nil
 		}
 	}
 	// Pending for the same lookup.
-	msgResp, err := c.singleFlightForwardDNS(queryInfo, msg, upstream, dialArg)
-	if err == nil && msgResp != nil && msgResp != msg {
-		// Only copy necessary response fields. Note: the msg.Id may be changing in the first goroutine.
-		msg.Response = true
-		msg.Rcode = msgResp.Rcode
-		msg.RecursionAvailable = msgResp.RecursionAvailable
-		msg.Truncated = msgResp.Truncated
-		msg.Authoritative = msgResp.Authoritative
-		msg.AuthenticatedData = msgResp.AuthenticatedData
-		// The answers should have been saved to cache and won't be modified afterwards.
-		msg.Answer = msgResp.Answer
-		msg.Ns = msgResp.Ns
-		msg.Extra = msgResp.Extra
+	respData, leader, shared, err := c.singleFlightForwardDNS(queryInfo, data, upstream, dialArg, false)
+	dnsResp.isNew = leader
+	dnsResp.upstreamFrom = upstream
+	if respData != nil {
+		if !shared {
+			dnsResp.respData = respData
+			dnsResp.fromPool = false
+		} else {
+			// Each dns handler goroutine should NOT share the same response data.
+			dnsResp.respData = pool.GetBuffer(len(respData))
+			copy(dnsResp.respData, respData)
+			dnsResp.fromPool = true
+		}
+		dnsIdSet(dnsResp.respData, dnsId(data)) // keep the same id with request
 	}
-	return true, err
+	return err
 }
 
 func (c *DnsController) singleFlightForwardDNS(
-	qi queryInfo, msg *dnsmessage.Msg, upstream *dns.Upstream, dialArgument *dialArgument) (*dnsmessage.Msg, error) {
+	qi queryInfo, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (r []byte, leader bool, shared bool, err error) {
 	hashKey := c.GetHashKey(qi.qname, qi.qtype, dialArgument.Outbound, dialArgument.Dialer)
 	param := singleFlightParam{
 		dnsForwarderKey: dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument},
 		c:               c,
-		msg:             msg,
+		data:            data,
 		qi:              qi,
+		isBackground:    isBackground,
 	}
-	resp, err, _, _ := c.singleFlightGroup.Do(hashKey, param, func(p singleFlightParam) (*dnsmessage.Msg, error) {
+	r, err, leader, shared = c.singleFlightGroup.Do(hashKey, param, func(p singleFlightParam) ([]byte, error) {
 		forwarderKey := p.dnsForwarderKey
 		upstream := forwarderKey.upstream
 		dialArgument := forwarderKey.dialArgument
 		c := p.c
-		msg := p.msg
+		data := p.data
 		qname := p.qi.qname
 		qtype := p.qi.qtype
+		isBackground := p.isBackground
 
 		// get forwarder from cache
 		var forwarder DnsForwarder
@@ -827,28 +896,38 @@ func (c *DnsController) singleFlightForwardDNS(
 			forwarder = actualValue.(DnsForwarder)
 		}
 
-		err := forwarder.ForwardDNS(msg)
+		r, err := forwarder.ForwardDNS(data)
 		if err != nil {
 			return nil, err
 		}
-		// Check suc resp.
-		if len(msg.Question) == 0 || msg.Rcode != dnsmessage.RcodeSuccess {
+		if r == nil {
+			return nil, fmt.Errorf("empty DNS response from %v", upstream.String())
+		}
+		rcode := dnsRcode(r)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"qname": qname,
+				"qtype": qtype,
+				"rcode": rcode,
+				"ans":   FormatDnsRsc(r),
+			}).Debugf("Got DNS response")
+		}
+		if !isDnsResponseValid(r) {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
 					"qname": qname,
 					"qtype": qtype,
-					"rcode": msg.Rcode,
-					"ans":   FormatDnsRsc(msg.Answer),
+					"rcode": rcode,
+					"ans":   FormatDnsRsc(r),
 				}).Debugf("Not a valid DNS response")
 			}
 		} else if c.enableCache && shouldSaveToCache(&upstream, qname) {
-			// Skip cache for static entries to allow dynamic updates
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
 					"qname":    qname,
 					"qtype":    qtype,
-					"rcode":    msg.Rcode,
-					"ans":      FormatDnsRsc(msg.Answer),
+					"rcode":    rcode,
+					"ans":      FormatDnsRsc(r),
 					"upstream": upstream,
 					"dialer":   dialArgument.Dialer,
 					"outbound": dialArgument.Outbound,
@@ -856,17 +935,17 @@ func (c *DnsController) singleFlightForwardDNS(
 			}
 			key := c.GetHashKey(qname, qtype, dialArgument.Outbound, dialArgument.Dialer)
 			fixedTtl := c.fixedDomainTtl[qname]
-			c.dnsCache.Save(key, msg.Answer, fixedTtl)
+			c.dnsCache.Save(key, r, fixedTtl, isBackground)
 		}
-		return msg, nil
+		return r, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
-	if !resp.Response {
-		return nil, common.Errf("DNS message response flag is unset")
+	if !dnsResponse(r) {
+		return nil, false, false, common.Errf("DNS message response flag is unset")
 	}
-	return resp, nil
+	return r, leader, shared, err
 }
 
 func shouldSaveToCache(upstream *dns.Upstream, qname string) bool {
@@ -897,6 +976,81 @@ func shouldSaveToCache(upstream *dns.Upstream, qname string) bool {
 		return score*2 <= subLen
 	}
 	return score*3 <= subLen
+}
+
+// IpDomainLookupResult describes a single qname → IP mapping observed
+// in the DNS response cache. The qtype is implicit from the queried IP's
+// family (IPv4 only matches A records, IPv6 only matches AAAA), so it
+// is not stored. TTL is the remaining seconds at the time of the
+// lookup; 0 means the entry is logically expired (but still in the
+// cache). Multiple entries with the same qname but different outbounds
+// are reported individually — no dedupe.
+type IpDomainLookupResult struct {
+	QName string
+	TTL   uint32
+}
+
+// LookupDomainsByIP returns every qname whose cached response contains
+// an A or AAAA record equal to ip, along with the remaining TTL for
+// that answer. Pure offline scan over the raw response cache.
+func (c *DnsController) LookupDomainsByIP(ip netip.Addr) []IpDomainLookupResult {
+	var out []IpDomainLookupResult
+	c.dnsCache.Range(func(_ HashKey, cache *dnsCache, _ time.Duration) bool {
+		qname, _, ok := dnsQuestion(cache.Data)
+		if !ok {
+			return true
+		}
+		elapsed := uint32(time.Since(cache.FetchedAt).Seconds())
+
+		it, iterOK := newDNSRRIterator(cache.Data)
+		if !iterOK {
+			return true
+		}
+		// rrIdx tracks the i-th RR in the answer section; TTLOffsets[i] is that
+		// RR's TTL byte offset. We rely on netip.Addr's documented invariant
+		// that its zero value is invalid and never equals a valid Addr, so
+		// non-A/AAAA records (and truncated rdata) leave rrIP as the zero
+		// value and the rrIP == ip check below filters them out for free.
+		rrIdx := -1
+		for off, hasRR := it.Next(); hasRR; off, hasRR = it.Next() {
+			rrIdx++
+			// Defensive: TTLOffsets is built parallel to all answer RRs in
+			// dnsCache.Save, so it should never be shorter than rrIdx. If it
+			// is, the cache is corrupted — bail out of this entry rather than
+			// doing more doomed iterations.
+			if rrIdx >= len(cache.TTLOffsets) {
+				break
+			}
+			rtype := binary.BigEndian.Uint16(cache.Data[off : off+2])
+			rdataOff := int(off) + 10
+			var rrIP netip.Addr
+			switch rtype {
+			case 1: // A
+				if rdataOff+4 <= len(cache.Data) {
+					rrIP = netip.AddrFrom4([4]byte(cache.Data[rdataOff : rdataOff+4]))
+				}
+			case 28: // AAAA
+				if rdataOff+16 <= len(cache.Data) {
+					rrIP = netip.AddrFrom16([16]byte(cache.Data[rdataOff : rdataOff+16]))
+				}
+			}
+			if rrIP != ip {
+				continue
+			}
+			ttlOff := cache.TTLOffsets[rrIdx]
+			rawTtl := binary.BigEndian.Uint32(cache.Data[ttlOff : ttlOff+4])
+			var remaining uint32
+			if rawTtl > elapsed {
+				remaining = rawTtl - elapsed
+			}
+			out = append(out, IpDomainLookupResult{
+				QName: qname,
+				TTL:   remaining,
+			})
+		}
+		return true
+	})
+	return out
 }
 
 func (c *DnsController) GetStaticEntries() map[string]*config.DnsStaticEntry {

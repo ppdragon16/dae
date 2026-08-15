@@ -6,12 +6,12 @@
 package control
 
 import (
-	"net/netip"
+	"encoding/binary"
 	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/dae/common"
-	dnsmessage "github.com/miekg/dns"
+	"github.com/daeuniverse/outbound/pool"
 )
 
 const (
@@ -24,77 +24,17 @@ const (
 type HashKey uint64
 
 type dnsCache struct {
-	Answers   []dnsmessage.RR
-	FetchedAt time.Time
-	IsNew     int32
-}
-
-// Parse ips from DNS resp answers.
-func GetIp(rr dnsmessage.RR) (netip.Addr, bool) {
-	var (
-		ip netip.Addr
-		ok bool
-	)
-	switch body := rr.(type) {
-	case *dnsmessage.A:
-		ip, ok = netip.AddrFromSlice(body.A)
-	case *dnsmessage.AAAA:
-		ip, ok = netip.AddrFromSlice(body.AAAA)
-	}
-	if !ok || ip.IsUnspecified() {
-		return ip, false
-	}
-	return ip, true
-}
-
-func FillMsgByCache(msg *dnsmessage.Msg, rr []dnsmessage.RR, fetchedAt time.Time) (originalMsgForExpiredFetch *dnsmessage.Msg) {
-	// Ugly copying RR logic to avoid concurrent read/write TTL.
-	// TODO: Optimize this by byte-level copying?
-	m := &dnsmessage.Msg{}
-	ttls := make([]uint32, 0)
-	ttlDeduction := uint32(time.Since(fetchedAt).Seconds())
-	for _, ans := range rr {
-		rawTtl := ans.Header().Ttl
-		clientTtl := uint32(0)
-		if rawTtl > ttlDeduction {
-			clientTtl = rawTtl - ttlDeduction
-		}
-		if clientTtl < minClientTtl {
-			clientTtl = minClientTtl
-			if originalMsgForExpiredFetch == nil {
-				originalMsgForExpiredFetch = msg.Copy()
-			}
-		}
-		ttls = append(ttls, clientTtl)
-		m.Answer = append(m.Answer, ans)
-	}
-	m = m.Copy()
-	for i := range m.Answer {
-		m.Answer[i].Header().Ttl = ttls[i]
-	}
-	msg.Answer = m.Answer
-	msg.Rcode = dnsmessage.RcodeSuccess
-	msg.Response = true
-	msg.RecursionAvailable = true
-	msg.Truncated = false
-	return
-}
-
-func IncludeAnyIpInMsg(msg *dnsmessage.Msg) bool {
-	for _, ans := range msg.Answer {
-		switch ans.(type) {
-		case *dnsmessage.A, *dnsmessage.AAAA:
-			return true
-		}
-	}
-	return false
+	Data       []byte
+	TTLOffsets []uint16
+	FetchedAt  time.Time
+	IsNew      int32
 }
 
 type commonDnsCache struct {
 	cache *common.TimeWheelCache[HashKey, *dnsCache]
 }
 
-func newCommonDnsCache() *commonDnsCache {
+func NewCommonDnsCache() *commonDnsCache {
 	c := &commonDnsCache{}
 	c.cache = common.NewTimeWheelCache[HashKey, *dnsCache](
 		extendCacheDur, 5*time.Second, func(key HashKey, value *dnsCache, replaced bool) {
@@ -104,12 +44,13 @@ func newCommonDnsCache() *commonDnsCache {
 	return c
 }
 
-func (c *commonDnsCache) Get(cacheKey HashKey) (rr []dnsmessage.RR, fetchedAt time.Time, isNew bool) {
-	cache, ok := c.cache.Get(cacheKey)
+func (c *commonDnsCache) Get(key HashKey) (resp []byte, expired bool, isNew bool) {
+	cache, ok := c.cache.Get(key)
 	if !ok {
-		return nil, time.Time{}, false
+		return nil, false, false
 	}
-	return cache.Answers, cache.FetchedAt, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
+	resp, expired = copyResponseFromCache(cache)
+	return resp, expired, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
 }
 
 // Range iterates over every cached DNS response. See common.TimeWheelCache.Range.
@@ -117,24 +58,54 @@ func (c *commonDnsCache) Range(fn func(key HashKey, value *dnsCache, ttl time.Du
 	c.cache.Range(fn)
 }
 
-func (c *commonDnsCache) Save(key HashKey, answers []dnsmessage.RR, fixedTtl int) {
-	if len(answers) == 0 {
+func copyResponseFromCache(cache *dnsCache) ([]byte, bool) {
+	respData := pool.GetBuffer(len(cache.Data))
+	copy(respData, cache.Data)
+
+	elapsed := uint32(uint32(time.Since(cache.FetchedAt).Seconds()))
+	expired := false
+	for _, offset := range cache.TTLOffsets {
+		rawTtl := binary.BigEndian.Uint32(respData[offset : offset+4])
+		clientTtl := uint32(0)
+		if rawTtl > elapsed {
+			clientTtl = rawTtl - elapsed
+		}
+		if clientTtl < minClientTtl {
+			clientTtl = minClientTtl
+			expired = true
+		}
+		binary.BigEndian.PutUint32(respData[offset:offset+4], clientTtl)
+	}
+	return respData, expired
+}
+
+func (c *commonDnsCache) Save(key HashKey, data []byte, fixedTtl int, directSave bool) {
+	it, ok := newDNSRRIterator(data)
+	if !ok {
+		return
+	}
+	lenRRs := it.remain
+	if lenRRs == 0 {
 		return
 	}
 
+	ttlOffsets := make([]uint16, 0, lenRRs)
 	var maxTTL uint32
 	if fixedTtl > 0 {
 		maxTTL = uint32(fixedTtl)
-		for _, ans := range answers {
-			ans.Header().Ttl = uint32(fixedTtl)
+		for off, ok := it.Next(); ok; off, ok = it.Next() {
+			ttlOffsets = append(ttlOffsets, uint16(off+4))
+			binary.BigEndian.PutUint32(data[off+4:off+8], maxTTL)
 		}
 	} else {
-		for _, ans := range answers {
-			rtype := ans.Header().Rrtype
-			if rtype != dnsmessage.TypeA && rtype != dnsmessage.TypeAAAA {
+		for off, ok := it.Next(); ok; off, ok = it.Next() {
+			ttlOffsets = append(ttlOffsets, uint16(off+4))
+			rtype := binary.BigEndian.Uint16(it.data[off : off+2])
+			if rtype != 1 && rtype != 28 {
 				continue
 			}
-			if ttl := ans.Header().Ttl; ttl > maxTTL {
+			ttl := binary.BigEndian.Uint32(data[off+4 : off+8])
+			if ttl > maxTTL {
 				maxTTL = ttl
 			}
 		}
@@ -142,10 +113,18 @@ func (c *commonDnsCache) Save(key HashKey, answers []dnsmessage.RR, fixedTtl int
 	if maxTTL < minSaveTtl {
 		return
 	}
-	newCache := &dnsCache{
-		Answers:   answers,
-		FetchedAt: time.Now(),
-		IsNew:     1,
+
+	newCache := &dnsCache{}
+	newCache.TTLOffsets = ttlOffsets
+	newCache.FetchedAt = time.Now()
+	atomic.StoreInt32(&newCache.IsNew, 1)
+
+	if directSave {
+		newCache.Data = data
+	} else {
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		newCache.Data = dataCopy
 	}
 
 	c.cache.Save(key, newCache)

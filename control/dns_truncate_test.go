@@ -11,7 +11,26 @@ import (
 	dnsmessage "github.com/miekg/dns"
 )
 
-func buildLargeDNSResponse(t *testing.T, count int) *dnsmessage.Msg {
+// buildDNSQuery builds a minimal DNS query, optionally with an EDNS0 OPT
+// record advertising the given UDP payload size (0 means no EDNS0).
+func buildDNSQuery(t *testing.T, ednsSize int) []byte {
+	t.Helper()
+	req := &dnsmessage.Msg{}
+	req.SetQuestion("cdn.example.com.", dnsmessage.TypeA)
+	if ednsSize > 0 {
+		req.SetEdns0(uint16(ednsSize), true)
+	}
+	data, err := req.Pack()
+	if err != nil {
+		t.Fatalf("Pack query: %v", err)
+	}
+	return data
+}
+
+// buildLargeDNSResponse builds a DNS response with many A records whose
+// packed size exceeds the classic 512-byte UDP limit (e.g., a CDN returning
+// 35 A records).
+func buildLargeDNSResponse(t *testing.T, count int) (*dnsmessage.Msg, []byte) {
 	t.Helper()
 	msg := &dnsmessage.Msg{}
 	msg.SetQuestion("cdn.example.com.", dnsmessage.TypeA)
@@ -24,25 +43,33 @@ func buildLargeDNSResponse(t *testing.T, count int) *dnsmessage.Msg {
 		}
 		msg.Answer = append(msg.Answer, rr)
 	}
-	return msg
+	data, err := msg.Pack()
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	return msg, data
 }
 
 func TestTruncateDNSResponse(t *testing.T) {
 	// 35 A records exceed 512 bytes (the reported bug: CDN returns 35 A
 	// records, packed size > 512, client got "noerror, 0 answer, tc=0").
-	resp := buildLargeDNSResponse(t, 35)
-	packed, err := resp.Pack()
-	if err != nil {
-		t.Fatalf("Pack: %v", err)
-	}
-	if len(packed) <= dnsDefaultUDPSize {
-		t.Fatalf("test fixture too small: packed = %d bytes, want > %d", len(packed), dnsDefaultUDPSize)
+	_, respData := buildLargeDNSResponse(t, 35)
+	if len(respData) <= dnsDefaultUDPSize {
+		t.Fatalf("test fixture too small: packed = %d bytes, want > %d", len(respData), dnsDefaultUDPSize)
 	}
 
-	resp.Truncate(dnsDefaultUDPSize)
+	reqData := buildDNSQuery(t, 0) // no EDNS0 → limit=512
+	truncated := truncateDNSResponse(reqData, respData)
 
+	var resp dnsmessage.Msg
+	if err := resp.Unpack(truncated); err != nil {
+		t.Fatalf("Unpack truncated response: %v", err)
+	}
 	if !resp.Truncated {
 		t.Fatal("truncated response must set TC bit")
+	}
+	if len(truncated) > dnsDefaultUDPSize {
+		t.Fatalf("truncated response still too large: %d > %d", len(truncated), dnsDefaultUDPSize)
 	}
 	if len(resp.Answer) == 0 {
 		t.Fatal("truncated response should keep at least the answers that fit")
@@ -50,77 +77,62 @@ func TestTruncateDNSResponse(t *testing.T) {
 	if len(resp.Question) == 0 {
 		t.Fatal("truncated response must keep the question")
 	}
-
-	truncated, err := resp.Pack()
-	if err != nil {
-		t.Fatalf("Pack truncated: %v", err)
-	}
-	if len(truncated) > dnsDefaultUDPSize {
-		t.Fatalf("truncated response still too large: %d > %d", len(truncated), dnsDefaultUDPSize)
-	}
 }
 
 func TestTruncateDNSResponseSmall(t *testing.T) {
 	// Responses within the limit must pass through untouched.
-	resp := buildLargeDNSResponse(t, 2)
-	packed, err := resp.Pack()
-	if err != nil {
-		t.Fatalf("Pack: %v", err)
-	}
+	_, respData := buildLargeDNSResponse(t, 2)
+	reqData := buildDNSQuery(t, 0)
 
-	resp.Truncate(dnsDefaultUDPSize)
-	if resp.Truncated {
-		t.Fatal("small response must not set TC bit")
-	}
-
-	truncated, err := resp.Pack()
-	if err != nil {
-		t.Fatalf("Pack truncated: %v", err)
-	}
-	if len(truncated) != len(packed) {
-		t.Fatalf("small response was modified: %d -> %d bytes", len(packed), len(truncated))
+	truncated := truncateDNSResponse(reqData, respData)
+	if len(truncated) != len(respData) {
+		t.Fatalf("small response was modified: %d -> %d bytes", len(respData), len(truncated))
 	}
 }
 
-func TestDnsUDPResponseSizeLimit(t *testing.T) {
-	// No EDNS0 -> classic 512.
+func TestTruncateDNSResponseEDNS(t *testing.T) {
+	// Client advertises EDNS0 4096 → 35 A records fit without truncation.
+	_, respData := buildLargeDNSResponse(t, 35)
+	reqData := buildDNSQuery(t, 4096)
+
+	truncated := truncateDNSResponse(reqData, respData)
+	if len(truncated) != len(respData) {
+		t.Fatalf("EDNS0 4096: response was truncated: %d -> %d bytes", len(respData), len(truncated))
+	}
+
+	// Client advertises EDNS0 128 below 512 → limit clamped to 512 implicitly.
+	// 35 A records > 512 so still truncated.
+	reqData2 := buildDNSQuery(t, 128)
+	truncated2 := truncateDNSResponse(reqData2, respData)
+	if len(truncated2) >= len(respData) {
+		t.Fatalf("EDNS0 128: response should be truncated (limit=512)")
+	}
+}
+
+func TestDnsUDPPayloadSize(t *testing.T) {
+	// No EDNS0 -> returns 0.
 	req := &dnsmessage.Msg{}
 	req.SetQuestion("example.com.", dnsmessage.TypeA)
-	limit := dnsDefaultUDPSize
-	if opt := req.IsEdns0(); opt != nil {
-		if s := int(opt.UDPSize()); s > limit {
-			limit = s
-		}
-	}
-	if limit != 512 {
-		t.Fatalf("no-EDNS0 limit = %d, want 512", limit)
+	data, _ := req.Pack()
+	if got := dnsUDPPayloadSize(data); got != 0 {
+		t.Fatalf("no-EDNS0 payload size = %d, want 0", got)
 	}
 
 	// EDNS0 with 4096 -> 4096.
 	req2 := &dnsmessage.Msg{}
 	req2.SetQuestion("example.com.", dnsmessage.TypeA)
 	req2.SetEdns0(4096, true)
-	limit2 := dnsDefaultUDPSize
-	if opt := req2.IsEdns0(); opt != nil {
-		if s := int(opt.UDPSize()); s > limit2 {
-			limit2 = s
-		}
-	}
-	if limit2 != 4096 {
-		t.Fatalf("EDNS0 4096 limit = %d, want 4096", limit2)
+	data2, _ := req2.Pack()
+	if got := dnsUDPPayloadSize(data2); got != 4096 {
+		t.Fatalf("EDNS0 4096 payload size = %d, want 4096", got)
 	}
 
-	// EDNS0 below 512 must be clamped up to 512 (RFC 6891 6.2.5).
+	// EDNS0 with 128 -> returns 128 (raw value, clamping is caller's job).
 	req3 := &dnsmessage.Msg{}
 	req3.SetQuestion("example.com.", dnsmessage.TypeA)
 	req3.SetEdns0(128, true)
-	limit3 := dnsDefaultUDPSize
-	if opt := req3.IsEdns0(); opt != nil {
-		if s := int(opt.UDPSize()); s > limit3 {
-			limit3 = s
-		}
-	}
-	if limit3 != 512 {
-		t.Fatalf("EDNS0 128 limit = %d, want 512", limit3)
+	data3, _ := req3.Pack()
+	if got := dnsUDPPayloadSize(data3); got != 128 {
+		t.Fatalf("EDNS0 128 payload size = %d, want 128", got)
 	}
 }

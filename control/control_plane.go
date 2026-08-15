@@ -44,7 +44,6 @@ import (
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/direct"
-	dnsmessage "github.com/miekg/dns"
 
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/meek"
@@ -611,11 +610,6 @@ func NewControlPlane(
 		if err = core.setupSkPidMonitor(); err != nil {
 			log.Warnf("%+v", common.Wrap(err, "cgroup2 is not enabled; pname routing cannot be used"))
 		}
-		if global.EnableLocalTcpFastRedirect {
-			if err = core.setupLocalTcpFastRedirect(); err != nil {
-				log.Warnf("%+v", common.Wrap(err, "failed to setup local tcp fast redirect"))
-			}
-		}
 		for _, ifname := range global.WanInterface {
 			if len(global.LanInterface) > 0 {
 				// FIXME: Code is not elegant here.
@@ -766,6 +760,29 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			fmt.Fprintf(writer, "Outbound '%s' not found\n", outbound)
+		}
+	case "lookup":
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET method required", http.StatusMethodNotAllowed)
+			return
+		}
+		if len(params) != 1 || params[0] == "" {
+			http.Error(w, "lookup requires 1 IP parameter: /lookup/<ip>", http.StatusBadRequest)
+			return
+		}
+		addr, err := netip.ParseAddr(params[0])
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid IP %q: %v", params[0], err), http.StatusBadRequest)
+			return
+		}
+		infos := c.dnsController.LookupDomainsByIP(addr)
+		if len(infos) == 0 {
+			http.Error(w, fmt.Sprintf("no domain found for IP %v", addr), http.StatusNotFound)
+			return
+		}
+		for _, info := range infos {
+			fmt.Fprintf(writer, "%s:\n", info.QName)
+			fmt.Fprintf(writer, "  ttl: %v\n", info.TTL)
 		}
 	case "static":
 		if len(params) == 0 {
@@ -1257,7 +1274,9 @@ func (c *ControlPlane) loopTcp(listener *Listener) {
 			c.inConnections.Store(lconn, struct{}{})
 			defer c.inConnections.Delete(lconn)
 			if err := c.handleConn(lconn); err != nil && c.ctx.Err() == nil {
-				log.Warningf("%+v", common.Wrap(err, "handleConn"))
+				if log.IsLevelEnabled(log.ErrorLevel) {
+					log.Errorf("%+v", common.Wrap(err, "handleConn"))
+				}
 			}
 		}(lconn)
 	}
@@ -1408,14 +1427,14 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 			c.dnsRoutingResultCache.Save(src.Addr(), routingResult)
 		}
 		if routingResult.Must == 0 {
-			var dnsMessage dnsmessage.Msg
-			if err := dnsMessage.Unpack(data); err == nil {
-				dq := ObtainDnsRequest(src, dst, routingResult, false)
-				c.dnsController.Handle(&dnsMessage, dq)
+			dq := ObtainDnsRequest(src, dst, routingResult, false)
+			handled := c.dnsController.Handle(data, dq)
+			if handled {
 				RecycleDnsRequest(dq)
 				pool.PutBuffer(data)
 				return
 			}
+			RecycleDnsRequest(dq)
 		}
 	}
 
@@ -1442,7 +1461,9 @@ func udpEmitTaskFunc(t *UdpTask[emitParam]) {
 	p := &t.param
 	defer recycleUdpEmitTask(t)
 	if e := p.c.handlePkt(p.data, p.Src, p.Dst); e != nil && p.c.ctx.Err() == nil {
-		log.Warningf("%+v", common.Wrap(e, "handlePkt"))
+		if log.IsLevelEnabled(log.ErrorLevel) {
+			log.Errorf("%+v", common.Wrap(e, "handlePkt"))
+		}
 	}
 }
 

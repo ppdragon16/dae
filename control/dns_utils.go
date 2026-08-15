@@ -6,17 +6,157 @@
 package control
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 
 	dnsmessage "github.com/miekg/dns"
 )
 
+const (
+	maxJumpCount = 10 // 限制跳转次数，防止死循环
+)
+
 // dnsDefaultUDPSize is the classic DNS-over-UDP response size limit
-// (RFC 1035 section 4.2.1). Responses exceeding this limit must be
-// truncated with the TC bit set so the client retries over TCP.
+// (RFC 1035 section 4.2.1) applied when the client does not advertise
+// EDNS0. Responses larger than the limit must be truncated with the TC
+// bit set so the client retries over TCP instead of silently dropping
+// the answers (which manifests as "noerror, 0 answer, tc=0").
 const dnsDefaultUDPSize = 512
+
+// dnsUDPPayloadSize reads the EDNS0 advertised UDP payload size directly
+// from raw DNS request bytes by scanning the additional section for an
+// OPT record (type 41). Returns 0 if no EDNS0 OPT record is found. This
+// avoids a full dnsmessage.Msg.Unpack and is suitable for the hot path.
+func dnsUDPPayloadSize(data []byte) int {
+	if len(data) < 12 {
+		return 0
+	}
+	arCount := int(binary.BigEndian.Uint16(data[10:12]))
+	if arCount == 0 {
+		return 0
+	}
+
+	// Skip 12-byte header.
+	off := 12
+
+	// Skip question section.
+	qdCount := int(binary.BigEndian.Uint16(data[4:6]))
+	for range qdCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil {
+			return 0
+		}
+		off = nextOff + 4 // QTYPE(2) + QCLASS(2)
+	}
+
+	// Skip answer section.
+	anCount := int(binary.BigEndian.Uint16(data[6:8]))
+	for range anCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil || nextOff+10 > len(data) {
+			return 0
+		}
+		rdLen := int(binary.BigEndian.Uint16(data[nextOff+8 : nextOff+10]))
+		off = nextOff + 10 + rdLen
+	}
+
+	// Skip authority section.
+	nsCount := int(binary.BigEndian.Uint16(data[8:10]))
+	for range nsCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil || nextOff+10 > len(data) {
+			return 0
+		}
+		rdLen := int(binary.BigEndian.Uint16(data[nextOff+8 : nextOff+10]))
+		off = nextOff + 10 + rdLen
+	}
+
+	// Scan additional section for an OPT record (TYPE=41).
+	for range arCount {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil || nextOff+4 > len(data) {
+			return 0
+		}
+		rtype := binary.BigEndian.Uint16(data[nextOff : nextOff+2])
+		if rtype == 41 { // dnsmessage.TypeOPT
+			// CLASS field is the UDP payload size (RFC 6891).
+			return int(binary.BigEndian.Uint16(data[nextOff+2 : nextOff+4]))
+		}
+		if nextOff+10 > len(data) {
+			return 0
+		}
+		rdLen := int(binary.BigEndian.Uint16(data[nextOff+8 : nextOff+10]))
+		off = nextOff + 10 + rdLen
+	}
+	return 0
+}
+
+// truncateDNSResponse truncates resp to fit within the client's UDP size
+// limit (512, or the EDNS0 advertised size from req per RFC 6891). Returns
+// resp unchanged if no truncation is needed. The TC bit is set on oversized
+// responses so the client retries over TCP (RFC 1035 section 4.2.1).
+// Only complete answer RRs are kept; authority and additional sections are
+// dropped. All operations are raw-byte to avoid dnsmessage.Msg allocations.
+func truncateDNSResponse(req []byte, resp []byte) []byte {
+	// Fast path: most responses fit within the classic 512-byte limit.
+	if len(resp) <= dnsDefaultUDPSize {
+		return resp
+	}
+
+	// Determine the client's UDP size limit from its request.
+	limit := dnsDefaultUDPSize
+	if s := dnsUDPPayloadSize(req); s > limit {
+		limit = s
+	}
+
+	if len(resp) <= limit {
+		return resp
+	}
+	if len(resp) < 12 {
+		return resp
+	}
+
+	qdCount := int(binary.BigEndian.Uint16(resp[4:6]))
+	anCount := int(binary.BigEndian.Uint16(resp[6:8]))
+
+	// Skip 12-byte header + question section to reach the first answer RR.
+	off := 12
+	for range qdCount {
+		nextOff, err := dnsSkipDomain(resp, off)
+		if err != nil || nextOff+4 > len(resp) {
+			return resp
+		}
+		off = nextOff + 4 // QTYPE(2) + QCLASS(2)
+	}
+
+	// Walk answer RRs; keep only those that fit completely within limit.
+	kept := 0
+	for range anCount {
+		nextOff, err := dnsSkipDomain(resp, off)
+		if err != nil || nextOff+10 > len(resp) {
+			break
+		}
+		rdLen := int(binary.BigEndian.Uint16(resp[nextOff+8 : nextOff+10]))
+		rrEnd := nextOff + 10 + rdLen
+		if rrEnd > limit {
+			break
+		}
+		off = rrEnd
+		kept++
+	}
+
+	// Set TC bit (RFC 1035) and update counts.
+	resp[2] |= 0x02
+	binary.BigEndian.PutUint16(resp[6:8], uint16(kept))
+	binary.BigEndian.PutUint16(resp[8:10], 0)  // NSCOUNT = 0
+	binary.BigEndian.PutUint16(resp[10:12], 0) // ARCOUNT = 0
+
+	return resp[:off]
+}
 
 type RscWrapper struct {
 	Rsc dnsmessage.RR
@@ -37,9 +177,13 @@ func (w RscWrapper) String() string {
 	return fmt.Sprintf("%v(%v): %v", w.Rsc.Header().Name, QtypeToString(w.Rsc.Header().Rrtype), strBody)
 }
 
-func FormatDnsRsc(ans []dnsmessage.RR) string {
+func FormatDnsRsc(data []byte) string {
+	msg := &dnsmessage.Msg{}
+	if err := msg.Unpack(data); err != nil {
+		return fmt.Sprintf("FormatDnsRsc: unpack failed: %v", err)
+	}
 	var w []string
-	for _, a := range ans {
+	for _, a := range msg.Answer {
 		w = append(w, RscWrapper{Rsc: a}.String())
 	}
 	return strings.Join(w, "; ")
@@ -51,4 +195,322 @@ func QtypeToString(qtype uint16) string {
 		str = strconv.Itoa(int(qtype))
 	}
 	return str
+}
+
+// dnsDomain 解析 DNS 域名，转为小写并写入 stringBuf，返回写入后的切片和下一个字段的偏移量
+func dnsDomain(data []byte, startOffset int) (qname string, nextOff int, err error) {
+	var stringBuf [256]byte
+	off := startOffset
+	jumped := false
+	nextOff = 0
+	jumpCount := 0
+	res := stringBuf[:0]
+
+	for {
+		if off >= len(data) {
+			return "", 0, errors.New("offset out of range")
+		}
+
+		length := int(data[off])
+
+		// 1. 处理指针压缩 (0xC0)
+		if length&0xC0 == 0xC0 {
+			if off+1 >= len(data) {
+				return "", 0, errors.New("invalid pointer")
+			}
+			pointer := int(length&0x3F)<<8 | int(data[off+1])
+			if !jumped {
+				nextOff = off + 2
+				jumped = true
+			}
+			off = pointer
+			jumpCount++
+			if jumpCount > maxJumpCount {
+				return "", 0, errors.New("too many DNS compression jumps")
+			}
+			continue
+		}
+
+		// 2. 结束符 (0x00)
+		if length == 0 {
+			off++
+			break
+		}
+
+		// 3. 标签解析，转小写，加圆点
+		off++
+		if off+length > len(data) {
+			return "", 0, errors.New("label length exceeds packet size")
+		}
+		if len(res)+length+1 > cap(res) {
+			return "", 0, errors.New("qname length exceeds buffer size")
+		}
+
+		for i := 0; i < length; i++ {
+			char := data[off+i]
+			if char >= 'A' && char <= 'Z' {
+				char += 'a' - 'A'
+			}
+			res = append(res, char)
+		}
+		res = append(res, '.')
+		off += length
+	}
+
+	if !jumped {
+		nextOff = off
+	}
+
+	// 处理 Root Domain 情况（直接返回 "."）
+	if len(res) == 0 {
+		return ".", nextOff, nil
+	}
+	return string(res), nextOff, nil
+}
+
+func dnsSkipDomain(data []byte, off int) (int, error) {
+	for {
+		if off >= len(data) {
+			return 0, fmt.Errorf("offset out of range")
+		}
+		b := data[off]
+		if b == 0 { // 结束符
+			return off + 1, nil
+		}
+		if b&0xc0 == 0xc0 { // 压缩指针，占用 2 字节
+			if off+2 > len(data) {
+				return 0, fmt.Errorf("truncated pointer")
+			}
+			return off + 2, nil
+		}
+		// 普通标签：b 是长度，跳过 b 字节再加长度字节本身
+		off += int(b) + 1
+	}
+}
+
+func dnsId(data []byte) uint16 {
+	return uint16(data[0])<<8 | uint16(data[1])
+}
+
+func dnsIdSet(data []byte, id uint16) {
+	data[0] = byte(id >> 8)
+	data[1] = byte(id & 0xff)
+}
+
+// dnsQuestion returns the first question's qname and qtype from a DNS
+// message. ok is false if the message is truncated, the question
+// section is malformed, or qclass is not INET (dae only handles INET
+// queries/responses). RFC 1035 messages almost always carry a single
+// question, so the first one is sufficient.
+func dnsQuestion(data []byte) (qname string, qtype uint16, ok bool) {
+	if len(data) < 12 {
+		return "", 0, false
+	}
+	name, off, err := dnsDomain(data, 12)
+	if err != nil {
+		return "", 0, false
+	}
+	if len(data) < off+4 {
+		return "", 0, false
+	}
+	if binary.BigEndian.Uint16(data[off+2:off+4]) != uint16(dnsmessage.ClassINET) {
+		return "", 0, false
+	}
+	return name, binary.BigEndian.Uint16(data[off : off+2]), true
+}
+
+func dnsRcode(data []byte) uint8 {
+	if len(data) < 4 {
+		return 0
+	}
+	return data[3] & 0x0F
+}
+
+func dnsRcodeSet(data []byte, rcode uint8) {
+	if len(data) >= 4 {
+		data[2] |= 0x80
+		data[3] = (data[3] & 0xF0) | (rcode & 0x0F)
+	}
+}
+
+func dnsResponse(data []byte) bool {
+	if len(data) < 3 {
+		return false
+	}
+	return data[2]&0x80 != 0 // QR
+}
+
+func dnsResponseSet(data []byte, res bool) {
+	if len(data) >= 3 {
+		if res {
+			data[2] |= 0x80
+		} else {
+			data[2] &= 0x7F
+		}
+	}
+}
+
+func isDnsResponseValid(resp []byte) bool {
+	// DNS Header 固定为 12 字节
+	if len(resp) < 12 {
+		return false
+	}
+
+	// 1. 检查是否为响应包 (QR 位)
+	// 第 2 字节最高位必须为 1
+	if resp[2]&0x80 == 0 {
+		return false
+	}
+
+	// 2. 检查 Rcode 是否为 Success (0)
+	// 第 3 字节低 4 位必须为 0
+	if resp[3]&0x0F != 0 {
+		return false
+	}
+
+	// 3. 检查 Question 数量 (QDCOUNT) 是否 > 0
+	// 偏移量 4-5 字节
+	qdCount := binary.BigEndian.Uint16(resp[4:6])
+	if qdCount == 0 {
+		return false
+	}
+
+	// 4. 检查 Answer 数量 (ANCOUNT) 是否 > 0
+	// 偏移量 6-7 字节
+	anCount := binary.BigEndian.Uint16(resp[6:8])
+	if anCount == 0 {
+		return false
+	}
+
+	return true
+}
+
+func dnsAnswers(data []byte) (ips []netip.Addr, minTTL uint32) {
+	it, ok := newDNSRRIterator(data)
+	if !ok {
+		return nil, 0
+	}
+	lenRRs := it.remain
+	if lenRRs == 0 {
+		return nil, 0
+	}
+
+	minTTL = ^uint32(0)
+	ips = make([]netip.Addr, 0, lenRRs)
+	for off, ok := it.Next(); ok; off, ok = it.Next() {
+		ttl := binary.BigEndian.Uint32(data[off+4 : off+8])
+		if ttl < minTTL {
+			minTTL = ttl
+		}
+		rtype := binary.BigEndian.Uint16(data[off : off+2])
+		// A 记录：Type=1, RdLen=4
+		if rtype == 1 {
+			// RData 偏移量 = RROffset + Type(2) + Class(2) + TTL(4) + RdLen(2) = 10
+			rdataOff := int(off) + 10
+			if rdataOff+4 <= len(data) {
+				ips = append(ips, netip.AddrFrom4([4]byte(data[rdataOff:rdataOff+4])))
+			}
+		}
+		// AAAA 记录：Type=28, RdLen=16
+		if rtype == 28 {
+			rdataOff := int(off) + 10
+			if rdataOff+16 <= len(data) {
+				ips = append(ips, netip.AddrFrom16([16]byte(data[rdataOff:rdataOff+16])))
+			}
+		}
+	}
+	return ips, minTTL
+}
+
+type dnsRRIterator struct {
+	data   []byte
+	off    int
+	remain int
+}
+
+func newDNSRRIterator(data []byte) (dnsRRIterator, bool) {
+	if len(data) < 12 {
+		return dnsRRIterator{}, false
+	}
+
+	qdCount := int(binary.BigEndian.Uint16(data[4:6]))
+	anCount := int(binary.BigEndian.Uint16(data[6:8]))
+	if anCount == 0 {
+		return dnsRRIterator{}, false
+	}
+
+	// 1. 跳过 Question 区
+	off := 12
+	for i := 0; i < qdCount; i++ {
+		nextOff, err := dnsSkipDomain(data, off)
+		if err != nil {
+			return dnsRRIterator{}, false
+		}
+		off = nextOff + 4 // Skip Type(2) + Class(2)
+	}
+
+	return dnsRRIterator{
+		data:   data,
+		off:    off,
+		remain: anCount,
+	}, true
+}
+
+func (it *dnsRRIterator) Next() (uint16, bool) {
+	if it.remain <= 0 || it.off >= len(it.data) {
+		return 0, false
+	}
+
+	// 跳过 Name 字段
+	rrDataStart, err := dnsSkipDomain(it.data, it.off)
+	if err != nil {
+		it.remain = 0
+		return 0, false
+	}
+
+	// 校验边界: Type(2) + Class(2) + TTL(4) + RDLen(2) = 10 bytes
+	if rrDataStart+10 > len(it.data) {
+		it.remain = 0
+		return 0, false
+	}
+
+	rdLen := int(binary.BigEndian.Uint16(it.data[rrDataStart+8 : rrDataStart+10]))
+
+	// 更新 offset 指向下一个 RR，并减少计数
+	it.off = rrDataStart + 10 + rdLen
+	it.remain--
+
+	return uint16(rrDataStart), true
+}
+
+func dnsSwitchQtype(data []byte) {
+	// DNS Header 固定 12 字节
+	if len(data) < 12 {
+		return
+	}
+
+	// 1. 定位 QTYPE 的位置
+	// 我们需要跳过 Header(12字节) 和 变长的 QNAME
+	nextOff, err := dnsSkipDomain(data, 12)
+	if err != nil {
+		return
+	}
+
+	// 2. 检查长度是否足够读取 QTYPE (2 字节)
+	if len(data) < nextOff+2 {
+		return
+	}
+
+	// 3. 读取并切换 QTYPE
+	// QTYPE 的偏移量就是 nextOff
+	qtype := binary.BigEndian.Uint16(data[nextOff : nextOff+2])
+
+	switch qtype {
+	case 1: // dnsmessage.TypeA (1)
+		// 改为 TypeAAAA (28)
+		binary.BigEndian.PutUint16(data[nextOff:nextOff+2], 28)
+	case 28: // dnsmessage.TypeAAAA (28)
+		// 改为 TypeA (1)
+		binary.BigEndian.PutUint16(data[nextOff:nextOff+2], 1)
+	}
 }

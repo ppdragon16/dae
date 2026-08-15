@@ -17,7 +17,6 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/routing"
 	"github.com/daeuniverse/dae/config"
-	dnsmessage "github.com/miekg/dns"
 )
 
 var ErrBadUpstreamFormat = fmt.Errorf("bad upstream format")
@@ -347,9 +346,9 @@ func (s *Dns) GetStaticEntry(name string) (*config.DnsStaticEntry, bool) {
 	return entry, ok
 }
 
-func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
+func (s *Dns) RequestSelect(qname string, qtype uint16, srcMac [6]byte, srcIp netip.Addr) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
 	// Route.
-	upstreamIndex, err = s.reqMatcher.Match(qname, qtype)
+	upstreamIndex, err = s.reqMatcher.Match(qname, qtype, srcMac, srcIp)
 	if err != nil {
 		return 0, err
 	}
@@ -364,44 +363,13 @@ func (s *Dns) RequestSelect(qname string, qtype uint16) (upstreamIndex consts.Dn
 	return upstreamIndex, nil
 }
 
-func (s *Dns) ResponseSelect(msg *dnsmessage.Msg, fromUpstream *Upstream) (upstreamIndex consts.DnsResponseOutboundIndex, upstream *Upstream, err error) {
-	if !msg.Response {
-		return 0, nil, fmt.Errorf("DNS response expected but DNS request received")
-	}
+// HasClientRequestRules returns whether the request routing uses client-specific matchers (mac or sip).
+func (s *Dns) HasClientRequestRules() bool {
+	return len(s.reqMatcher.macSet) > 0 || len(s.reqMatcher.sourceIpSet) > 0
+}
 
-	if !s.hasResponseRules {
-		return consts.DnsResponseOutboundIndex_Accept, nil, nil
-	}
-
+func (s *Dns) ResponseSelect(qname string, qtype uint16, ips []netip.Addr, fromUpstream *Upstream) (upstreamIndex consts.DnsResponseOutboundIndex, upstream *Upstream, err error) {
 	// Prepare routing.
-	var qname string
-	var qtype uint16
-	var ips []netip.Addr
-	if len(msg.Question) == 0 {
-		qname = ""
-		qtype = 0
-	} else {
-		q := msg.Question[0]
-		qname = q.Name
-		qtype = q.Qtype
-		for _, ans := range msg.Answer {
-			var (
-				ip netip.Addr
-				ok bool
-			)
-			switch body := ans.(type) {
-			case *dnsmessage.A:
-				ip, ok = netip.AddrFromSlice(body.A)
-			case *dnsmessage.AAAA:
-				ip, ok = netip.AddrFromSlice(body.AAAA)
-			}
-			if !ok {
-				continue
-			}
-			ips = append(ips, ip)
-		}
-	}
-
 	s.upstream2IndexMu.Lock()
 	from := s.upstream2Index[fromUpstream]
 	s.upstream2IndexMu.Unlock()

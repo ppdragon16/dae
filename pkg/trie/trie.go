@@ -215,7 +215,7 @@ func NewTrie(keys []string, chars *ValidChars) (*Trie, error) {
 	return ss, nil
 }
 
-// HasPrefix query to accept [16]byte to match IP Addr, for zero-alloc.
+// HasPrefixAddr query to accept [16]byte to match IP Addr, for zero-alloc.
 func (ss *Trie) HasPrefixAddr(ip [16]byte) bool {
 	nodeId, bmIdx := 0, 0
 
@@ -243,6 +243,13 @@ func (ss *Trie) HasPrefixAddr(ip [16]byte) bool {
 	}
 
 	return (ss.leaves[nodeId>>6] & (1 << uint(nodeId&63))) != 0
+}
+
+// HasPrefixAddr query to accept [6]byte to match mac address, for zero-alloc.
+func (ss *Trie) HasPrefixMac(mac [6]byte) bool {
+	var addr16 [16]byte
+	copy(addr16[10:], mac[:])
+	return ss.HasPrefixAddr(addr16)
 }
 
 // HasPrefix query for a word and return whether a prefix of the word is in the Trie.
