@@ -350,7 +350,14 @@ func (af *Anyfrom) flushLocked() {
 	}
 
 	// Free data buffers.
-	for i := range n {
+	af.releaseSendBuf()
+}
+
+// releaseSendBuf returns any pending batched data buffers to the pool without
+// sending them. It is used on Close, where flushing over the wire is pointless
+// and the pooled buffers would otherwise be leaked. Must hold af.sBuf.mu.
+func (af *Anyfrom) releaseSendBuf() {
+	for i := range af.sBuf.count {
 		pool.PutBuffer(af.sBuf.reqs[i].data)
 		af.sBuf.reqs[i].data = nil
 	}
@@ -366,6 +373,9 @@ func (af *Anyfrom) Close() error {
 		af.deadlineTimer.Stop()
 		af.deadlineTimer = nil
 	}
+	af.sBuf.mu.Lock()
+	af.releaseSendBuf()
+	af.sBuf.mu.Unlock()
 	return af.UDPConn.Close()
 }
 
