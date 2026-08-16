@@ -47,6 +47,7 @@ import (
 
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/meek"
+	"github.com/daeuniverse/quic-go"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -856,6 +857,10 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(params) > 0 {
+			if params[0] == "quic" {
+				showQuicBufferStats(writer)
+				return
+			}
 			showBufferTraces(writer, params[0])
 			return
 		}
@@ -922,6 +927,48 @@ func formatBytes(n int) string {
 	default:
 		return fmt.Sprintf("%dB", n)
 	}
+}
+
+// showQuicBufferStats writes the quic-go GC-surviving buffer pool counters:
+// normal packet buffers, large (GSO) packet buffers, and pooled addresses.
+func showQuicBufferStats(w io.Writer) {
+	buffer, large, addr := quic.PacketBufferPoolStats()
+	pools := []struct {
+		name string
+		s    quic.PoolStats
+	}{
+		{"buffer", buffer},
+		{"large", large},
+		{"addr", addr},
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tGETS\tPUTS\tRING\tPOOL\tALLOC\tDEMOTE\tHIT%\tRING%\tOCC/MAX")
+	var (
+		totalGets, totalPuts, totalRing, totalPool, totalAlloc, totalDemoted uint64
+		totalOcc, totalBytes                                                 int
+	)
+	for _, p := range pools {
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d/%d\n",
+			p.name, p.s.Gets, p.s.Puts, p.s.RingHit, p.s.PoolHit, p.s.Alloc, p.s.Demoted,
+			p.s.HitRate()*100, p.s.RingHitRate()*100, p.s.Occupancy, p.s.Max)
+		totalGets += p.s.Gets
+		totalPuts += p.s.Puts
+		totalRing += p.s.RingHit
+		totalPool += p.s.PoolHit
+		totalAlloc += p.s.Alloc
+		totalDemoted += p.s.Demoted
+		totalOcc += p.s.Occupancy
+		totalBytes += p.s.Occupancy * p.s.ByteSize
+	}
+	var totalHit, totalRingRate float64
+	if totalGets > 0 {
+		totalHit = float64(totalGets-totalAlloc) / float64(totalGets) * 100
+		totalRingRate = float64(totalRing) / float64(totalGets) * 100
+	}
+	fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d\n",
+		totalGets, totalPuts, totalRing, totalPool, totalAlloc, totalDemoted, totalHit, totalRingRate, totalOcc)
+	tw.Flush()
+	fmt.Fprintf(w, "retained: %d buffers, %s\n", totalOcc, formatBytes(totalBytes))
 }
 
 // parseClassSize parses a compact class size like "1K", "4K", "512B" or "256"
