@@ -40,7 +40,21 @@ else
 	VERSION ?= next-ppdn-$(date).r$(count).$(commit)
 endif
 
-BUILD_ARGS := -trimpath -pgo=auto -ldflags "-s -w -X github.com/daeuniverse/dae/cmd.Version=$(VERSION) -X github.com/daeuniverse/dae/common/consts.MaxMatchSetLen_=$(MAX_MATCH_SET_LEN)" $(BUILD_ARGS)
+# Version / build-time ldflags (always present).
+VERSION_LDFLAGS := -X github.com/daeuniverse/dae/cmd.Version=$(VERSION) -X github.com/daeuniverse/dae/common/consts.MaxMatchSetLen_=$(MAX_MATCH_SET_LEN)
+
+# By default strip the Go symbol table + DWARF and trim source paths for a
+# smaller, reproducible binary. With NOSTRIP=y keep both so `go tool pprof`
+# can annotate profiles with source file/line info (e.g. `pprof -list`).
+ifeq ($(strip $(NOSTRIP)),y)
+	TRIM_PATH_FLAG :=
+	GO_LDFLAGS := $(VERSION_LDFLAGS)
+else
+	TRIM_PATH_FLAG := -trimpath
+	GO_LDFLAGS := -s -w $(VERSION_LDFLAGS)
+endif
+
+BUILD_ARGS := $(TRIM_PATH_FLAG) -pgo=auto -ldflags "$(GO_LDFLAGS)" $(BUILD_ARGS)
 
 .PHONY: clean-ebpf ebpf dae submodule submodules
 
