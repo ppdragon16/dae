@@ -942,17 +942,18 @@ func showQuicBufferStats(w io.Writer) {
 		{"addr", addr},
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tGETS\tPUTS\tRING\tPOOL\tALLOC\tDEMOTE\tHIT%\tRING%\tOCC/MAX")
+	fmt.Fprintln(tw, "NAME\tGETS\tPUTS\tINFLIGHT\tRING\tPOOL\tALLOC\tDEMOTE\tHIT%\tRING%\tOCC/MAX")
 	var (
-		totalGets, totalPuts, totalRing, totalPool, totalAlloc, totalDemoted uint64
-		totalOcc, totalBytes                                                 int
+		totalGets, totalPuts, totalInFlight, totalRing, totalPool, totalAlloc, totalDemoted uint64
+		totalOcc, totalBytes                                                                int
 	)
 	for _, p := range pools {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d/%d\n",
-			p.name, p.s.Gets, p.s.Puts, p.s.RingHit, p.s.PoolHit, p.s.Alloc, p.s.Demoted,
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d/%d\n",
+			p.name, p.s.Gets, p.s.Puts, p.s.InFlight(), p.s.RingHit, p.s.PoolHit, p.s.Alloc, p.s.Demoted,
 			p.s.HitRate()*100, p.s.RingHitRate()*100, p.s.Occupancy, p.s.Max)
 		totalGets += p.s.Gets
 		totalPuts += p.s.Puts
+		totalInFlight += p.s.InFlight()
 		totalRing += p.s.RingHit
 		totalPool += p.s.PoolHit
 		totalAlloc += p.s.Alloc
@@ -965,8 +966,8 @@ func showQuicBufferStats(w io.Writer) {
 		totalHit = float64(totalGets-totalAlloc) / float64(totalGets) * 100
 		totalRingRate = float64(totalRing) / float64(totalGets) * 100
 	}
-	fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d\n",
-		totalGets, totalPuts, totalRing, totalPool, totalAlloc, totalDemoted, totalHit, totalRingRate, totalOcc)
+	fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%d\n",
+		totalGets, totalPuts, totalInFlight, totalRing, totalPool, totalAlloc, totalDemoted, totalHit, totalRingRate, totalOcc)
 	tw.Flush()
 	fmt.Fprintf(w, "retained: %d buffers, %s\n", totalOcc, formatBytes(totalBytes))
 }
