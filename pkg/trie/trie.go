@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"sort"
 
-	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/bitlist"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -139,9 +138,20 @@ func NewTrieFromPrefixes(cidrs []netip.Prefix) (*Trie, error) {
 
 // NewTrie creates a new *Trie struct, from a slice of sorted strings.
 func NewTrie(keys []string, chars *ValidChars) (*Trie, error) {
-	// Check chars.
-	keys = common.Deduplicate(keys)
+	// Sort and deduplicate in place. Since the keys are sorted right after,
+	// deduplication is a single adjacent-element pass instead of building a
+	// map (which used to allocate O(n) buckets).
 	sort.Strings(keys)
+	n := 0
+	for _, k := range keys {
+		if n == 0 || keys[n-1] != k {
+			keys[n] = k
+			n++
+		}
+	}
+	keys = keys[:n]
+
+	// Check chars.
 	for _, key := range keys {
 		for _, c := range []byte(key) {
 			if !chars.IsValidChar(c) {
@@ -150,15 +160,36 @@ func NewTrie(keys []string, chars *ValidChars) (*Trie, error) {
 		}
 	}
 
-	ss := &Trie{
-		chars:  chars,
-		labels: bitlist.NewCompactBitList(bits.Len(uint(chars.Size()))),
+	// Pre-compute the number of trie nodes so the allocations below can be
+	// sized exactly. For sorted, deduplicated keys a plain trie has exactly
+	// 1 + Σ(len(key_i) - LCP(key_i, key_{i-1})) nodes.
+	numNodes := 1
+	for i := range keys {
+		l := len(keys[i])
+		if i > 0 {
+			prev := keys[i-1]
+			j := 0
+			for j < l && j < len(prev) && keys[i][j] == prev[j] {
+				j++
+			}
+			l -= j
+		}
+		numNodes += l
 	}
+
+	ss := &Trie{
+		chars:       chars,
+		labels:      bitlist.NewCompactBitList(bits.Len(uint(chars.Size()))),
+		leaves:      make([]uint64, 0, (numNodes+63)/64),
+		labelBitmap: make([]uint64, 0, (2*numNodes+63)/64),
+	}
+	ss.labels.Reserve(numNodes - 1)
 	lIdx := 0
 
 	type qElt struct{ s, e, col int }
 
-	queue := []qElt{{0, len(keys), 0}}
+	queue := make([]qElt, 0, numNodes)
+	queue = append(queue, qElt{0, len(keys), 0})
 
 	for i := 0; i < len(queue); i++ {
 		elt := queue[i]

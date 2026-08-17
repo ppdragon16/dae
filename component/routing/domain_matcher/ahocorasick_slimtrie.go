@@ -52,6 +52,18 @@ func (n *AhocorasickSlimtrie) AddSet(bitIndex int, patterns []string, typ consts
 	if n.err != nil {
 		return
 	}
+	// Pre-size the target slice to avoid repeated reallocation across the
+	// pattern loop below. Suffix domains expand to at most two trie patterns.
+	switch typ {
+	case consts.RoutingDomainKey_Full:
+		n.toBuildTrie[bitIndex] = growSlice(n.toBuildTrie[bitIndex], len(patterns))
+	case consts.RoutingDomainKey_Suffix:
+		n.toBuildTrie[bitIndex] = growSlice(n.toBuildTrie[bitIndex], 2*len(patterns))
+	case consts.RoutingDomainKey_Keyword:
+		n.toBuildAc[bitIndex] = growSlice(n.toBuildAc[bitIndex], len(patterns))
+	case consts.RoutingDomainKey_Regex:
+		n.regexp[bitIndex] = growSlice(n.regexp[bitIndex], len(patterns))
+	}
 nextPattern:
 	for _, d := range patterns {
 		switch typ {
@@ -265,4 +277,15 @@ func (n *AhocorasickSlimtrie) Build() (err error) {
 	n.toBuildAc = nil
 	n.toBuildTrie = nil
 	return nil
+}
+
+// growSlice ensures s has room for at least extra more elements, reallocating
+// and copying at most once when necessary, and returns the grown slice.
+func growSlice[T any](s []T, extra int) []T {
+	if cap(s)-len(s) >= extra {
+		return s
+	}
+	grown := make([]T, len(s), len(s)+extra)
+	copy(grown, s)
+	return grown
 }

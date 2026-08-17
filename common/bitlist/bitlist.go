@@ -29,6 +29,19 @@ func NewCompactBitList(unitBitSize int) *CompactBitList {
 	}
 }
 
+// Reserve pre-allocates the underlying buffer so that unitNum units can be
+// appended without further reallocation. It is a no-op for non-positive counts
+// and when the buffer already has enough space.
+func (m *CompactBitList) Reserve(unitNum int) {
+	if unitNum <= 0 {
+		return
+	}
+	need := (unitNum*m.unitBitSize + 15) / 16
+	if d := need - m.b.Len(); d > 0 {
+		m.b.Grow(d)
+	}
+}
+
 // Set function is not optimized yet.
 func (m *CompactBitList) Set(iUnit int, v uint64) {
 	if bits.Len64(v) > m.unitBitSize {

@@ -137,12 +137,13 @@ type DeduplicateParamsOptimizer struct {
 
 func deduplicateParams(list []*config_parser.Param) []*config_parser.Param {
 	res := make([]*config_parser.Param, 0, len(list))
-	m := make(map[string]struct{})
+	m := make(map[string]struct{}, len(list))
 	for _, v := range list {
-		if _, ok := m[v.String(true, false)]; ok {
+		s := v.String(true, false)
+		if _, ok := m[s]; ok {
 			continue
 		}
-		m[v.String(true, false)] = struct{}{}
+		m[s] = struct{}{}
 		res = append(res, v)
 	}
 	return res
