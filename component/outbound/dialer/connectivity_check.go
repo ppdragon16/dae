@@ -335,9 +335,20 @@ func (d *Dialer) startCheckTicker() {
 	// Sleep to avoid avalanche.
 	time.Sleep(time.Duration(fastrand.Int63n(int64(d.CheckInterval))))
 	d.tickerMu.Lock()
-	d.ticker = time.NewTicker(d.CheckInterval)
-	ticker := d.ticker
+	ticker := time.NewTicker(d.CheckInterval)
+	d.ticker = ticker
 	d.tickerMu.Unlock()
+	defer func() {
+		// We own this ticker: on every exit path it must be stopped and, if we
+		// still own the slot, cleared under the mutex so a later stopCheck does
+		// not try to stop a ticker that has already been stopped.
+		ticker.Stop()
+		d.tickerMu.Lock()
+		if d.ticker == ticker {
+			d.ticker = nil
+		}
+		d.tickerMu.Unlock()
+	}()
 	done := d.checkCtx.Done()
 	for {
 		select {
