@@ -35,6 +35,11 @@ type Sniffer struct {
 	// quicLocator is reused across SniffQuic calls to avoid allocating a new
 	// LinearLocator each time. It is Reset (not reallocated) on reuse.
 	quicLocator *quicutils.LinearLocator
+	// quicKeys caches the derived QUIC Initial keys (and their AES/GCM
+	// ciphers) for the connection's destination connection id, so repeated
+	// Initial packets of the same connection reuse them instead of
+	// re-deriving per packet.
+	quicKeys *quicutils.Keys
 }
 
 func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
@@ -201,6 +206,10 @@ func (s *Sniffer) Close() (err error) {
 	if s.buf != nil {
 		s.buf.Reset()
 		s.buf = nil
+	}
+	if s.quicKeys != nil {
+		s.quicKeys.Close()
+		s.quicKeys = nil
 	}
 	return nil
 }

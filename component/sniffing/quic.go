@@ -6,9 +6,11 @@
 package sniffing
 
 import (
+	"encoding/binary"
 	"errors"
 	"io/fs"
 
+	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/component/sniffing/internal/quicutils"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -41,7 +43,7 @@ func (s *Sniffer) SniffQuic() (d string, err error) {
 
 	// Consume as many consecutive QUIC blocks as we can find.
 	for len(nextBlock) > 0 {
-		s.quicCryptos, nextBlock, err = sniffQuicBlock(s.quicCryptos, nextBlock)
+		nextBlock, err = s.sniffQuicBlock(nextBlock)
 		if err != nil {
 			if errors.Is(err, fs.ErrClosed) {
 				return "", ErrNotFound
@@ -87,23 +89,23 @@ func (s *Sniffer) SniffQuic() (d string, err error) {
 	return sni, nil
 }
 
-func sniffQuicBlock(cryptos []*quicutils.CryptoFrameOffset, buf []byte) (new []*quicutils.CryptoFrameOffset, next []byte, err error) {
+func (s *Sniffer) sniffQuicBlock(buf []byte) (next []byte, err error) {
 	// QUIC: A UDP-Based Multiplexed and Secure Transport
 	// https://datatracker.ietf.org/doc/html/rfc9000#name-initial-packet
 	const dstConnIdPos = 6
 	boundary := dstConnIdPos
 	if len(buf) < boundary {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	// Check flag.
 	// Long header: 4 bits masked
 	// High 4 bits are not protected, so we can access QuicFlag_HeaderForm and QuicFlag_LongPacketType without decryption.
 	protectedFlag := buf[0]
 	if ((protectedFlag >> QuicFlag_HeaderForm) & 0b11) != QuicFlag_HeaderForm_LongHeader {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	if ((protectedFlag >> QuicFlag_LongPacketType) & 0b11) != QuicFlag_LongPacketType_Initial {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 
 	// Skip version.
@@ -111,37 +113,37 @@ func sniffQuicBlock(cryptos []*quicutils.CryptoFrameOffset, buf []byte) (new []*
 	destConnIdLength := int(buf[boundary-1])
 	boundary += destConnIdLength + 1 // +1 because next field has 1B length
 	if len(buf) < boundary {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	destConnId := buf[dstConnIdPos : dstConnIdPos+destConnIdLength]
 
 	srcConnIdLength := int(buf[boundary-1])
 	boundary += srcConnIdLength + quicutils.MaxVarintLen64 // The next fields may have quic.MaxVarintLen64 bytes length
 	if len(buf) < boundary {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	tokenLength, n, err := quicutils.BigEndianUvarint(buf[boundary-quicutils.MaxVarintLen64:])
 	if err != nil {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	boundary = boundary - quicutils.MaxVarintLen64 + n      // Correct boundary.
 	boundary += int(tokenLength) + quicutils.MaxVarintLen64 // Next fields may have quic.MaxVarintLen64 bytes length
 	if len(buf) < boundary {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	// https://datatracker.ietf.org/doc/html/rfc9000#name-variable-length-integer-enc
 	length, n, err := quicutils.BigEndianUvarint(buf[boundary-quicutils.MaxVarintLen64:])
 	if err != nil {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	boundary = boundary - quicutils.MaxVarintLen64 + n // Correct boundary.
 	blockEnd := boundary + int(length)
 	if len(buf) < blockEnd {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	boundary += quicutils.MaxPacketNumberLength
 	if len(buf) < boundary {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
 	}
 	header := buf[:boundary]
 	// Decrypt protected Packets.
@@ -157,18 +159,38 @@ func sniffQuicBlock(cryptos []*quicutils.CryptoFrameOffset, buf []byte) (new []*
 		header[0] = firstByte
 		copy(header[boundary-quicutils.MaxPacketNumberLength:], rawPacketNumber)
 	}()
-	plaintext, err := quicutils.DecryptQuic_(header, blockEnd, destConnId)
+
+	// Derive or reuse the keys for this destination connection id. Repeated
+	// Initial packets of the same connection share the same DCID (and thus the
+	// same keys), so caching them avoids re-running HKDF and rebuilding the
+	// AES/GCM ciphers for every packet.
+	version, err := quicutils.ParseVersion(binary.BigEndian.Uint32(header[1:]))
 	if err != nil {
-		return cryptos, nil, ErrNotApplicable
+		return nil, ErrNotApplicable
+	}
+	if !s.quicKeys.Matches(destConnId, version) {
+		if s.quicKeys != nil {
+			s.quicKeys.Close()
+		}
+		s.quicKeys, err = quicutils.NewKeys(destConnId, version, common.NewGcm)
+		if err != nil {
+			s.quicKeys = nil
+			return nil, ErrNotApplicable
+		}
+	}
+
+	plaintext, err := quicutils.DecryptQuic_(s.quicKeys, header, blockEnd)
+	if err != nil {
+		return nil, ErrNotApplicable
 	}
 	// Now, we confirm it is exact a quic frame.
 	// After here, we should not return NotApplicableError.
 	// And we should return nextFrame.
-	if new, err = quicutils.ReassembleCryptos(cryptos, plaintext); err != nil {
+	if s.quicCryptos, err = quicutils.ReassembleCryptos(s.quicCryptos, plaintext); err != nil {
 		if errors.Is(err, fs.ErrClosed) {
-			return cryptos, nil, err
+			return nil, err
 		}
-		return cryptos, buf[blockEnd:], ErrNotApplicable
+		return buf[blockEnd:], ErrNotApplicable
 	}
-	return new, buf[blockEnd:], nil
+	return buf[blockEnd:], nil
 }
