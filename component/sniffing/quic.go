@@ -183,6 +183,9 @@ func (s *Sniffer) sniffQuicBlock(buf []byte) (next []byte, err error) {
 	if err != nil {
 		return nil, ErrNotApplicable
 	}
+	// The crypto frames slice the plaintext buffer, so it can only be released
+	// when the sniffer closes. Track it here for Close to return to the pool.
+	s.plaintextBufs = append(s.plaintextBufs, plaintext)
 	// Now, we confirm it is exact a quic frame.
 	// After here, we should not return NotApplicableError.
 	// And we should return nextFrame.

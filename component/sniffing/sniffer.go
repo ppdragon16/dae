@@ -40,6 +40,10 @@ type Sniffer struct {
 	// Initial packets of the same connection reuse them instead of
 	// re-deriving per packet.
 	quicKeys *quicutils.Keys
+	// plaintextBufs tracks the pooled plaintext buffers returned by
+	// PayloadDecrypt. The crypto frames slice these buffers, so they must stay
+	// alive until the sniffer is done and are released in Close.
+	plaintextBufs [][]byte
 }
 
 func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
@@ -211,5 +215,9 @@ func (s *Sniffer) Close() (err error) {
 		s.quicKeys.Close()
 		s.quicKeys = nil
 	}
+	for _, b := range s.plaintextBufs {
+		pool.PutBuffer(b)
+	}
+	s.plaintextBufs = nil
 	return nil
 }

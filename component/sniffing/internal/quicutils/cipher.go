@@ -128,7 +128,7 @@ func (k *Keys) PayloadDecrypt(ciphertext []byte, packetNumber []byte, header []b
 	for i := range packetNumber {
 		k.nonce[len(k.nonce)-len(packetNumber)+i] ^= packetNumber[i]
 	}
-	plaintext = make([]byte, len(ciphertext)-k.aead.Overhead())
+	plaintext = pool.GetBuffer(len(ciphertext) - k.aead.Overhead())
 	plaintext, err = k.aead.Open(plaintext[:0], k.nonce, ciphertext, header)
 	if err != nil {
 		return nil, err
