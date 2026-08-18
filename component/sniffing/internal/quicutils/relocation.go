@@ -168,23 +168,51 @@ func (l *LinearLocator) Reset(o []*CryptoFrameOffset) {
 		l.o = nil
 		return
 	}
-	l.length = o[len(o)-1].UpperAppOffset + len(o[len(o)-1].Data)
+	// The reassembled crypto spans up to the maximum frame end, not just the
+	// last frame's end: overlapping or contained frames (e.g. retransmitted
+	// CRYPTO) can otherwise make the locator report a too-small length and
+	// truncate the reassembled ClientHello.
+	length := 0
+	for _, frame := range o {
+		if end := frame.UpperAppOffset + len(frame.Data); end > length {
+			length = end
+		}
+	}
+	l.length = length
 	l.baseData = o[0].Data
 	l.baseStart = o[0].UpperAppOffset
 	l.baseEnd = o[0].UpperAppOffset + len(o[0].Data)
 	l.o = o
 }
 
+// advance moves to the next frame that extends coverage beyond baseEnd,
+// skipping contained/overlapping/retransmitted frames whose data range is
+// already covered. It reports whether the new frame is contiguous with the
+// previous coverage (no gap).
+func (l *LinearLocator) advance() (contiguous bool, err error) {
+	previousEnd := l.baseEnd
+	for l.iOuter+1 < len(l.o) {
+		next := l.o[l.iOuter+1]
+		nextStart := next.UpperAppOffset
+		nextEnd := nextStart + len(next.Data)
+		l.iOuter++
+		if nextEnd <= l.baseEnd {
+			continue
+		}
+		l.baseData = next.Data
+		l.baseStart = nextStart
+		l.baseEnd = nextEnd
+		return nextStart <= previousEnd, nil
+	}
+	return false, ErrMissingCrypto
+}
+
 func (l *LinearLocator) relocate(i int) error {
 	// Relocate ll.iOuter.
 	for i >= l.baseEnd {
-		if l.iOuter+1 >= len(l.o) {
-			return ErrMissingCrypto
+		if _, err := l.advance(); err != nil {
+			return err
 		}
-		l.iOuter++
-		l.baseData = l.o[l.iOuter].Data
-		l.baseStart = l.o[l.iOuter].UpperAppOffset
-		l.baseEnd = l.baseStart + len(l.baseData)
 	}
 	if i < l.baseStart {
 		return ErrMissingCrypto
@@ -220,20 +248,12 @@ func (l *LinearLocator) Range(i, j int) ([]byte, error) {
 		n := copy(b[k:], l.baseData[i-l.baseStart:])
 		k += n
 		i += n
-		if l.iOuter+1 >= len(l.o) {
-			return nil, ErrMissingCrypto
-		}
-		l.iOuter++
-		// Advance to the next frame, then use relocate to skip past
-		// any overlapping/duplicate frames whose data range is already
-		// covered.  (Retransmitted QUIC Initials produce CRYPTO frames
-		// with the same offsets that the old contiguity check
-		// incorrectly treated as gaps.)
-		l.baseData = l.o[l.iOuter].Data
-		l.baseStart = l.o[l.iOuter].UpperAppOffset
-		l.baseEnd = l.baseStart + len(l.baseData)
-		if err := l.relocate(i); err != nil {
+		contiguous, err := l.advance()
+		if err != nil {
 			return nil, err
+		}
+		if !contiguous {
+			return nil, ErrMissingCrypto
 		}
 	}
 	copy(b[k:], l.baseData[i-l.baseStart:j-l.baseStart+1])
