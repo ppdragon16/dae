@@ -52,7 +52,10 @@ type janitorScratch[K, V any] struct {
 
 func recycleScratchDelete[S ~[]E, E any](s *S) {
 	if cap(*s) > janitorDeleteRetainMax {
-		*s = make(S, 0, janitorDeleteInitCap)
+		// Keep half the peak capacity instead of resetting to
+		// janitorDeleteInitCap: under heavy load a subsequent cleanup round
+		// would otherwise re-grow from 32, reallocating on every tick.
+		*s = make(S, 0, cap(*s)/2)
 	} else {
 		*s = (*s)[:0]
 	}
