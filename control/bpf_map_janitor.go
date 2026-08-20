@@ -39,7 +39,6 @@ const (
 
 	janitorBatchLookupSize = 64
 	janitorDeleteInitCap   = 32
-	janitorDeleteRetainMax = 256
 )
 
 // ---- scratch helpers ----
@@ -51,14 +50,11 @@ type janitorScratch[K, V any] struct {
 }
 
 func recycleScratchDelete[S ~[]E, E any](s *S) {
-	if cap(*s) > janitorDeleteRetainMax {
-		// Keep half the peak capacity instead of resetting to
-		// janitorDeleteInitCap: under heavy load a subsequent cleanup round
-		// would otherwise re-grow from 32, reallocating on every tick.
-		*s = make(S, 0, cap(*s)/2)
-	} else {
-		*s = (*s)[:0]
-	}
+	// Reuse the backing array across rounds. Shrinking here — even to half the
+	// peak — just re-grows on the next heavy round, reallocating every tick.
+	// The retained peak is bounded by the number of entries expired in a single
+	// round, so keeping it is cheap.
+	*s = (*s)[:0]
 }
 
 // ---- janitor ----
