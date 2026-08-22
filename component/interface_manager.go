@@ -40,24 +40,39 @@ func NewInterfaceManager() *InterfaceManager {
 
 	ch := make(chan netlink.LinkUpdate)
 	done := make(chan struct{})
+	subscribed := true
 	if e := netlink.LinkSubscribeWithOptions(ch, done, netlink.LinkSubscribeOptions{
 		ErrorCallback: func(err error) {
 			log.Debug("LinkSubscribe:", err)
 		},
 		ListExisting: true,
 	}); e != nil {
+		subscribed = false
 		log.Errorf("Failed to subscribe to link updates: %v", e)
 	}
 
-	go mgr.monitor(ch, done)
+	go mgr.monitor(ch, done, subscribed)
 	return mgr
 }
 
-func (m *InterfaceManager) monitor(ch <-chan netlink.LinkUpdate, done chan struct{}) {
+func (m *InterfaceManager) monitor(ch <-chan netlink.LinkUpdate, done chan struct{}, subscribed bool) {
 	for {
 		select {
 		case <-m.closed.Done():
 			close(done)
+			// A successful subscription needs a receiver after this loop
+			// leaves: closing done makes the library close its netlink socket,
+			// but a subscription goroutine already blocked sending an update
+			// (link teardown itself bursts RTM_NEWLINK/DELLINK events) never
+			// regains one and leaks. The drain ends when the socket close
+			// unblocks the sender and the library closes ch. A failed
+			// subscription has no sender, so nobody would ever close ch.
+			if subscribed {
+				go func() {
+					for range ch {
+					}
+				}()
+			}
 			return
 		case update := <-ch:
 			ifName := update.Link.Attrs().Name
