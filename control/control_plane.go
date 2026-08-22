@@ -390,10 +390,18 @@ func NewControlPlane(
 		}
 	}
 
-	// Collect all in-use dialers from groups for shutdown cleanup.
+	// Collect all in-use dialers from groups for shutdown cleanup. A dialer may
+	// belong to multiple groups (shared via DialerSet memoization), so dedupe to
+	// avoid closing the same dialer more than once at shutdown or update-sub.
 	inuseDialers := make([]*dialer.Dialer, 0)
+	seenDialers := make(map[*dialer.Dialer]bool)
 	for _, g := range outbounds {
-		inuseDialers = append(inuseDialers, g.Dialers...)
+		for _, d := range g.Dialers {
+			if !seenDialers[d] {
+				seenDialers[d] = true
+				inuseDialers = append(inuseDialers, d)
+			}
+		}
 	}
 
 	/// Routing.
@@ -1738,6 +1746,9 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	newDialerSet := outbound.NewDialerSetFromLinks(option, newTagToNodeList)
 
 	// Phase 3: For each user-defined outbound group, re-filter and swap dialers.
+	// discardedDialers accumulates dialers the swap recycled away so they can be
+	// closed in Phase 4 (otherwise their underlying connections leak).
+	var discardedDialers []*dialer.Dialer
 
 	groupCfgIdx := 0
 	for i := int(consts.OutboundUserDefinedMin); i < len(c.outbounds); i++ {
@@ -1788,8 +1799,10 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 			log.Infoln("\t<Empty>")
 		}
 
-		// Hot-swap dialers in the group.
-		group.ReplaceDialers(newDialers, newAnnos)
+		// Hot-swap dialers in the group. ReplaceDialers returns the new dialers
+		// it recycled away (superseded by the old instance, which is kept to
+		// preserve established connections); collect them for cleanup.
+		discardedDialers = append(discardedDialers, group.ReplaceDialers(newDialers, newAnnos)...)
 	}
 
 	// Phase 4: Cleanup.
@@ -1800,9 +1813,20 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 			newInuse[d] = true
 		}
 	}
-	// Close orphaned old dialers (in c.inuseDialers but not in any group).
+	// Close dialers no longer referenced by any group. This covers both old
+	// dialers carried over from the previous generation and fresh dialers this
+	// update built but which ReplaceDialers recycled away. A shared dialer may
+	// be reported once per group, so dedupe to avoid double Close/Disconnect.
+	closedDialers := make(map[*dialer.Dialer]bool)
 	for _, d := range c.inuseDialers {
-		if !newInuse[d] {
+		if !newInuse[d] && !closedDialers[d] {
+			closedDialers[d] = true
+			d.Close()
+		}
+	}
+	for _, d := range discardedDialers {
+		if !newInuse[d] && !closedDialers[d] {
+			closedDialers[d] = true
 			d.Close()
 		}
 	}

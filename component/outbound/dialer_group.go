@@ -84,10 +84,15 @@ func (g *DialerGroup) Close() error {
 // Dialers are matched by Property: old dialers whose Property matches a new
 // dialer are recycled; the rest are unregistered. New dialers with no Property
 // match are registered in their place.
+//
+// It returns the new dialers that were recycled away (i.e. discarded in favour
+// of the old instance). These are no longer referenced by this group, so the
+// caller is responsible for closing them to avoid leaking their underlying
+// connections.
 func (g *DialerGroup) ReplaceDialers(
 	newDialers []*dialer.Dialer,
 	newAnnotations []*dialer.Annotation,
-) {
+) (discarded []*dialer.Dialer) {
 	if len(newDialers) != len(newAnnotations) {
 		panic(fmt.Sprintf("unmatched annotations length: %v dialers and %v annotations", len(newDialers), len(newAnnotations)))
 	}
@@ -118,6 +123,9 @@ func (g *DialerGroup) ReplaceDialers(
 			finalDialers = append(finalDialers, oldD)
 			finalAnnos = append(finalAnnos, newAnnotations[j])
 			oldKept[oldD] = true
+			// newD is superseded by the recycled old dialer; report it so the
+			// caller can close it.
+			discarded = append(discarded, newD)
 		} else {
 			finalDialers = append(finalDialers, newD)
 			finalAnnos = append(finalAnnos, newAnnotations[j])
@@ -151,6 +159,8 @@ func (g *DialerGroup) ReplaceDialers(
 	for _, d := range finalDialers {
 		g.NotifyStatusChange(d)
 	}
+
+	return discarded
 }
 
 func (g *DialerGroup) GetAnnotation(d *dialer.Dialer) *dialer.Annotation {

@@ -27,6 +27,10 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// Latency-based selectors dereference the global Metrics gauges in
+	// logCheckLatency, so initialize them once for the whole package.
+	// InitMetrics is idempotent, making repeated calls safe.
+	common.InitMetrics()
 	m.Run()
 }
 
