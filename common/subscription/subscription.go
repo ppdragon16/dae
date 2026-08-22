@@ -207,6 +207,8 @@ func ResolveSubscription(client *http.Client, subscriptionDir string, subscripti
 			if err != nil {
 				return "", nil, err
 			}
+			// Reading from the persisted cache: do not re-persist it below.
+			persistToFile = false
 			goto resolve
 		}
 
@@ -218,6 +220,28 @@ func ResolveSubscription(client *http.Client, subscriptionDir string, subscripti
 		return "", nil, err
 	}
 
+resolve:
+	// Resolve nodes BEFORE touching the persisted cache. A subscription server
+	// that is broken / returns garbage / comes back empty must NOT overwrite a
+	// previously-good cached subscription: the cached nodes may still be alive
+	// and forwarding fine, so clobbering persist.d/<tag>.sub would cut proxied
+	// traffic until the next successful fetch.
+	if nodes, err = ResolveSubscriptionAsSIP008(b); err == nil {
+		log.Debugln("Resolve as sip008")
+		if len(nodes) == 0 {
+			return "", nil, fmt.Errorf("subscription resolved to 0 nodes")
+		}
+	} else {
+		log.Traceln(err)
+		log.Debugln("Resolve as base64")
+		nodes = ResolveSubscriptionAsBase64(b)
+		if len(nodes) == 0 {
+			return "", nil, fmt.Errorf("subscription resolved to 0 nodes")
+		}
+	}
+
+	// Only now, with a non-empty node list in hand, is it safe to persist the
+	// fetched payload over the previous cached copy.
 	if persistToFile {
 		path := filepath.Join(subscriptionDir, "persist.d")
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -239,14 +263,5 @@ func ResolveSubscription(client *http.Client, subscriptionDir string, subscripti
 			return "", nil, err
 		}
 	}
-resolve:
-	if nodes, err = ResolveSubscriptionAsSIP008(b); err == nil {
-		log.Debugln("Resolve as sip008")
-		return tag, nodes, nil
-	} else {
-		log.Traceln(err)
-	}
-	nodes = ResolveSubscriptionAsBase64(b)
-	log.Debugln("Resolve as base64")
 	return tag, nodes, nil
 }
