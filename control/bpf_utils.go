@@ -18,7 +18,6 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/btf"
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
@@ -240,7 +239,7 @@ func loadBpfObjectsWithConstants(obj interface{}, opts *ebpf.CollectionOptions, 
 	if err != nil {
 		return err
 	}
-	if err := spec.RewriteConstants(constants); err != nil {
+	if err := internal.RewriteConstants(spec, constants); err != nil {
 		return err
 	}
 	return spec.LoadAndAssign(obj, opts)
@@ -327,9 +326,6 @@ retryLoadBpf:
 			return fmt.Errorf("init dae_ifindex_map: %w", err)
 		}
 	}
-
-	// Free BTF globa cache (~6-8MB). CO-RE won't be needed after loading.
-	btf.FlushKernelSpec()
 
 	return nil
 }
