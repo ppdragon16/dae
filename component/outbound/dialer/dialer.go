@@ -39,8 +39,12 @@ type Dialer struct {
 	needAliveState bool
 	alive          atomic.Bool
 	supported      atomic.Uint32
-	Latencies10    map[DialerGroup]*LatenciesN
-	MovingAverage  map[DialerGroup]time.Duration
+	// noIpv6 is set by the initial connectivity check and marks a dialer
+	// that cannot proxy IPv6 traffic (neither tcp6 nor udp6 supported).
+	// DNS AAAA requests are rejected before being forwarded through it.
+	noIpv6        atomic.Bool
+	Latencies10   map[DialerGroup]*LatenciesN
+	MovingAverage map[DialerGroup]time.Duration
 
 	mu                     sync.Mutex
 	registeredDialerGroups map[DialerGroup]int
@@ -121,6 +125,12 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 
 func (d *Dialer) NeedAliveState() bool {
 	return d.needAliveState
+}
+
+// NoIpv6 reports whether this dialer is known to be unable to proxy IPv6
+// traffic, as determined by the initial connectivity check.
+func (d *Dialer) NoIpv6() bool {
+	return d.noIpv6.Load()
 }
 
 func (d *Dialer) Clone() *Dialer {

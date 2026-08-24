@@ -459,6 +459,12 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 		})
 	}
 	wg.Wait()
+	// A dialer that fails both IPv6 checks cannot proxy IPv6 traffic at all.
+	// Mark it so DNS AAAA requests through it are rejected, keeping clients
+	// on IPv4 instead of routing IPv6 to a different (IPv6-capable) node.
+	d.noIpv6.Store(
+		!d.Supported(common.NetworkTypeToIndex(common.NETWORK_TCP6)) &&
+			!d.Supported(common.NetworkTypeToIndex(common.NETWORK_UDP6)))
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
 		if ok := d.Supported(i); ok {

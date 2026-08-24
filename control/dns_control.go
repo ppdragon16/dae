@@ -468,6 +468,27 @@ Dial:
 		if err = c.bestDialerChooser(req, upstream, dialArgument); err != nil {
 			return err
 		}
+		// Reject AAAA queries before forwarding when the selected dialer
+		// cannot proxy IPv6 (determined by the initial connectivity check).
+		// We build a fresh response buffer instead of mutating `data` in
+		// place because the race path shares `data` across goroutines.
+		if queryInfo.qtype == dnsmessage.TypeAAAA &&
+			dialArgument.Dialer != nil && dialArgument.Dialer.NoIpv6() {
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"qname":    queryInfo.qname,
+					"dialer":   dialArgument.Dialer.Name,
+					"upstream": upstream.String(),
+				}).Debugln("Reject AAAA query: dialer cannot proxy IPv6")
+			}
+			respData := pool.GetBuffer(len(data))
+			copy(respData, data)
+			c.reject(respData)
+			dnsResp.respData = respData
+			dnsResp.fromPool = true
+			dnsResp.isNew = false
+			return nil
+		}
 		if err = c.dialSend(data, upstream, dialArgument, queryInfo, dnsResp); err != nil {
 			isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
 			if !isNetError || isClosed || !dnsResponse(dnsResp.respData) || (!isTimeout && dialArgument.Dialer.NeedAliveState()) {
