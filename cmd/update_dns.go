@@ -61,6 +61,7 @@ var (
 			time.Sleep(500 * time.Millisecond)
 			code, _, _ = readSignalProgressFile()
 			if code == consts.UpdateDnsSend {
+				resetSignalProgressFile()
 				fmt.Println("OK")
 				return
 			}
@@ -69,6 +70,7 @@ var (
 				time.Sleep(200 * time.Millisecond)
 				code, content, err := readSignalProgressFile()
 				if err != nil {
+					resetSignalProgressFile()
 					fmt.Println("OK")
 					return
 				}

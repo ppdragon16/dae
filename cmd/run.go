@@ -44,7 +44,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
+// These are variables (not constants) so tests can redirect them to a
+// temporary directory without touching /var/run.
+var (
 	PidFilePath            = "/var/run/dae.pid"
 	SignalProgressFilePath = "/var/run/dae.progress"
 )

@@ -79,6 +79,7 @@ var (
 				}
 			}
 		fallback:
+			resetSignalProgressFile()
 			fmt.Println("OK")
 		},
 	}

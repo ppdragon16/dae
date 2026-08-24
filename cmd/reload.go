@@ -32,13 +32,24 @@ func readSignalProgressFile() (code byte, content string, err error) {
 	return code, content, nil
 }
 
+// resetSignalProgressFile clears any stale in-progress marker left in the
+// signal progress file. The reload/update commands write a *Send code before
+// signalling the daemon; if the running daemon does not process the signal
+// (e.g. an older build that ignores SIGHUP), that *Send code is never
+// overwritten and would make every subsequent command report "another
+// operation is in progress". Reset to ReloadDone (the idle state the daemon
+// itself writes on startup) so the marker does not block future operations.
+func resetSignalProgressFile() {
+	_ = os.WriteFile(SignalProgressFilePath, []byte{consts.ReloadDone}, 0644)
+}
+
 var (
 	abort     bool
 	reloadCmd = &cobra.Command{
 		Use:   "reload [pid]",
 		Short: "To reload config file without interrupt connections.",
 		Run: func(cmd *cobra.Command, args []string) {
-            internal.AutoSu()
+			internal.AutoSu()
 			if len(args) == 0 {
 				_pid, err := os.ReadFile(PidFilePath)
 				if err != nil {
@@ -60,9 +71,9 @@ var (
 			// Read the first line of SignalProgressFilePath.
 			code, _, err := readSignalProgressFile()
 			if err == nil && code != consts.ReloadDone && code != consts.ReloadError &&
-			code != consts.UpdateSubDone && code != consts.UpdateSubError &&
-			code != consts.UpdateDnsDone && code != consts.UpdateDnsError &&
-			code != consts.UpdateRoutingDone && code != consts.UpdateRoutingError {
+				code != consts.UpdateSubDone && code != consts.UpdateSubError &&
+				code != consts.UpdateDnsDone && code != consts.UpdateDnsError &&
+				code != consts.UpdateRoutingDone && code != consts.UpdateRoutingError {
 				// In progress.
 				fmt.Printf("%v shows another reload operation is in progress.\n", SignalProgressFilePath)
 				return
@@ -94,6 +105,7 @@ var (
 				}
 			}
 		fallback:
+			resetSignalProgressFile()
 			fmt.Println("OK")
 		},
 	}
