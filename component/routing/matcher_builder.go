@@ -21,6 +21,17 @@ type DomainSet struct {
 	Domains   []string
 }
 
+// MaxRuleIndex returns the highest RuleIndex among domainSets, or -1 if empty.
+func MaxRuleIndex(domainSets []DomainSet) int {
+	max := -1
+	for _, ds := range domainSets {
+		if ds.RuleIndex > max {
+			max = ds.RuleIndex
+		}
+	}
+	return max
+}
+
 type Outbound struct {
 	Name string
 	Mark uint32

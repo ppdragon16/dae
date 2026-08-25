@@ -211,8 +211,12 @@ func (b *RequestMatcherBuilder) addFallback(fallbackOutbound config.FunctionOrSt
 
 func (b *RequestMatcherBuilder) Build() (matcher *RequestMatcher, err error) {
 	var m RequestMatcher
-	// Build domainMatcher
-	m.domainMatcher = domain_matcher.NewAhocorasickSlimtrie(consts.MaxMatchSetLen)
+	// Build domainMatcher, sized to the actual rule count.
+	bitLength := routing.MaxRuleIndex(b.simulatedDomainSet) + 1
+	if bitLength <= 0 {
+		bitLength = 1
+	}
+	m.domainMatcher = domain_matcher.NewAhocorasickSlimtrie(bitLength)
 	for _, domains := range b.simulatedDomainSet {
 		m.domainMatcher.AddSet(domains.RuleIndex, domains.Domains, domains.Key)
 	}
