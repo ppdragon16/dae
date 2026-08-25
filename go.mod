@@ -41,7 +41,6 @@ require (
 	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
-	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/pprof v0.0.0-20260802141513-ef3492d7dac3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -101,11 +100,11 @@ require (
 
 //replace github.com/daeuniverse/outbound => ../outbound_ppdn
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls.19
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls.20
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
-replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-next.utls.6
+replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-next.utls.7
 
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
