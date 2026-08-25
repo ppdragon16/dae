@@ -13,15 +13,9 @@ import (
 	"time"
 
 	"github.com/daeuniverse/dae/cmd"
-	"github.com/daeuniverse/dae/common/json"
-	jsoniter "github.com/json-iterator/go"
-	"github.com/json-iterator/go/extra"
 )
 
 func main() {
-	jsoniter.RegisterTypeDecoder("bool", &json.FuzzyBoolDecoder{})
-	extra.RegisterFuzzyDecoders()
-
 	http.DefaultClient.Timeout = 30 * time.Second
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
