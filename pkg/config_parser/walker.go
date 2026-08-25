@@ -13,8 +13,7 @@ import (
 	"strings"
 
 	"github.com/antlr/antlr4/runtime/Go/antlr/v4"
-
-	"github.com/daeuniverse/dae-config-dist/go/dae_config"
+	"github.com/daeuniverse/dae/config_dist"
 	log "github.com/sirupsen/logrus"
 )
 

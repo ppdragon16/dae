@@ -6,7 +6,6 @@ require (
 	github.com/adrg/xdg v0.5.3
 	github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230305170008-8188dc5388df
 	github.com/cilium/ebpf v0.22.0
-	github.com/daeuniverse/dae-config-dist/go/dae_config v0.0.0-20230604120805-1c27619b592d
 	github.com/daeuniverse/outbound v0.0.0-20250722064253-00c4fbb38759
 	github.com/daeuniverse/quic-go v0.0.0-20250210145620-2083199a7851
 	github.com/fsnotify/fsnotify v1.10.1
@@ -114,4 +113,3 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-n
 replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.13
 
 //replace github.com/cilium/ebpf => /home/mzz/goProjects/ebpf
-//replace github.com/daeuniverse/dae-config-dist/go/dae_config => /home/mzz/antlrProjects/dae-config/build/go/dae_config
