@@ -172,7 +172,7 @@ func getHttp3RoundTripper(hostname string, dialer *dialer.Dialer, target netip.A
 				_ = conn.Close()
 				return nil, err
 			}
-			return c, nil
+			return ownEarlyConnection(c, conn), nil
 		},
 	}
 	return roundTripper
@@ -204,7 +204,12 @@ func (d *DoQ) createConnection(ctx context.Context) (quic.EarlyConnection, error
 		ServerName:         d.Upstream.Hostname,
 	}
 	addr := net.UDPAddrFromAddrPort(d.dialArgument.Target)
-	return quic.DialEarly(ctx, conn, addr, tlsCfg, nil)
+	qc, err := quic.DialEarly(ctx, conn, addr, tlsCfg, nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return ownEarlyConnection(qc, conn), nil
 }
 
 func (d *DoQ) getConnection() (quic.Connection, error) {
