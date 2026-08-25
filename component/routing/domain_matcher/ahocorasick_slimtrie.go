@@ -15,10 +15,10 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/dae/common/consts"
+	"github.com/daeuniverse/dae/pkg/ahocorasick"
 	"github.com/daeuniverse/dae/pkg/trie"
 	"github.com/daeuniverse/outbound/pool"
 	log "github.com/sirupsen/logrus"
-	"github.com/v2rayA/ahocorasick-domain"
 )
 
 var ValidDomainChars = trie.NewValidChars([]byte("0123456789abcdefghijklmnopqrstuvwxyz-.^_"))

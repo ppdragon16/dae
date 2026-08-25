@@ -20,7 +20,6 @@ require (
 	github.com/sirupsen/logrus v1.10.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
-	github.com/v2rayA/ahocorasick-domain v0.0.0-20231231085011-99ceb8ef3208
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
 	github.com/x-cray/logrus-prefixed-formatter v0.5.2
@@ -111,5 +110,3 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-n
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
 replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.13
-
-//replace github.com/cilium/ebpf => /home/mzz/goProjects/ebpf
