@@ -2154,7 +2154,11 @@ func (c *ControlPlane) UpdateRouting() error {
 	}
 
 	// Phase 4: Atomic swap of userspace routing matcher.
+	oldRoutingMatcher := c.routingMatcher
 	c.routingMatcher = newRoutingMatcher
+	if oldRoutingMatcher != nil {
+		oldRoutingMatcher.Release()
+	}
 
 	// Phase 5: Replay DNS domain bitmaps through the new matcher.
 	// The MatchBitmap callback reads c.routingMatcher dynamically, so

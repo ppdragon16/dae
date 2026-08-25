@@ -37,6 +37,18 @@ type Dns struct {
 	raceCacheMu   sync.RWMutex
 }
 
+// Release frees shared interned structures held by the request/response
+// domain matchers. Call it when the Dns instance is discarded (e.g. DNS
+// hot-swap) so interned tries can be reclaimed once unreferenced.
+func (s *Dns) Release() {
+	if s.reqMatcher != nil {
+		s.reqMatcher.Release()
+	}
+	if s.respMatcher != nil {
+		s.respMatcher.Release()
+	}
+}
+
 type NewOption struct {
 	LocationFinder          *assets.LocationFinder
 	UpstreamReadyCallback   func(dnsUpstream *Upstream)

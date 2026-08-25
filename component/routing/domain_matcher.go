@@ -12,4 +12,7 @@ type DomainMatcher interface {
 	Build() error
 	MatchDomainBitmap(domain string) (bitmap []uint32)
 	MatchDomainBitmapInplace(domain string, bitmap []uint32)
+	// Release frees shared interned matcher structures referenced by this
+	// matcher. Call it when the matcher is discarded (e.g. on hot-swap).
+	Release()
 }

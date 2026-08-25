@@ -91,3 +91,6 @@ func (n *Bruteforce) Build() error {
 	}
 	return nil
 }
+
+// Release is a no-op for the brute-force reference matcher.
+func (n *Bruteforce) Release() {}

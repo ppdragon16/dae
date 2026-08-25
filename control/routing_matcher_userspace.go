@@ -22,6 +22,13 @@ type RoutingMatcher struct {
 	matches []bpfMatchSet
 }
 
+// Release frees shared interned structures held by the domain matcher.
+func (m *RoutingMatcher) Release() {
+	if m.domainMatcher != nil {
+		m.domainMatcher.Release()
+	}
+}
+
 // Match is modified from kern/tproxy.c; please keep sync.
 func (m *RoutingMatcher) Match(
 	sourceAddr [16]byte,

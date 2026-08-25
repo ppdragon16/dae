@@ -207,6 +207,13 @@ type ResponseMatcher struct {
 	matches []responseMatchSet
 }
 
+// Release frees shared interned structures held by the domain matcher.
+func (m *ResponseMatcher) Release() {
+	if m.domainMatcher != nil {
+		m.domainMatcher.Release()
+	}
+}
+
 type responseMatchSet struct {
 	Value    uint16
 	Not      bool

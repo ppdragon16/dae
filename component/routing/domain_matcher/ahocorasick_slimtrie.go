@@ -6,10 +6,13 @@
 package domain_matcher
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
-	"sync" // Added sync import
+	"sync"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/trie"
@@ -26,6 +29,168 @@ var bitmapPool = sync.Pool{
 	},
 }
 
+// Intern caches for content-addressed matcher structures. The routing,
+// DNS-request and DNS-response matchers are built independently but commonly
+// reference the same domain lists (e.g. geosite:cn referenced from several
+// sections). Interning lets identical lists share one underlying
+// trie / AC-automaton / compiled-regexp, cutting resident memory roughly by
+// the overlap factor. The built structures are immutable after construction,
+// so sharing them across rule indexes is safe.
+//
+// Keys are SHA-256 content hashes rather than the raw pattern strings: a
+// large list such as geosite:cn runs into the multi-MB range as raw strings,
+// which would dominate the cache entry it describes (the succinct trie itself
+// is only ~800 KB). SHA-256 collisions are treated as impossible at this
+// scale (~2^-128 birthday bound).
+type trieInternEntry struct {
+	trie *trie.Trie
+	refs int
+}
+type acInternEntry struct {
+	matcher *ahocorasick.Matcher
+	refs    int
+}
+type regexpInternEntry struct {
+	re   *regexp.Regexp
+	refs int
+}
+
+// Intern entries are reference-counted: refs = number of live (matcher, rule)
+// references. AhocorasickSlimtrie.Release() decrements on hot-swap so a shared
+// structure is reclaimed from the cache once no matcher references it (no
+// unbounded growth across reloads).
+var (
+	internMu     sync.Mutex
+	internTries  = make(map[[32]byte]*trieInternEntry)
+	internAcs    = make(map[[32]byte]*acInternEntry)
+	internRegexp = make(map[string]*regexpInternEntry)
+)
+
+// hashStrings returns a canonical content hash for a sorted list of strings.
+// The caller must sort strs first so the hash is order-independent.
+func hashStrings(strs []string) [32]byte {
+	h := sha256.New()
+	for _, s := range strs {
+		h.Write([]byte(s))
+		h.Write([]byte{0}) // separator: domain strings never contain NUL
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// hashBytes is the [][]byte analogue of hashStrings.
+func hashBytes(strs [][]byte) [32]byte {
+	h := sha256.New()
+	for _, s := range strs {
+		h.Write(s)
+		h.Write([]byte{0})
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// internTrie returns a shared *trie.Trie for the given (already "$"-trimmed
+// and reversed) pattern list. It sorts the list in place to obtain a
+// canonical, order-independent hash key; trie.NewTrie sorts again internally,
+// which is a no-op on already-sorted input. created reports whether this was
+// the first build of that content.
+func internTrie(patterns []string) (t *trie.Trie, key [32]byte, created bool, err error) {
+	sort.Strings(patterns)
+	key = hashStrings(patterns)
+	internMu.Lock()
+	defer internMu.Unlock()
+	if e, ok := internTries[key]; ok {
+		e.refs++
+		return e.trie, key, false, nil
+	}
+	t, err = trie.NewTrie(patterns, ValidDomainChars)
+	if err != nil {
+		return nil, key, false, err
+	}
+	internTries[key] = &trieInternEntry{trie: t, refs: 1}
+	return t, key, true, nil
+}
+
+// internAc returns a shared *ahocorasick.Matcher for the given keyword list.
+// Unlike trie.NewTrie, ahocorasick.NewMatcher does not canonicalize input
+// order, so we sort a copy to obtain both a stable key and a stable build.
+func internAc(patterns [][]byte) (m *ahocorasick.Matcher, key [32]byte, created bool, err error) {
+	sorted := make([][]byte, len(patterns))
+	copy(sorted, patterns)
+	sort.Slice(sorted, func(i, j int) bool { return bytes.Compare(sorted[i], sorted[j]) < 0 })
+	key = hashBytes(sorted)
+	internMu.Lock()
+	defer internMu.Unlock()
+	if e, ok := internAcs[key]; ok {
+		e.refs++
+		return e.matcher, key, false, nil
+	}
+	m, err = ahocorasick.NewMatcher(sorted)
+	if err != nil {
+		return nil, key, false, err
+	}
+	internAcs[key] = &acInternEntry{matcher: m, refs: 1}
+	return m, key, true, nil
+}
+
+// compileInternedRegexp compiles src, returning a shared *regexp.Regexp.
+// regexp.Regexp is immutable and safe for concurrent use.
+func compileInternedRegexp(src string) (*regexp.Regexp, error) {
+	internMu.Lock()
+	defer internMu.Unlock()
+	if e, ok := internRegexp[src]; ok {
+		e.refs++
+		return e.re, nil
+	}
+	r, err := regexp.Compile(src)
+	if err != nil {
+		return nil, err
+	}
+	internRegexp[src] = &regexpInternEntry{re: r, refs: 1}
+	return r, nil
+}
+
+func releaseTrieKeys(keys [][32]byte) {
+	internMu.Lock()
+	defer internMu.Unlock()
+	for _, k := range keys {
+		if e, ok := internTries[k]; ok {
+			e.refs--
+			if e.refs <= 0 {
+				delete(internTries, k)
+			}
+		}
+	}
+}
+
+func releaseAcKeys(keys [][32]byte) {
+	internMu.Lock()
+	defer internMu.Unlock()
+	for _, k := range keys {
+		if e, ok := internAcs[k]; ok {
+			e.refs--
+			if e.refs <= 0 {
+				delete(internAcs, k)
+			}
+		}
+	}
+}
+
+func releaseRegexpSources(sources []string) {
+	internMu.Lock()
+	defer internMu.Unlock()
+	for _, src := range sources {
+		if e, ok := internRegexp[src]; ok {
+			e.refs--
+			if e.refs <= 0 {
+				delete(internRegexp, src)
+			}
+		}
+	}
+}
+
 type AhocorasickSlimtrie struct {
 	validAcIndexes     []int
 	validTrieIndexes   []int
@@ -37,6 +202,12 @@ type AhocorasickSlimtrie struct {
 	toBuildAc   [][][]byte
 	toBuildTrie [][]string
 	err         error
+
+	// Intern keys referenced by this matcher (with multiplicity), for
+	// releasing refcounts when the matcher is discarded on reload.
+	trieInternKeys [][32]byte
+	acInternKeys   [][32]byte
+	regexpSources  []string
 }
 
 func NewAhocorasickSlimtrie(bitLength int) *AhocorasickSlimtrie {
@@ -97,12 +268,13 @@ nextPattern:
 			// Only use ac automaton for "keyword" matching to save memory.
 			n.toBuildAc[bitIndex] = append(n.toBuildAc[bitIndex], []byte(d))
 		case consts.RoutingDomainKey_Regex:
-			r, err := regexp.Compile(d)
+			r, err := compileInternedRegexp(d)
 			if err != nil {
 				n.err = fmt.Errorf("failed to compile regex: %v", d)
 				return
 			}
 			n.regexp[bitIndex] = append(n.regexp[bitIndex], r)
+			n.regexpSources = append(n.regexpSources, d)
 		default:
 			n.err = fmt.Errorf("unknown RoutingDomainKey: %v", typ)
 			return
@@ -240,14 +412,27 @@ func (n *AhocorasickSlimtrie) Build() (err error) {
 	n.validAcIndexes = make([]int, 0, len(n.toBuildAc)/8)
 	n.validTrieIndexes = make([]int, 0, len(n.toBuildAc)/8)
 	n.validRegexpIndexes = make([]int, 0, len(n.toBuildAc)/8)
+
+	// Intern stats: "built" counts structures created in this Build, "reused"
+	// counts structures shared from an earlier matcher build (dedup savings).
+	var acBuilt, acReused, trieBuilt, trieReused int
+
 	// Build AC automaton.
 	for i, toBuild := range n.toBuildAc {
 		if len(toBuild) == 0 {
 			continue
 		}
-		n.ac[i], err = ahocorasick.NewMatcher(toBuild)
+		var created bool
+		var key [32]byte
+		n.ac[i], key, created, err = internAc(toBuild)
 		if err != nil {
 			return err
+		}
+		n.acInternKeys = append(n.acInternKeys, key)
+		if created {
+			acBuilt++
+		} else {
+			acReused++
 		}
 		n.validAcIndexes = append(n.validAcIndexes, i)
 	}
@@ -258,9 +443,17 @@ func (n *AhocorasickSlimtrie) Build() (err error) {
 			continue
 		}
 		toBuild = ToSuffixTrieStrings(toBuild)
-		n.trie[i], err = trie.NewTrie(toBuild, ValidDomainChars)
+		var created bool
+		var key [32]byte
+		n.trie[i], key, created, err = internTrie(toBuild)
 		if err != nil {
 			return err
+		}
+		n.trieInternKeys = append(n.trieInternKeys, key)
+		if created {
+			trieBuilt++
+		} else {
+			trieReused++
 		}
 		n.validTrieIndexes = append(n.validTrieIndexes, i)
 	}
@@ -276,7 +469,23 @@ func (n *AhocorasickSlimtrie) Build() (err error) {
 	// Release unused data.
 	n.toBuildAc = nil
 	n.toBuildTrie = nil
+
+	log.Infof("domain matcher intern: ac=%d built/%d reused, trie=%d built/%d reused, regexp=%d rules",
+		acBuilt, acReused, trieBuilt, trieReused, len(n.validRegexpIndexes))
 	return nil
+}
+
+// Release decrements the intern-cache refcounts held by this matcher. Call it
+// when the matcher is discarded (e.g. hot-swap on routing/DNS update) so the
+// shared tries/AC-automata/regexps it referenced can be reclaimed from the
+// cache once no matcher references them anymore.
+func (n *AhocorasickSlimtrie) Release() {
+	releaseTrieKeys(n.trieInternKeys)
+	releaseAcKeys(n.acInternKeys)
+	releaseRegexpSources(n.regexpSources)
+	n.trieInternKeys = nil
+	n.acInternKeys = nil
+	n.regexpSources = nil
 }
 
 // growSlice ensures s has room for at least extra more elements, reallocating

@@ -166,12 +166,35 @@ type DatReaderOptimizer struct {
 	LocationFinder  *assets.LocationFinder
 	mmdbCaches      map[string]mmdbCache // filename -> cache
 	mmdbCachesMutex sync.RWMutex
+
+	// geoSiteCaches / geoIpCaches dedup repeated geosite/geoip expansion
+	// within a single optimizer instance. Each ApplyRulesOptimizers call
+	// creates a fresh DatReaderOptimizer, so these caches are transient: they
+	// avoid re-reading + re-expanding the same (file, code) several times
+	// during one section's rule build (e.g. geosite:cn referenced twice) and
+	// are released once that build completes — no persistent memory cost.
+	geoSiteCaches  map[string]map[string][]*config_parser.Param // filename -> code -> params
+	geoIpCaches    map[string]map[string][]*config_parser.Param // filename -> code -> params
+	geoCachesMutex sync.RWMutex
 }
 
 func (o *DatReaderOptimizer) loadGeoSite(filename string, code string) (params []*config_parser.Param, err error) {
 	if !strings.HasSuffix(filename, ".dat") {
 		filename += ".dat"
 	}
+	// rawCode keeps any "@attr" suffix so distinct attr filters get distinct
+	// cache entries.
+	rawCode := code
+	o.geoCachesMutex.RLock()
+	if byCode, ok := o.geoSiteCaches[filename]; ok {
+		if cached, ok := byCode[rawCode]; ok {
+			o.geoCachesMutex.RUnlock()
+			log.Infof("loaded %d entries from geosite cache, file: '%s', code: '%s'", len(cached), filename, rawCode)
+			return cached, nil
+		}
+	}
+	o.geoCachesMutex.RUnlock()
+
 	filePath, err := o.LocationFinder.GetLocationAsset(filename)
 	if err != nil {
 		return nil, common.In("optimizer").With("filename", filename).Wrapf(err, "Failed to read geosite")
@@ -224,7 +247,18 @@ func (o *DatReaderOptimizer) loadGeoSite(filename string, code string) (params [
 			})
 		}
 	}
-	log.Infof("loaded %d entries from geosite file '%s', code: '%s'", len(params), filename, code)
+
+	o.geoCachesMutex.Lock()
+	if o.geoSiteCaches == nil {
+		o.geoSiteCaches = make(map[string]map[string][]*config_parser.Param)
+	}
+	if o.geoSiteCaches[filename] == nil {
+		o.geoSiteCaches[filename] = make(map[string][]*config_parser.Param)
+	}
+	o.geoSiteCaches[filename][rawCode] = params
+	o.geoCachesMutex.Unlock()
+
+	log.Infof("loaded %d entries from geosite file '%s', code: '%s'", len(params), filename, rawCode)
 	return params, nil
 }
 
@@ -232,6 +266,16 @@ func (o *DatReaderOptimizer) loadGeoIp(filename string, code string) (params []*
 	if !strings.HasSuffix(filename, ".dat") {
 		filename += ".dat"
 	}
+	o.geoCachesMutex.RLock()
+	if byCode, ok := o.geoIpCaches[filename]; ok {
+		if cached, ok := byCode[code]; ok {
+			o.geoCachesMutex.RUnlock()
+			log.Infof("loaded %d entries from geoip cache, file: '%s', code: '%s'", len(cached), filename, code)
+			return cached, nil
+		}
+	}
+	o.geoCachesMutex.RUnlock()
+
 	filePath, err := o.LocationFinder.GetLocationAsset(filename)
 	if err != nil {
 		return nil, common.In("optimizer").With("filename", filename).Wrapf(err, "Failed to read geoip")
@@ -254,6 +298,17 @@ func (o *DatReaderOptimizer) loadGeoIp(filename string, code string) (params []*
 			Val: netip.PrefixFrom(ip, int(item.Prefix)).String(),
 		})
 	}
+
+	o.geoCachesMutex.Lock()
+	if o.geoIpCaches == nil {
+		o.geoIpCaches = make(map[string]map[string][]*config_parser.Param)
+	}
+	if o.geoIpCaches[filename] == nil {
+		o.geoIpCaches[filename] = make(map[string][]*config_parser.Param)
+	}
+	o.geoIpCaches[filename][code] = params
+	o.geoCachesMutex.Unlock()
+
 	log.Infof("loaded %d entries from geoip file '%s', code: '%s'", len(params), filename, code)
 	return params, nil
 }

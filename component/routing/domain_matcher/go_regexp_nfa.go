@@ -102,3 +102,6 @@ func (n *GoRegexpNfa) Build() error {
 	n.toBuild = nil
 	return nil
 }
+
+// Release is a no-op for the regexp-NFA reference matcher.
+func (n *GoRegexpNfa) Release() {}

@@ -241,6 +241,13 @@ type RequestMatcher struct {
 	matches []requestMatchSet
 }
 
+// Release frees shared interned structures held by the domain matcher.
+func (m *RequestMatcher) Release() {
+	if m.domainMatcher != nil {
+		m.domainMatcher.Release()
+	}
+}
+
 type requestMatchSet struct {
 	Value      uint16
 	Not        bool

@@ -1171,6 +1171,11 @@ func (c *DnsController) TransferDomainState(dst *DnsController) {
 }
 
 func (c *DnsController) Close() error {
+	// Release interned domain-matcher structures shared with other matchers.
+	if c.routing != nil {
+		c.routing.Release()
+	}
+
 	c.requestSelectCache.Close()
 	c.dnsCache.Close()
 
