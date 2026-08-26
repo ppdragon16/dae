@@ -430,13 +430,20 @@ func (b *RoutingMatcherBuilder) BuildKernspace() (err error) {
 	return nil
 }
 
-func (b *RoutingMatcherBuilder) BuildUserspace() (matcher *RoutingMatcher, err error) {
-	// Build domainMatcher. Size its slices to the actual rule count rather than
-	// MaxMatchSetLen so a small config does not waste ~100KB per matcher.
+// DomainBitLength returns the number of rule-index slots needed to cover the
+// highest domain rule index (max + 1), matching the matcher's internal sizing.
+func (b *RoutingMatcherBuilder) DomainBitLength() int {
 	bitLength := routing.MaxRuleIndex(b.simulatedDomainSet) + 1
 	if bitLength <= 0 {
 		bitLength = 1
 	}
+	return bitLength
+}
+
+func (b *RoutingMatcherBuilder) BuildUserspace() (matcher *RoutingMatcher, err error) {
+	// Build domainMatcher. Size its slices to the actual rule count rather than
+	// MaxMatchSetLen so a small config does not waste ~100KB per matcher.
+	bitLength := b.DomainBitLength()
 	domainMatcher := domain_matcher.NewAhocorasickSlimtrie(bitLength)
 	for _, domains := range b.simulatedDomainSet {
 		domainMatcher.AddSet(domains.RuleIndex, domains.Domains, domains.Key)

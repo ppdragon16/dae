@@ -437,6 +437,7 @@ func NewControlPlane(
 	if err != nil {
 		return nil, common.Errf("RoutingMatcherBuilder.BuildUserspace: %w", err)
 	}
+	core.domainBitLength = builder.DomainBitLength()
 
 	// Release temporary allocations from rule processing to avoid memory spike.
 	runtime.GC()
@@ -2144,6 +2145,7 @@ func (c *ControlPlane) UpdateRouting() error {
 	if err != nil {
 		return fmt.Errorf("BuildUserspace: %w", err)
 	}
+	c.core.domainBitLength = builder.DomainBitLength()
 
 	// Phase 3: Build kernel space — overwrites RoutingMap + LpmArrayMap
 	// + RoutingMetaMap in-place inside the shared BPF object. Existing

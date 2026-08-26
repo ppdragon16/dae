@@ -24,7 +24,7 @@ func TestDomainRoutingBitmapRequiresAllDomainsToMatch(t *testing.T) {
 	setBit(gemini[:], aiRule)
 	play := &[32]uint32{} // matches no rule (all-zero)
 
-	s := &domainState{}
+	s := &domainState{matched: make([]uint32, 8)}
 
 	// Only gemini cached for this IP: ai bit must be set.
 	s.add(gemini)
@@ -46,5 +46,29 @@ func TestDomainRoutingBitmapRequiresAllDomainsToMatch(t *testing.T) {
 	_, routing = computeDomainBitmaps(s)
 	if getBit(routing.Bitmap[:], aiRule) == 0 {
 		t.Fatalf("after removing all-zero domain: ai bit should be restored")
+	}
+}
+
+func TestEnsureMatchedSizesToDomainBitLength(t *testing.T) {
+	c := &controlPlaneCore{domainBitLength: 46}
+	s := &domainState{}
+	c.ensureMatched(s)
+	if len(s.matched) != 46 {
+		t.Fatalf("expected matched len 46, got %d", len(s.matched))
+	}
+	// The existing backing array is reused when it is large enough.
+	s.matched[0] = 7
+	c.ensureMatched(s)
+	if len(s.matched) != 46 || s.matched[0] != 7 {
+		t.Fatalf("expected matched slice to be reused, got len=%d matched[0]=%d", len(s.matched), s.matched[0])
+	}
+}
+
+func TestIsBitmapZero(t *testing.T) {
+	if !isBitmapZero([]uint32{0, 0, 0}) {
+		t.Fatal("all-zero bitmap should be detected as zero")
+	}
+	if isBitmapZero([]uint32{0, 1, 0}) {
+		t.Fatal("bitmap with a set bit should not be zero")
 	}
 }

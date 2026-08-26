@@ -730,6 +730,19 @@ func (c *DnsController) isDomainBitmapAllZero(qname string, domainBitmap []uint3
 	return true
 }
 
+// zeroDomainBitmap is a shared, immutable all-zero bitmap used for domains
+// that match no routing rule, avoiding a 256-byte allocation per such domain.
+var zeroDomainBitmap = new([32]uint32)
+
+func isBitmapZero(bitmap []uint32) bool {
+	for _, v := range bitmap {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, ips []netip.Addr, ttl time.Duration) error {
 	if len(ips) == 0 {
 		return nil
@@ -748,8 +761,13 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, i
 			continue
 		}
 		if bitmapToCache == nil {
-			bitmapToCache = new([32]uint32)
-			copy(bitmapToCache[:], domainBitmap[:])
+			if isBitmapZero(domainBitmap) {
+				// Share the single zero bitmap across all no-rule domains.
+				bitmapToCache = zeroDomainBitmap
+			} else {
+				bitmapToCache = new([32]uint32)
+				copy(bitmapToCache[:], domainBitmap[:])
+			}
 		}
 		go newLookupCacheAsync(c, ip, bitmapToCache)
 		c.coreIpDomainCache.SaveWithTTL(hashKey, coreIpDomainCacheValue{qHash: qHash, qname: qname, ip: ip, bitmap: bitmapToCache}, lookupTTL)
@@ -1121,23 +1139,20 @@ func (c *DnsController) ReplayDomainBitmaps(matchBitmap func(fqdn string, bitmap
 				Warn("ReplayDomainBitmaps: failed to remove old domain state")
 		}
 		// Copy the new bitmap out of the pooled buffer into a heap array so
-		// the cache never holds pooled memory. The old (heap) bitmap is left
-		// to the GC; the pooled buffer is recycled here.
-		bitmapToCache := new([32]uint32)
-		copy(bitmapToCache[:], newSlice[:])
-		common.RecycleDomainBitmap(newSlice)
-		allZero := true
-		for _, w := range bitmapToCache {
-			if w != 0 {
-				allZero = false
-				break
-			}
+		// the cache never holds pooled memory. All-zero domains share the
+		// immutable zeroDomainBitmap. Always re-register (even when all-zero)
+		// so domainStates[ip].total keeps counting every cached domain.
+		var bitmapToCache *[32]uint32
+		if isBitmapZero(newSlice) {
+			bitmapToCache = zeroDomainBitmap
+		} else {
+			bitmapToCache = new([32]uint32)
+			copy(bitmapToCache[:], newSlice[:])
 		}
-		if !allZero {
-			if err := c.newLookupCache(v.ip, bitmapToCache); err != nil {
-				log.WithField("ip", v.ip).WithField("err", err).
-					Warn("ReplayDomainBitmaps: failed to add new domain state")
-			}
+		common.RecycleDomainBitmap(newSlice)
+		if err := c.newLookupCache(v.ip, bitmapToCache); err != nil {
+			log.WithField("ip", v.ip).WithField("err", err).
+				Warn("ReplayDomainBitmaps: failed to add new domain state")
 		}
 		updates = append(updates, updateEntry{
 			key: key,
