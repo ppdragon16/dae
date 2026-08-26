@@ -49,18 +49,14 @@ func TestDomainRoutingBitmapRequiresAllDomainsToMatch(t *testing.T) {
 	}
 }
 
-func TestEnsureMatchedSizesToDomainBitLength(t *testing.T) {
+func TestNewDomainStateSizesMatched(t *testing.T) {
 	c := &controlPlaneCore{domainBitLength: 46}
-	s := &domainState{}
-	c.ensureMatched(s)
+	s := c.newDomainState()
 	if len(s.matched) != 46 {
 		t.Fatalf("expected matched len 46, got %d", len(s.matched))
 	}
-	// The existing backing array is reused when it is large enough.
-	s.matched[0] = 7
-	c.ensureMatched(s)
-	if len(s.matched) != 46 || s.matched[0] != 7 {
-		t.Fatalf("expected matched slice to be reused, got len=%d matched[0]=%d", len(s.matched), s.matched[0])
+	if len(c.newDomainState().matched) != 46 {
+		t.Fatal("every new domainState must size matched to domainBitLength")
 	}
 }
 

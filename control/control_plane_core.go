@@ -701,12 +701,6 @@ func (s *domainState) remove(bitmap *[32]uint32) {
 	}
 }
 
-var domainStatePool = sync.Pool{
-	New: func() any {
-		return &domainState{}
-	},
-}
-
 // computeDomainBitmaps derives the two eBPF bitmaps from the per-IP domain
 // state s.
 //
@@ -763,17 +757,15 @@ func (c *controlPlaneCore) deleteDomainState(ip netip.Addr) error {
 }
 
 // ClearDomainStates removes every (ip, bitmap) entry from the eBPF maps and
-// releases all domainState structs back to the pool. Used to rebuild the
-// domain state from scratch (e.g. on routing reload).
+// drops the domainState structs. Used to rebuild the domain state from
+// scratch (e.g. on routing reload).
 func (c *controlPlaneCore) ClearDomainStates() error {
 	c.domainStateMu.Lock()
 	defer c.domainStateMu.Unlock()
-	for ip, s := range c.domainStates {
+	for ip := range c.domainStates {
 		if err := c.deleteDomainState(ip); err != nil {
 			return err
 		}
-		clear(s.matched)
-		domainStatePool.Put(s)
 	}
 	c.domainStates = make(map[netip.Addr]*domainState)
 	return nil
@@ -787,26 +779,22 @@ func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap *[32]uint3
 
 	s, ok := c.domainStates[ip]
 	if !ok {
-		s = domainStatePool.Get().(*domainState)
+		s = c.newDomainState()
 		c.domainStates[ip] = s
-		c.ensureMatched(s)
 	}
 	s.add(domainBitmap)
 	return c.flushDomainState(ip, s)
 }
 
-// ensureMatched sizes s.matched to the current domainBitLength, reusing the
-// existing backing array when it is large enough.
-func (c *controlPlaneCore) ensureMatched(s *domainState) {
+// newDomainState allocates a domainState with its matched slice sized to the
+// current domainBitLength. domainState entries live as long as the IP stays
+// cached (min_sniffing_ttl), so no pooling is needed.
+func (c *controlPlaneCore) newDomainState() *domainState {
 	n := c.domainBitLength
 	if n < 1 {
 		n = 1
 	}
-	if cap(s.matched) < n {
-		s.matched = make([]uint32, n)
-	} else {
-		s.matched = s.matched[:n]
-	}
+	return &domainState{matched: make([]uint32, n)}
 }
 
 // BatchRemoveDomain unregisters a previously registered (ip, domain) mapping.
@@ -824,10 +812,6 @@ func (c *controlPlaneCore) BatchRemoveDomain(ip netip.Addr, domainBitmap *[32]ui
 	s.remove(domainBitmap)
 	if s.total == 0 {
 		delete(c.domainStates, ip)
-		// matched is all-zero once total reaches 0 (add/remove are symmetric);
-		// clear() is a cheap defensive reset so the pooled slice reuses cleanly.
-		clear(s.matched)
-		domainStatePool.Put(s)
 		return c.deleteDomainState(ip)
 	}
 	return c.flushDomainState(ip, s)
