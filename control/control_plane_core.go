@@ -762,6 +762,23 @@ func (c *controlPlaneCore) deleteDomainState(ip netip.Addr) error {
 	return nil
 }
 
+// ClearDomainStates removes every (ip, bitmap) entry from the eBPF maps and
+// releases all domainState structs back to the pool. Used to rebuild the
+// domain state from scratch (e.g. on routing reload).
+func (c *controlPlaneCore) ClearDomainStates() error {
+	c.domainStateMu.Lock()
+	defer c.domainStateMu.Unlock()
+	for ip, s := range c.domainStates {
+		if err := c.deleteDomainState(ip); err != nil {
+			return err
+		}
+		clear(s.matched)
+		domainStatePool.Put(s)
+	}
+	c.domainStates = make(map[netip.Addr]*domainState)
+	return nil
+}
+
 // BatchNewDomain registers a new (ip, domain) mapping discovered via DNS.
 // domainBitmap describes which routing rules the domain matches.
 func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap *[32]uint32) error {

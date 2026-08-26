@@ -530,6 +530,9 @@ func NewControlPlane(
 			}
 			return nil
 		},
+		ClearLookupCache: func() error {
+			return core.ClearDomainStates()
+		},
 		BestDialerChooser: plane.chooseBestDnsDialer,
 		IpVersionPrefer:   dnsConfig.IpVersionPrefer,
 		FixedDomainTtl:    fixedDomainTtl,
@@ -2045,6 +2048,9 @@ func (c *ControlPlane) UpdateDns() error {
 				return common.Wrap(err, "BatchRemoveDomain")
 			}
 			return nil
+		},
+		ClearLookupCache: func() error {
+			return c.core.ClearDomainStates()
 		},
 		BestDialerChooser: c.chooseBestDnsDialer,
 		IpVersionPrefer:   dnsCfg.IpVersionPrefer,

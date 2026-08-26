@@ -213,6 +213,19 @@ func (c *TimeWheelCache[K, V]) releaseEntry(entry *twcEntry[K, V]) {
 	c.pool.Put(entry)
 }
 
+// Clear removes all entries, releasing them back to the pool. onRecycle is
+// NOT invoked; callers that need per-entry side effects must handle them
+// separately.
+func (c *TimeWheelCache[K, V]) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range c.data {
+		c.releaseEntry(e)
+	}
+	c.data = make(map[K]*twcEntry[K, V], c.slotSize*2)
+	c.slots = make([]*twcEntry[K, V], c.slotSize)
+}
+
 func (c *TimeWheelCache[K, V]) Close() error {
 	c.cancel()
 	return nil
