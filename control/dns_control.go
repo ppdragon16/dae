@@ -92,6 +92,12 @@ type DnsController struct {
 	sniffDomainCache   *common.TimeWheelCache[HashKey, struct{}]               // Key: Loose mode hashes by qname; Strict mode hashes by qname+ip. Used by VerifySniff.
 	sniffVerifyMode    consts.SniffVerifyMode
 
+	// bitmapIntern canonicalizes domain match bitmaps by content: domains with
+	// an identical match result (e.g. every geosite:cn-only domain) share one
+	// *[32]uint32. Cleared on routing reload; patterns are tied to the matcher.
+	bitmapInternMu sync.Mutex
+	bitmapIntern   map[[32]uint32]*[32]uint32
+
 	singleFlightGroup common.SingleFlight[HashKey, []byte, singleFlightParam] // Key: Hash by qname + ip + *outbound
 }
 
@@ -134,6 +140,7 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		dnsCacheHashSeed:   maphash.MakeSeed(),
 		requestSelectCache: common.NewTimeWheelCache[HashKey, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
 		sniffDomainCache:   common.NewTimeWheelCache[HashKey, struct{}](1*time.Hour, 5*time.Second, nil),
+		bitmapIntern:       make(map[[32]uint32]*[32]uint32),
 	}
 	c.coreIpDomainCache = common.NewTimeWheelCache(
 		1*time.Hour, 5*time.Second, func(_ HashKey, v coreIpDomainCacheValue, replaced bool) {
@@ -744,6 +751,29 @@ func isBitmapZero(bitmap []uint32) bool {
 	return true
 }
 
+// internBitmap returns a canonical, immutable *[32]uint32 for the given match
+// bitmap. All-zero bitmaps share zeroDomainBitmap; identical non-zero bitmaps
+// share one canonical array, so e.g. every geosite:cn-only domain points at
+// the same 128 bytes.
+func (c *DnsController) internBitmap(bitmap []uint32) *[32]uint32 {
+	if isBitmapZero(bitmap) {
+		return zeroDomainBitmap
+	}
+	// Reinterpret the 32-word slice as an array pointer (zero-copy; the slice
+	// is always length 32). The map hashes/compares the array in place.
+	key := (*[32]uint32)(bitmap)
+	c.bitmapInternMu.Lock()
+	defer c.bitmapInternMu.Unlock()
+	if p, ok := c.bitmapIntern[*key]; ok {
+		return p
+	}
+	p := new([32]uint32)
+	copy(p[:], bitmap)
+	c.bitmapIntern[*key] = p
+	common.Metrics.CoreBitmapCount.With0().Inc()
+	return p
+}
+
 func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, ips []netip.Addr, ttl time.Duration) error {
 	if len(ips) == 0 {
 		return nil
@@ -762,13 +792,7 @@ func (c *DnsController) updateLookupCache(qname string, domainBitmap []uint32, i
 			continue
 		}
 		if bitmapToCache == nil {
-			if isBitmapZero(domainBitmap) {
-				// Share the single zero bitmap across all no-rule domains.
-				bitmapToCache = zeroDomainBitmap
-			} else {
-				bitmapToCache = new([32]uint32)
-				copy(bitmapToCache[:], domainBitmap[:])
-			}
+			bitmapToCache = c.internBitmap(domainBitmap)
 		}
 		go newLookupCacheAsync(c, ip, bitmapToCache)
 		c.coreIpDomainCache.SaveWithTTL(hashKey, coreIpDomainCacheValue{ip: ip, bitmap: bitmapToCache}, lookupTTL)
@@ -1116,9 +1140,14 @@ func (c *DnsController) UpdateStaticEntry(name string, entry *config.DnsStaticEn
 // the DNS cache TTL are dropped here and re-register on their next resolution.
 func (c *DnsController) ReplayDomainBitmaps(matchBitmap func(fqdn string, bitmap []uint32)) {
 	// Clear the derived (ip, bitmap) state: the in-userspace cache, the per-IP
-	// eBPF state and the metric.
+	// eBPF state, the metric, and the bitmap intern table (patterns are tied
+	// to the routing rules, which just changed).
 	c.coreIpDomainCache.Clear()
 	common.Metrics.CoreIpDomainBitmap.Reset()
+	common.Metrics.CoreBitmapCount.Reset()
+	c.bitmapInternMu.Lock()
+	c.bitmapIntern = make(map[[32]uint32]*[32]uint32)
+	c.bitmapInternMu.Unlock()
 	if c.clearLookupCache != nil {
 		if err := c.clearLookupCache(); err != nil {
 			log.WithError(err).Warn("ReplayDomainBitmaps: failed to clear domain state")

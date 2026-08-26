@@ -241,6 +241,7 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 var Metrics = struct {
 	ActiveConnections   *Gauge
 	CoreIpDomainBitmap  *Gauge
+	CoreBitmapCount     *Gauge
 	DnsCacheSize        *Gauge
 	CheckLatency        *Gauge
 	CheckMovingLatency  *Gauge
@@ -265,6 +266,7 @@ var Metrics = struct {
 func InitMetrics() {
 	Metrics.ActiveConnections = NewGauge("dae_active_connections", "outbound", "subtag", "dialer", "network")
 	Metrics.CoreIpDomainBitmap = NewGauge("dae_ip_domain_bitmap")
+	Metrics.CoreBitmapCount = NewGauge("dae_core_bitmap_count")
 	Metrics.DnsCacheSize = NewGauge("dae_dns_cache_size")
 	Metrics.CheckLatency = NewGauge("dae_check_latency", "outbound", "subtag", "dialer", "network")
 	Metrics.CheckMovingLatency = NewGauge("dae_check_moving_latency", "outbound", "subtag", "dialer", "network")

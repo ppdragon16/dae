@@ -7,6 +7,8 @@ package control
 
 import (
 	"testing"
+
+	"github.com/daeuniverse/dae/common"
 )
 
 // TestDomainRoutingBitmapRequiresAllDomainsToMatch locks down the
@@ -66,5 +68,34 @@ func TestIsBitmapZero(t *testing.T) {
 	}
 	if isBitmapZero([]uint32{0, 1, 0}) {
 		t.Fatal("bitmap with a set bit should not be zero")
+	}
+}
+
+func TestInternBitmap(t *testing.T) {
+	common.InitMetrics()
+	c := &DnsController{bitmapIntern: make(map[[32]uint32]*[32]uint32)}
+
+	// Identical non-zero bitmaps share one canonical pointer.
+	a := make([]uint32, 32)
+	a[1] = 1
+	pa := c.internBitmap(a)
+	pb := c.internBitmap(a)
+	if pa != pb {
+		t.Fatal("identical bitmaps must be interned to the same pointer")
+	}
+	if pa == zeroDomainBitmap {
+		t.Fatal("non-zero bitmap must not return zeroDomainBitmap")
+	}
+
+	// A different bitmap is a distinct canonical pointer.
+	d := make([]uint32, 32)
+	d[1] = 2
+	if pd := c.internBitmap(d); pd == pa {
+		t.Fatal("different bitmaps must be distinct")
+	}
+
+	// All-zero returns the shared zero bitmap.
+	if pz := c.internBitmap(make([]uint32, 32)); pz != zeroDomainBitmap {
+		t.Fatal("all-zero bitmap must return zeroDomainBitmap")
 	}
 }
