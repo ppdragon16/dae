@@ -577,12 +577,14 @@ Dial:
 				}
 			}
 		}
-		// Update eBPF lookup cache.
+		// Update eBPF lookup cache. Always register the domain — even when its
+		// bitmap is all zero — so domainStates[ip].total counts every cached
+		// domain and the domain_routing_map invariant (matched[i] == total)
+		// stays correct (see computeDomainBitmaps).
 		domainBitmap := common.ObtainDomainBitmap()
 		defer common.RecycleDomainBitmap(domainBitmap)
-		if !c.isDomainBitmapAllZero(queryInfo.qname, domainBitmap) {
-			err = c.updateLookupCache(queryInfo.qname, domainBitmap, ips, time.Duration(ttl)*time.Second)
-		}
+		c.matchBitmap(queryInfo.qname, domainBitmap)
+		err = c.updateLookupCache(queryInfo.qname, domainBitmap, ips, time.Duration(ttl)*time.Second)
 	}
 	return err
 }
@@ -779,10 +781,8 @@ func (c *DnsController) MaybeUpdateLookupCache(qname string, ips []netip.Addr, t
 	}
 	domainBitmap := common.ObtainDomainBitmap()
 	defer common.RecycleDomainBitmap(domainBitmap)
-	if !c.isDomainBitmapAllZero(qname, domainBitmap) {
-		return c.updateLookupCache(qname, domainBitmap, ips, ttl)
-	}
-	return nil
+	c.matchBitmap(qname, domainBitmap)
+	return c.updateLookupCache(qname, domainBitmap, ips, ttl)
 }
 
 func (c *DnsController) reject(data []byte) {

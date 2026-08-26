@@ -676,13 +676,32 @@ type domainState struct {
 	total uint32
 }
 
+// add applies a domain's match bitmap to the per-IP state. An all-zero bitmap
+// still increments total (it does not touch matched), which is what keeps the
+// domain_routing_map invariant (matched[i] == total) correct.
+func (s *domainState) add(bitmap *[32]uint32) {
+	s.total++
+	for i := 0; i < consts.MaxMatchSetLen; i++ {
+		s.matched[i] += getBit(bitmap[:], i)
+	}
+}
+
+// remove undoes add for the same bitmap.
+func (s *domainState) remove(bitmap *[32]uint32) {
+	s.total--
+	for i := 0; i < consts.MaxMatchSetLen; i++ {
+		s.matched[i] -= getBit(bitmap[:], i)
+	}
+}
+
 var domainStatePool = sync.Pool{
 	New: func() any {
 		return &domainState{}
 	},
 }
 
-// flushDomainState pushes the bitmaps derived from s to the eBPF maps for ip.
+// computeDomainBitmaps derives the two eBPF bitmaps from the per-IP domain
+// state s.
 //
 // Invariants exposed to BPF:
 //
@@ -690,8 +709,12 @@ var domainStatePool = sync.Pool{
 //	                                                           // domain matches
 //	domain_routing_map[ip] bit i = (matched[i] == total)       // all cached
 //	                                                           // domains match
-func (c *controlPlaneCore) flushDomainState(ip netip.Addr, s *domainState) error {
-	var bump, routing bpfDomainRouting
+//
+// matched[i] counts the cached domains for this IP whose match bitmap has rule
+// i set; total counts ALL cached domains for this IP (including those whose
+// bitmap is entirely zero). The routing bit therefore requires every cached
+// domain to match rule i — a single non-matching domain clears it.
+func computeDomainBitmaps(s *domainState) (bump, routing bpfDomainRouting) {
 	if consts.MaxMatchSetLen/32 != len(bump.Bitmap) {
 		panic("domain bitmap length not sync with kern program")
 	}
@@ -704,6 +727,12 @@ func (c *controlPlaneCore) flushDomainState(ip netip.Addr, s *domainState) error
 			setBit(routing.Bitmap[:], int(i))
 		}
 	}
+	return bump, routing
+}
+
+// flushDomainState pushes the bitmaps derived from s to the eBPF maps for ip.
+func (c *controlPlaneCore) flushDomainState(ip netip.Addr, s *domainState) error {
+	bump, routing := computeDomainBitmaps(s)
 
 	ip6 := ip.As16()
 	key := common.Ipv6ByteSliceToUint32Array(ip6[:])
@@ -737,10 +766,7 @@ func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap *[32]uint3
 		s = domainStatePool.Get().(*domainState)
 		c.domainStates[ip] = s
 	}
-	s.total++
-	for i := 0; i < consts.MaxMatchSetLen; i++ {
-		s.matched[i] += getBit(domainBitmap[:], i)
-	}
+	s.add(domainBitmap)
 	return c.flushDomainState(ip, s)
 }
 
@@ -756,10 +782,7 @@ func (c *controlPlaneCore) BatchRemoveDomain(ip netip.Addr, domainBitmap *[32]ui
 	if !ok {
 		return nil
 	}
-	s.total--
-	for i := 0; i < consts.MaxMatchSetLen; i++ {
-		s.matched[i] -= getBit(domainBitmap[:], i)
-	}
+	s.remove(domainBitmap)
 	if s.total == 0 {
 		delete(c.domainStates, ip)
 		*s = domainState{}
