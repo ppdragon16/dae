@@ -82,3 +82,8 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-n
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
 replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.13
+
+// Vendored fork of cuckoofilter: drop the gob-using ScalableCuckooFilter
+// (vmess only uses the basic in-memory Filter), removing the ~512KB
+// encoding/gob package-init cost.
+replace github.com/seiflotfy/cuckoofilter => ./pkg/cuckoofilter
