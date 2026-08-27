@@ -9,6 +9,7 @@ import (
 	"context"
 	"net"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -27,15 +28,15 @@ import (
 // maps. (See https://github.com/golang/go/issues/16962.)
 type mockDialerGroup struct{ id int }
 
-func (m *mockDialerGroup) NotifyStatusChange(*Dialer)         {}
-func (m *mockDialerGroup) GetEmaAlpha() float64               { return 0.3 }
-func (m *mockDialerGroup) GetTimeoutPenalty() time.Duration   { return 0 }
+func (m *mockDialerGroup) NotifyStatusChange(*Dialer)       {}
+func (m *mockDialerGroup) GetEmaAlpha() float64             { return 0.3 }
+func (m *mockDialerGroup) GetTimeoutPenalty() time.Duration { return 0 }
 
 // mockNetDialer is a minimal netproxy.Dialer whose Alive() always reports true.
 type mockNetDialer struct{ netproxy.Dialer }
 
-func (m *mockNetDialer) Alive() bool                             { return true }
-func (m *mockNetDialer) Name() string                            { return "mock" }
+func (m *mockNetDialer) Alive() bool  { return true }
+func (m *mockNetDialer) Name() string { return "mock" }
 func (m *mockNetDialer) Dial(network, address string) (net.Conn, error) {
 	return nil, nil
 }
@@ -124,4 +125,41 @@ func TestDialer_ResetLatency_NoGroups(t *testing.T) {
 	d := newTestDialer(t)
 	// Should not panic on an empty registeredDialerGroups map.
 	d.ResetLatency()
+}
+
+// TestDialer_RunInitialCheck_UsesWarmLatency verifies that the initial
+// connectivity check re-checks the winning network type a second time and
+// seeds the moving average with the WARM (second) sample rather than the cold
+// first sample. This matters for TCP+mux protocols (e.g. anytls): the first
+// check includes the TCP+TLS handshake, while the second reuses the dialer's
+// session pool and reflects steady-state latency.
+func TestDialer_RunInitialCheck_UsesWarmLatency(t *testing.T) {
+	d := newTestDialer(t)
+	g := &mockDialerGroup{id: 1}
+	d.RegisterDialerGroup(g)
+	// Skip the Connect() path: runInitialCheck dials only when !Alive().
+	d.alive.Store(true)
+
+	var calls atomic.Int32
+	opt := &CheckOption{
+		networkType: testNetType,
+		CheckFunc: func() (bool, error) {
+			if calls.Add(1) == 1 {
+				// Simulate a cold TCP+TLS handshake on the first check.
+				time.Sleep(300 * time.Millisecond)
+			}
+			return true, nil
+		},
+	}
+
+	if returned := d.runInitialCheck([]*CheckOption{opt}); returned != opt {
+		t.Fatalf("runInitialCheck should return the winning opt, got %v", returned)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected CheckFunc to be called twice (cold + warm), got %d", got)
+	}
+	// The seed must reflect the warm (~0) sample, not the 300ms cold sample.
+	if ma := d.MovingAverage[g]; ma >= 100*time.Millisecond {
+		t.Fatalf("moving average should be seeded with the warm sample, got %v", ma)
+	}
 }

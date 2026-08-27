@@ -468,7 +468,32 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
 		if ok := d.Supported(i); ok {
-			d.Update(ok, latency[i], opt.networkType, err[i])
+			// The first pass above established the connection; for TCP+mux
+			// protocols (e.g. anytls) its latency includes the TCP+TLS
+			// handshake, which over-penalizes them against UDP/QUIC protocols
+			// (e.g. hysteria2) whose handshake is ~free. Re-check the same
+			// network type once more: the connection is now warm (reused from
+			// the dialer's session pool), so the second latency reflects the
+			// steady state and is the right seed for the moving average.
+			// Alive/support state is still taken from the first pass.
+			warmLatency, warmErr := latency[i], err[i]
+			if ok2, lat2, err2 := d.Check(opt); ok2 {
+				warmLatency, warmErr = lat2, err2
+			} else if log.IsLevelEnabled(log.WarnLevel) {
+				log.WithFields(log.Fields{
+					"network": opt.networkType.String(),
+					"node":    d.Name,
+				}).Warnf("Inital Connectivity Check warm re-check failed: %v; falling back to cold latency", err2)
+			}
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"network": opt.networkType.String(),
+					"node":    d.Name,
+					"cold":    latency[i].Truncate(time.Millisecond).String(),
+					"warm":    warmLatency.Truncate(time.Millisecond).String(),
+				}).Debugln("Inital Connectivity Check (warm re-check)")
+			}
+			d.Update(ok, warmLatency, opt.networkType, warmErr)
 			return opt
 		}
 	}
