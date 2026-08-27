@@ -110,7 +110,7 @@ dns {
             # asis 即向收到的 DNS 请求中的目标服务器查询，请勿将其他局域网设备 DNS 服务器设为 dae:53（小心回环）。
             # 你可以使用在 upstream 中配置的 DNS 上游。
 
-            # 可以使用: qname, qtype。
+            # 可以使用: qname, qtype, mac, sip。
 
             # DNS 查询域名（省略后缀点 '.'）。
             qname(geosite:category-ads-all) -> reject
@@ -132,7 +132,7 @@ dns {
             # 具有预置出站：accept, reject。
             # 你可以使用在 upstream 中配置的 DNS 上游。
 
-            # 可以使用: qname, qtype, upstream, ip。
+            # 可以使用: qname, qtype, upstream, ip, mac, sip。
             # 接受upstream 'googledns' 回复的 DNS 响应。 有助于避免回环。
             upstream(googledns) -> accept
             # 若 DNS 请求的域名不属于 CN 且回复包含私有 IP， 大抵是被污染了，向 'googledns' 重查。

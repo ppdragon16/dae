@@ -380,13 +380,13 @@ func (s *Dns) HasClientRequestRules() bool {
 	return len(s.reqMatcher.macSet) > 0 || len(s.reqMatcher.sourceIpSet) > 0
 }
 
-func (s *Dns) ResponseSelect(qname string, qtype uint16, ips []netip.Addr, fromUpstream *Upstream) (upstreamIndex consts.DnsResponseOutboundIndex, upstream *Upstream, err error) {
+func (s *Dns) ResponseSelect(qname string, qtype uint16, ips []netip.Addr, fromUpstream *Upstream, srcMac [6]byte, srcIp netip.Addr) (upstreamIndex consts.DnsResponseOutboundIndex, upstream *Upstream, err error) {
 	// Prepare routing.
 	s.upstream2IndexMu.Lock()
 	from := s.upstream2Index[fromUpstream]
 	s.upstream2IndexMu.Unlock()
 	// Route.
-	upstreamIndex, err = s.respMatcher.Match(qname, qtype, ips, consts.DnsRequestOutboundIndex(from))
+	upstreamIndex, err = s.respMatcher.Match(qname, qtype, ips, consts.DnsRequestOutboundIndex(from), srcMac, srcIp)
 	if err != nil {
 		return 0, nil, err
 	}

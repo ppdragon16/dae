@@ -535,7 +535,7 @@ Dial:
 		var ResponseIndex consts.DnsResponseOutboundIndex
 		var nextUpstream *dns.Upstream
 		ips, _ := dnsAnswers(dnsResp.respData)
-		ResponseIndex, nextUpstream, err = c.routing.ResponseSelect(queryInfo.qname, queryInfo.qtype, ips, upstream)
+		ResponseIndex, nextUpstream, err = c.routing.ResponseSelect(queryInfo.qname, queryInfo.qtype, ips, upstream, req.routingResult.Mac, req.Src.Addr())
 		if err != nil {
 			return err
 		}

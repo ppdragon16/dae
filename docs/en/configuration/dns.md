@@ -111,7 +111,7 @@ dns {
             # Built-in outbounds in 'request': asis, reject.
             # You can also use user-defined upstreams.
 
-            # Available functions: qname, qtype.
+            # Available functions: qname, qtype, mac, sip.
 
             # DNS request name (omit suffix dot '.').
             qname(geosite:category-ads-all) -> reject
@@ -132,7 +132,7 @@ dns {
             # Built-in outbounds in 'response': accept, reject.
             # You can use user-defined upstreams.
 
-            # Available functions: qname, qtype, upstream, ip.
+            # Available functions: qname, qtype, upstream, ip, mac, sip.
             # Accept the response if the request is sent to upstream 'googledns'. This is useful to avoid loop.
             upstream(googledns) -> accept
             # If DNS request name is not in CN and response answers include private IP, which is most likely polluted
