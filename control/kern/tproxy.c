@@ -1616,7 +1616,7 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 			bpf_printk("do_tproxy parse error: %d, dropping", parse_ret);
 			return TC_ACT_SHOT;
 		}
-		return TC_ACT_OK;
+		return TC_ACT_PIPE;
 	}
 
 	// Use parsed packet fields.
@@ -1859,7 +1859,7 @@ static __always_inline int do_lan_egress(struct __sk_buff *skb, u32 link_h_len)
 			bpf_printk("parse_transport error: %d, dropping", ret);
 			return TC_ACT_SHOT;
 		}
-		return TC_ACT_OK;
+		return TC_ACT_PIPE;
 	}
 
 	if (skb->ingress_ifindex == NOWHERE_IFINDEX &&  // Only drop NDP_REDIRECT packets from localhost
@@ -1911,7 +1911,7 @@ static __always_inline int do_tproxy_wan_ingress(struct __sk_buff *skb, u32 link
 			bpf_printk("parse_transport error: %d, dropping", ret);
 			return TC_ACT_SHOT;
 		}
-		return TC_ACT_OK;
+		return TC_ACT_PIPE;
 	}
 
 	return TC_ACT_PIPE;
@@ -1935,7 +1935,7 @@ static __always_inline int do_tproxy_wan_egress(struct __sk_buff *skb, u32 link_
 {
 	// Skip packets not from localhost.
 	if (skb->ingress_ifindex != NOWHERE_IFINDEX)
-		return TC_ACT_OK;
+		return TC_ACT_PIPE;
 
 	return do_tproxy(skb, true, link_h_len);
 }
