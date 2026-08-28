@@ -486,8 +486,8 @@ func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []s
 			resp, err := client.Get(CheckNetworkLinks[i%len(CheckNetworkLinks)])
 			if err != nil {
 				log.Debugf("%+v", common.Wrap(err, "CheckNetwork"))
-				var neterr net.Error
-				if errors.As(err, &neterr) && neterr.Timeout() {
+				neterr, ok := errors.AsType[net.Error](err)
+				if ok && neterr.Timeout() {
 					// Do not sleep.
 					continue
 				}

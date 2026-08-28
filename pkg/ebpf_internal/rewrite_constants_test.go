@@ -39,8 +39,8 @@ func TestRewriteConstantsMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing constants, got nil")
 	}
-	var m *MissingConstantsError
-	if !errors.As(err, &m) {
+	m, ok := errors.AsType[*MissingConstantsError](err)
+	if !ok {
 		t.Fatalf("expected error to wrap *MissingConstantsError, got: %v", err)
 	}
 	msg := err.Error()

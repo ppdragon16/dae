@@ -56,8 +56,8 @@ func RecycleDialOption(option *DialOption) {
 // isTemporary: true if netErr.Temporary().
 // All fields are false when isNetError is false.
 func GetNetErrorInfo(err error) (isNetError bool, isClosed bool, isTimeout bool, isTemporary bool) {
-	var netErr net.Error
-	if !errors.As(err, &netErr) {
+	netErr, ok := errors.AsType[net.Error](err)
+	if !ok {
 		return false, false, false, false
 	}
 	return true, errors.Is(err, net.ErrClosed), netErr.Timeout(), netErr.Temporary()

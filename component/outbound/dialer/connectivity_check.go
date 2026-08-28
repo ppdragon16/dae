@@ -680,8 +680,8 @@ func (d *Dialer) HttpCheck(u *netutils.URL, ip netip.Addr, method string, networ
 	}
 	resp, err := cli.Do(req)
 	if err != nil {
-		var netErr net.Error
-		if errors.As(err, &netErr); netErr.Timeout() {
+		netErr, ok := errors.AsType[net.Error](err)
+		if ok && netErr.Timeout() {
 			err = fmt.Errorf("timeout")
 		}
 		return false, err
