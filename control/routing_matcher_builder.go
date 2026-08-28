@@ -28,14 +28,14 @@ import (
 type RoutingMatcherBuilder struct {
 	outboundName2Id    map[string]uint8
 	ifmgr              *component.InterfaceManager
-	bpf                *bpfObjects
+	bpf                *bpfState
 	rules              []bpfMatchSet
 	simulatedLpmTries  [][]netip.Prefix
 	simulatedDomainSet []routing.DomainSet
 	fallback           *routing.Outbound
 }
 
-func NewRoutingMatcherBuilder(rules []*config_parser.RoutingRule, outboundName2Id map[string]uint8, bpf *bpfObjects, fallback config.FunctionOrString, ifmgr *component.InterfaceManager) (b *RoutingMatcherBuilder, err error) {
+func NewRoutingMatcherBuilder(rules []*config_parser.RoutingRule, outboundName2Id map[string]uint8, bpf *bpfState, fallback config.FunctionOrString, ifmgr *component.InterfaceManager) (b *RoutingMatcherBuilder, err error) {
 	b = &RoutingMatcherBuilder{outboundName2Id: outboundName2Id, ifmgr: ifmgr, bpf: bpf}
 	rulesBuilder := routing.NewRulesBuilder()
 	rulesBuilder.RegisterFunctionParser(consts.Function_Domain, routing.PlainParserFactory(b.addDomain))
@@ -390,6 +390,14 @@ func (b *RoutingMatcherBuilder) addFallback(fallbackOutbound config.FunctionOrSt
 }
 
 func (b *RoutingMatcherBuilder) BuildKernspace() (err error) {
+	// Slots active in the last committed build are replaced below. Only reset
+	// the tail inherited from a larger previous rule set.
+	if err = b.forEachStaleLpmSlot(func(i uint32) error {
+		return b.bpf.LpmArrayMap.Update(i, b.bpf.UnusedLpmType, ebpf.UpdateAny)
+	}); err != nil {
+		return err
+	}
+
 	// Update lpm_array_map.
 	for i, cidrs := range b.simulatedLpmTries {
 		var keys []_bpfLpmKey
@@ -427,6 +435,17 @@ func (b *RoutingMatcherBuilder) BuildKernspace() (err error) {
 	// used entries instead of always scanning MAX_MATCH_SET_LEN.
 	_ = b.bpf.RoutingMetaMap.Update(uint32(0), routingsLen, ebpf.UpdateAny)
 
+	b.bpf.activeLpmTrieCount = uint32(len(b.simulatedLpmTries))
+
+	return nil
+}
+
+func (b *RoutingMatcherBuilder) forEachStaleLpmSlot(fn func(uint32) error) error {
+	for i := uint32(len(b.simulatedLpmTries)); i < b.bpf.activeLpmTrieCount; i++ {
+		if err := fn(i); err != nil {
+			return fmt.Errorf("process stale LPM slot at index %d: %w", i, err)
+		}
+	}
 	return nil
 }
 

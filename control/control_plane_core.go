@@ -34,7 +34,7 @@ type controlPlaneCore struct {
 	mu sync.Mutex
 
 	deferFuncs []func() error
-	bpf        *bpfObjects
+	bpf        *bpfState
 
 	kernelVersion *internal.Version
 
@@ -60,7 +60,7 @@ type controlPlaneCore struct {
 }
 
 func newControlPlaneCore(
-	bpf *bpfObjects,
+	bpf *bpfState,
 	kernelVersion *internal.Version,
 	isReload bool,
 ) *controlPlaneCore {
@@ -818,7 +818,7 @@ func (c *controlPlaneCore) BatchRemoveDomain(ip netip.Addr, domainBitmap *[32]ui
 }
 
 // EjectBpf will resect bpf from destroying life-cycle of control plane core.
-func (c *controlPlaneCore) EjectBpf() *bpfObjects {
+func (c *controlPlaneCore) EjectBpf() *bpfState {
 	if !c.bpfEjected && !c.isReload {
 		c.deferFuncs = c.deferFuncs[1:]
 	}
@@ -827,7 +827,7 @@ func (c *controlPlaneCore) EjectBpf() *bpfObjects {
 }
 
 // InjectBpf will inject bpf back.
-func (c *controlPlaneCore) InjectBpf(bpf *bpfObjects) {
+func (c *controlPlaneCore) InjectBpf(bpf *bpfState) {
 	if c.bpfEjected {
 		c.bpfEjected = false
 		c.deferFuncs = append([]func() error{bpf.Close}, c.deferFuncs...)
