@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	outbound_logger "github.com/daeuniverse/outbound/pkg/logger"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/quic-go"
@@ -623,6 +624,10 @@ func init() {
 	utls.NewBytesBufferFunc = func() utls.BytesBuffer { return pool.NewPooledBuffer() }
 	quicpool.GetBuffer = pool.GetBuffer
 	quicpool.PutBuffer = pool.PutBuffer
+
+	// Inject dae's configured logrus logger into outbound so protocol logs
+	// (e.g. hy2 UDP relay stats) flow through the same level/formatter/output.
+	outbound_logger.Logger = log.StandardLogger()
 
 	// Inject logrus adapter so quic-go logs (e.g. frame sorter peak stats)
 	// flow through dae's logging. Level controlled by QUIC_GO_LOG_LEVEL env var;
