@@ -325,9 +325,13 @@ func relayDirection(dst, src net.Conn) error {
 		}
 		if rerr != nil {
 			// Timeout / EOF / Closed is normal.
+			// io.ErrClosedPipe is the canonical smux stream/session-closed
+			// signal (multiplexed streams die in bulk when a session or a
+			// dialer abort tears them down) — same normal-termination class
+			// as a plain conn's EOF/net.ErrClosed.
 			if netErr, ok := rerr.(net.Error); ok && netErr.Timeout() {
 				err = nil
-			} else if rerr == io.EOF {
+			} else if rerr == io.EOF || rerr == io.ErrClosedPipe {
 				err = nil
 			} else if errors.Is(rerr, net.ErrClosed) {
 				err = nil
