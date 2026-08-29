@@ -73,7 +73,7 @@ require (
 
 //replace github.com/daeuniverse/outbound => ../outbound_ppdn
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls.23
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls.24
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
