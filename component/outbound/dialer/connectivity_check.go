@@ -375,6 +375,28 @@ func (d *Dialer) NotifyCheck() {
 	}
 }
 
+// connectSingleFlight dedupes concurrent Connect issuers per dialer: a long
+// NOT-ALIVE retry cycle overlapping the next tick, or a manual NotifyCheck,
+// makes several check loops reach Connect for the same dialer at once — they
+// share one in-flight connect instead of stacking handshakes (and, for eager
+// protocols like hysteria2, tearing down the tunnel a sibling just
+// established). The group is global; the key is the dialer itself.
+var connectSingleFlight common.SingleFlight[*Dialer, struct{}, struct{}]
+
+// connectOnce issues Connect at most once per window: concurrent check loops
+// (a long NOT-ALIVE retry cycle overlapping the next tick, or a manual
+// NotifyCheck) share the single in-flight connect instead of each stacking
+// its own handshake — and, for eager protocols like hysteria2, tearing down
+// the tunnel a sibling just established. A plain mutex would NOT do: waiters
+// pass their !Alive test before blocking, so each queued waiter would still
+// issue its own Connect and rebuild in turn.
+func (d *Dialer) connectOnce() error {
+	_, err, _, _ := connectSingleFlight.Do(d, struct{}{}, func(struct{}) (struct{}, error) {
+		return struct{}{}, d.Connect()
+	})
+	return err
+}
+
 func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 	done := d.checkCtx.Done()
 	for {
@@ -389,7 +411,7 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 				}
 				if !d.Alive() {
 					d.NotifyStatusChange()
-					if err := d.Connect(); err != nil {
+					if err := d.connectOnce(); err != nil {
 						// Dialer is already dead and reconnect failed;
 						// no point retrying within this cycle — wait for
 						// the next ticker tick.
@@ -427,7 +449,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 	var latency [4]time.Duration
 	var err [4]error
 	if !d.Alive() {
-		if err := d.Connect(); err != nil {
+		if err := d.connectOnce(); err != nil {
 			log.WithFields(log.Fields{
 				"node": d.Name,
 			}).Errorf("Failed to connect: %v", err)
