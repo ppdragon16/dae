@@ -132,12 +132,20 @@ func (d *DoH) Close() error {
 	return nil
 }
 
+// dnsUpstreamPhaseTimeout bounds each hang-prone phase of a DoH exchange.
+// DoH carries no per-request context to cancel with, so a server that
+// finishes the TLS handshake but never answers would otherwise pin this
+// upstream indefinitely.
+const dnsUpstreamPhaseTimeout = 10 * time.Second
+
 func getHttpRoundTripper(hostname string, dialer *dialer.Dialer, target netip.AddrPort) *http.Transport {
 	httpTransport := http.Transport{
 		TLSClientConfig: &tls.Config{
 			ServerName:         hostname,
 			InsecureSkipVerify: false,
 		},
+		TLSHandshakeTimeout:   dnsUpstreamPhaseTimeout,
+		ResponseHeaderTimeout: dnsUpstreamPhaseTimeout,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := dialer.DialContext(ctx, "tcp", target.String())
 			if err != nil {
@@ -252,7 +260,11 @@ func (d *DoQ) ForwardDNS(data []byte) (resp []byte, err error) {
 		}
 	}()
 
-	stream, err = conn.OpenStreamSync(context.Background())
+	// OpenStreamSync can park forever on a stalled connection; bound it the
+	// same way getConnection bounds its dial.
+	streamCtx, cancel := context.WithTimeout(context.Background(), consts.DefaultDialTimeout)
+	defer cancel()
+	stream, err = conn.OpenStreamSync(streamCtx)
 	if err != nil {
 		return nil, err
 	}
