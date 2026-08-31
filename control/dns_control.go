@@ -874,15 +874,26 @@ func recycleDnsRefreshParam(p *dnsRefreshParam) {
 func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
 	// Lookup Cache
 	if c.enableCache {
-		if respData, expired, isNew := c.dnsCache.Get(c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)); respData != nil {
-			if expired {
-				// Refresh cache asynchronously.
-				go func(c *DnsController, p *dnsRefreshParam) {
+		hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)
+		if respData, expired, isNew := c.dnsCache.Get(hashKey); respData != nil {
+			if expired && !c.dnsCache.RefreshDelayed(hashKey, time.Now()) {
+				// Refresh cache asynchronously. A failed refresh backs the
+				// next one off exponentially: while an upstream is down,
+				// every query on the expired entry would otherwise spawn
+				// one doomed dial (and a warn line) apiece.
+				go func(c *DnsController, p *dnsRefreshParam, hashKey HashKey) {
 					defer recycleDnsRefreshParam(p)
-					if _, _, _, err := c.singleFlightForwardDNS(p.qi, p.data, p.upstream, &p.dialArg, true); err != nil {
+					_, leader, _, err := c.singleFlightForwardDNS(p.qi, p.data, p.upstream, &p.dialArg, true)
+					if err != nil {
+						// Only the singleflight leader postpones: shared
+						// callers observed the same failure and would
+						// double-count the attempt.
+						if leader {
+							c.dnsCache.PostponeRefresh(hashKey, time.Now())
+						}
 						log.Warnf("failed to refresh dns cache for %v: %+v", p.qi, err)
 					}
-				}(c, obtainDnsRefreshParam(data, queryInfo, upstream, dialArg))
+				}(c, obtainDnsRefreshParam(data, queryInfo, upstream, dialArg), hashKey)
 			}
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{

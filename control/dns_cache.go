@@ -18,6 +18,15 @@ const (
 	extendCacheDur = 1 * time.Hour
 	minClientTtl   = 5
 	minSaveTtl     = 15
+
+	// Background-refresh backoff bounds. After a failed asynchronous refresh
+	// of an expired entry, the next attempt for the same key waits
+	// dnsRefreshBackoffInitial, doubling per consecutive failure up to
+	// dnsRefreshBackoffMax. The stale answer keeps being served meanwhile;
+	// without the backoff, a down upstream turns every query on the entry
+	// into one doomed dial (and a warn line) apiece.
+	dnsRefreshBackoffInitial = 10 * time.Second
+	dnsRefreshBackoffMax     = 5 * time.Minute
 )
 
 // 64位哈希，理论冲突概率为 1/2^64，不绝对安全但是够用
@@ -28,6 +37,14 @@ type dnsCache struct {
 	TTLOffsets []uint16
 	FetchedAt  time.Time
 	IsNew      int32
+
+	// refreshDelay is the backoff delay applied after the most recent failed
+	// background refresh of this entry, and refreshNotBefore is the earliest
+	// unix-nano instant at which the next one may start. Both live on the
+	// entry, so backoff state evaporates when the entry is evicted or
+	// replaced by a successful Save; zero means no backoff is in effect.
+	refreshDelay     atomic.Int64
+	refreshNotBefore atomic.Int64
 }
 
 type commonDnsCache struct {
@@ -51,6 +68,35 @@ func (c *commonDnsCache) Get(key HashKey) (resp []byte, expired bool, isNew bool
 	}
 	resp, expired = copyResponseFromCache(cache)
 	return resp, expired, atomic.CompareAndSwapInt32(&cache.IsNew, 1, 0)
+}
+
+// RefreshDelayed reports whether background refresh attempts for key are
+// currently inside their failure backoff window.
+func (c *commonDnsCache) RefreshDelayed(key HashKey, now time.Time) bool {
+	e, ok := c.cache.Get(key)
+	if !ok {
+		return false
+	}
+	return now.UnixNano() < e.refreshNotBefore.Load()
+}
+
+// PostponeRefresh records a failed background refresh of key and backs the
+// next attempt off exponentially, capped at max. It is a no-op when the
+// entry is already gone. The delay lives on the entry, so a successful Save
+// replaces it together with the rest of the backoff state.
+func (c *commonDnsCache) PostponeRefresh(key HashKey, now time.Time) {
+	e, ok := c.cache.Get(key)
+	if !ok {
+		return
+	}
+	delay := time.Duration(e.refreshDelay.Load())
+	if delay == 0 {
+		delay = dnsRefreshBackoffInitial
+	} else {
+		delay = min(delay*2, dnsRefreshBackoffMax)
+	}
+	e.refreshDelay.Store(int64(delay))
+	e.refreshNotBefore.Store(now.Add(delay).UnixNano())
 }
 
 // Range iterates over every cached DNS response. See common.TimeWheelCache.Range.
