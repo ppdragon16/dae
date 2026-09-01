@@ -136,8 +136,8 @@ github.com/ppdragon16/outbound v0.0.0-next.utls.27 h1:Fq8aQjt4eMMwXy6Ucs8sNYoEIQ
 github.com/ppdragon16/outbound v0.0.0-next.utls.27/go.mod h1:QfBF8CNnG09I57YbbfAgkH7p1ESp6gbFnh0I0jwbWqE=
 github.com/ppdragon16/quic-go v0.0.0-next.utls.9 h1:AEsaJoDRWY2qgr4soeITviIwTQQ0vIHK+6PNW1ywruE=
 github.com/ppdragon16/quic-go v0.0.0-next.utls.9/go.mod h1:qs6AdOGIQVKLInZqqBBnPpEt7mXOVvab/CzXEbpT6xw=
-github.com/ppdragon16/utls v1.8.2-pooled.13 h1:Dth1mXVnszoB1CU1z6ghUyug5mNrZcToMPPhJ9f2jr8=
-github.com/ppdragon16/utls v1.8.2-pooled.13/go.mod h1:3hDq37/I6Cp43hSxKR0Rk6X0mAaWghGMw7H7pCxlM6U=
+github.com/ppdragon16/utls v1.8.2-pooled.14 h1:A3H+dNhoOYxz+nVWaCO1MMZFTEoto+NhX+t6G2SOp6Q=
+github.com/ppdragon16/utls v1.8.2-pooled.14/go.mod h1:3hDq37/I6Cp43hSxKR0Rk6X0mAaWghGMw7H7pCxlM6U=
 github.com/quic-go/qpack v0.6.0 h1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=
 github.com/quic-go/qpack v0.6.0/go.mod h1:lUpLKChi8njB4ty2bFLX2x4gzDqXwUpaO1DP9qMDZII=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
