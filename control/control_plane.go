@@ -46,7 +46,6 @@ import (
 	"github.com/daeuniverse/outbound/protocol/direct"
 
 	"github.com/daeuniverse/outbound/transport/grpc"
-	"github.com/daeuniverse/outbound/transport/meek"
 	"github.com/daeuniverse/quic-go"
 	log "github.com/sirupsen/logrus"
 )
@@ -300,9 +299,10 @@ func NewControlPlane(
 	}
 
 	// Filter out groups.
-	// FIXME: Ugly code here: reset grpc and meek clients manually.
+	// FIXME: Ugly code here: reset the grpc client cache manually. Meek
+	// needs no manual reset: each dialer owns its HTTP transport, so a
+	// reload picks up fresh transports automatically.
 	grpc.CleanGlobalClientConnectionCache()
-	meek.CleanGlobalRoundTripperCache()
 
 	dialerSet := outbound.NewDialerSetFromLinks(option, tagToNodeList)
 	groupNameRedirects := make(map[string]string)
