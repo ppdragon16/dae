@@ -284,7 +284,15 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 		return false
 	}
 
-	dnsResponseSet(data, false)
+	// A message with the QR bit set is a response, not a query. Feeding one
+	// through request routing would misroute its question section (a Reject
+	// verdict would even evict a live cache family). Decline it untouched
+	// and let the caller fall through to regular UDP routing toward the
+	// original destination; real resolvers drop unsolicited responses
+	// anyway. Past this gate every message is a query with QR already 0.
+	if dnsResponse(data) {
+		return false
+	}
 
 	queryInfo := dnsQueryInfo(data)
 	if log.IsLevelEnabled(log.TraceLevel) {
