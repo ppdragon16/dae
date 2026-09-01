@@ -223,6 +223,14 @@ func (n *AhocorasickSlimtrie) AddSet(bitIndex int, patterns []string, typ consts
 	if n.err != nil {
 		return
 	}
+	// Rule indices come from len(builder.rules) and index the per-rule
+	// slices allocated with bitLength. An out-of-range index would panic on
+	// the slice writes below; record it as a build error so oversized
+	// configurations fail with a message instead of crashing.
+	if bitIndex < 0 || bitIndex >= len(n.toBuildTrie) {
+		n.err = fmt.Errorf("domain rule index %d is out of range [0, %d): too many routing rules", bitIndex, len(n.toBuildTrie))
+		return
+	}
 	// Pre-size the target slice to avoid repeated reallocation across the
 	// pattern loop below. Suffix domains expand to at most two trie patterns.
 	switch typ {
@@ -237,6 +245,17 @@ func (n *AhocorasickSlimtrie) AddSet(bitIndex int, patterns []string, typ consts
 	}
 nextPattern:
 	for _, d := range patterns {
+		switch typ {
+		case consts.RoutingDomainKey_Full,
+			consts.RoutingDomainKey_Suffix,
+			consts.RoutingDomainKey_Keyword:
+			// DNS names are case-insensitive: the matching side lowercases
+			// its input and the trie validation (ValidDomainChars) only
+			// accepts lowercase, so patterns must be normalized here or
+			// mixed-case rules silently never match. Regex patterns keep
+			// their original case.
+			d = strings.ToLower(d)
+		}
 		switch typ {
 		case consts.RoutingDomainKey_Full:
 			for _, r := range []byte(d) {

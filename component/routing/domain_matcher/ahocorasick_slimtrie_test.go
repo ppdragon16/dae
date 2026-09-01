@@ -7,6 +7,7 @@ package domain_matcher
 
 import (
 	"math/rand"
+	"strings"
 	"testing"
 
 	"github.com/daeuniverse/dae/common/consts"
@@ -55,6 +56,56 @@ func TestAhocorasickSlimtrie(t *testing.T) {
 		bitmap2 := actrie.MatchDomainBitmap(sample)
 		if !slices.Equal(bitmap, bitmap2) {
 			t.Fatal(i, sample, bitmap, bitmap2)
+		}
+	}
+}
+
+// TestAhocorasickSlimtrieCaseNormalization pins that mixed-case Full, Suffix
+// and Keyword patterns match lowercased input: the matching side normalizes
+// its input to lowercase and ValidDomainChars only accepts lowercase, so
+// unnormalized patterns were silently dropped (Full/Suffix) or never matched
+// (Keyword).
+func TestAhocorasickSlimtrieCaseNormalization(t *testing.T) {
+	const bitLength = 8
+	actrie := NewAhocorasickSlimtrie(bitLength)
+	actrie.AddSet(0, []string{"Exact.Example"}, consts.RoutingDomainKey_Full)
+	actrie.AddSet(1, []string{"Example.COM"}, consts.RoutingDomainKey_Suffix)
+	actrie.AddSet(2, []string{"Keyword.CASE"}, consts.RoutingDomainKey_Keyword)
+	if err := actrie.Build(); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		domain  string
+		bit     uint32
+		matched bool
+	}{
+		{"exact.example", 0, true},
+		{"Exact.Example", 0, true},
+		{"sub.example.com", 1, true},
+		{"example.com", 1, true},
+		{"xxkeyword.casexx", 2, true},
+		{"exact.example.com", 0, false},
+		{"notrelated.net", 1, false},
+	}
+	for _, c := range cases {
+		bitmap := actrie.MatchDomainBitmap(c.domain)
+		set := bitmap[c.bit/32]&(1<<(c.bit%32)) != 0
+		if set != c.matched {
+			t.Fatalf("domain %q: rule bit %d matched=%v, want %v", c.domain, c.bit, set, c.matched)
+		}
+	}
+}
+
+// TestAhocorasickSlimtrieRuleIndexOutOfRange pins that an out-of-range rule
+// index surfaces as a Build error instead of panicking on the slice writes
+// inside AddSet.
+func TestAhocorasickSlimtrieRuleIndexOutOfRange(t *testing.T) {
+	for _, bitIndex := range []int{-1, 2} {
+		actrie := NewAhocorasickSlimtrie(2)
+		actrie.AddSet(bitIndex, []string{"a.example"}, consts.RoutingDomainKey_Full)
+		err := actrie.Build()
+		if err == nil || !strings.Contains(err.Error(), "out of range") {
+			t.Fatalf("bitIndex %d: expected out-of-range build error, got %v", bitIndex, err)
 		}
 	}
 }
