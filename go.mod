@@ -73,7 +73,7 @@ require (
 
 //replace github.com/daeuniverse/outbound => ../outbound_ppdn
 
-replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls.27
+replace github.com/daeuniverse/outbound => github.com/ppdragon16/outbound v0.0.0-next.utls.28
 
 //replace github.com/daeuniverse/quic-go => ../quic-go
 
@@ -81,7 +81,7 @@ replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-n
 
 //replace github.com/refraction-networking/utls => ../utls_ppdn
 
-replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.14
+replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.15
 
 // Vendored fork of cuckoofilter: drop the gob-using ScalableCuckooFilter
 // (vmess only uses the basic in-memory Filter), removing the ~512KB
