@@ -5,7 +5,23 @@
 
 package trie
 
-import "testing"
+import (
+	"testing"
+)
+
+func TestEmptyTrieMatchesNothing(t *testing.T) {
+	chars := NewValidChars([]byte("ab"))
+	trie, err := NewTrie(nil, chars)
+	if err != nil {
+		t.Fatalf("NewTrie with no keys: %v", err)
+	}
+	if trie.HasPrefix("a") {
+		t.Fatal("empty trie matched a prefix")
+	}
+	if trie.HasPrefix("") {
+		t.Fatal("empty trie matched an empty word")
+	}
+}
 
 func TestTrie(t *testing.T) {
 	trie, err := NewTrie([]string{

@@ -498,10 +498,24 @@ static __always_inline bool is_extension_header(__u8 nexthdr)
 	case IPPROTO_ROUTING:
 	case IPPROTO_FRAGMENT:
 	case IPPROTO_DSTOPTS:
+	case IPPROTO_AH:
+	case IPPROTO_MH:
 		return true;
 	default:
 		return false;
 	}
+}
+
+/* Total length in bytes of a walkable IPv6 extension header. AH (RFC 4302)
+ * encodes its length in 4-octet units excluding the first 8 octets:
+ * (payload_len + 2) * 4. Every other extension header (incl. MH) uses
+ * 8-octet units, which is what ipv6_optlen computes.
+ */
+static __always_inline __u32 ipv6_exthdr_len(__u8 nexthdr, __u8 len_field)
+{
+	if (nexthdr == IPPROTO_AH)
+		return (__u32)(len_field + 2) * 4;
+	return ipv6_optlen(len_field);
 }
 
 // Fast-path packet parsing via bpf_skb_pull_data + direct access.
@@ -688,8 +702,10 @@ parse_transport_fast(struct __sk_buff *skb, __u32 link_h_len,
 			if ((void *)(ext_hdr + 2) > data_end)
 				return -1;
 
+			__u8 cur_hdr = nexthdr;
+
 			nexthdr = ext_hdr[0];
-			offset += ipv6_optlen(ext_hdr[1]);
+			offset += ipv6_exthdr_len(cur_hdr, ext_hdr[1]);
 			*l4proto = nexthdr;
 		}
 
@@ -854,6 +870,8 @@ parse_transport_slow(struct __sk_buff *skb, __u32 link_h_len,
 			if (!is_extension_header(nexthdr))
 				break;
 
+			__u8 cur_hdr = nexthdr;
+
 			ret = bpf_skb_load_bytes(skb, offset, &nexthdr, 1);
 			if (ret)
 				return -EFAULT;
@@ -865,7 +883,7 @@ parse_transport_slow(struct __sk_buff *skb, __u32 link_h_len,
 			if (ret)
 				return -EFAULT;
 
-			__u32 ext_len = ipv6_optlen(hdr_ext_len);
+			__u32 ext_len = ipv6_exthdr_len(cur_hdr, hdr_ext_len);
 
 			offset += ext_len;
 		}

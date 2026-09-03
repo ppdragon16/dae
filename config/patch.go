@@ -6,6 +6,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/daeuniverse/dae/common/consts"
@@ -16,8 +17,28 @@ type patch func(params *Config) error
 
 var patches = []patch{
 	// patchTcpCheckHttpMethod,
+	patchCheckInterval,
 	patchEmptyDns,
 	patchMustOutbound,
+}
+
+// patchCheckInterval rejects intervals that can panic the connectivity check
+// scheduler when passed to the ticker/phase spread.
+func patchCheckInterval(params *Config) error {
+	if params.Global.CheckInterval <= 0 {
+		return fmt.Errorf(
+			"global check_interval must be a positive duration (got \"%v\")",
+			params.Global.CheckInterval)
+	}
+	for _, group := range params.Group {
+		// Zero means inherit the validated global interval.
+		if group.CheckInterval < 0 {
+			return fmt.Errorf(
+				"group %q check_interval must not be negative (got \"%v\")",
+				group.Name, group.CheckInterval)
+		}
+	}
+	return nil
 }
 
 // func patchTcpCheckHttpMethod(params *Config) error {

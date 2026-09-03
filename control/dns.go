@@ -279,10 +279,13 @@ func (d *DoQ) ForwardDNS(data []byte) (resp []byte, err error) {
 
 func (d *DoQ) Close() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.conn != nil {
-		d.conn.CloseWithError(0x101, "")
-		d.conn = nil
+	conn := d.conn
+	d.conn = nil
+	d.mu.Unlock()
+	if conn != nil {
+		// CloseWithError sends a CONNECTION_CLOSE frame; keep d.mu free so
+		// concurrent ForwardDNS callers are not stalled behind it.
+		conn.CloseWithError(0x101, "")
 	}
 	return nil
 }
