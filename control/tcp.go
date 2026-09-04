@@ -26,6 +26,8 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -97,7 +99,28 @@ func (c *ControlPlane) handleTcpDns(
 	return err
 }
 
+// tcpUserTimeoutMs bounds how long a silently-dead peer (locked phone,
+// vanished NAT binding — no FIN/RST) can keep its descriptor pinned.
+// Without it the kernel finalizes such a connection only after the full
+// retransmission window (tcp_retries2, ~15-30 min): tcp_write_err ->
+// tcp_done() removes the socket from /proc/net tables while the fd stays
+// open until the relay loop winds down. On a 24h production instance this
+// showed up as a steady pool of a few hundred table-invisible ("orphan")
+// sockets. Accepted sockets do NOT inherit the option from the listener,
+// so it is set once per accepted connection here. 30s is far above LAN
+// RTT, and only counts time with unacknowledged retransmitted data;
+// idle connections are unaffected.
+const tcpUserTimeoutMs = 30000
+
 func (c *ControlPlane) handleConn(lConn net.Conn) error {
+	if tc, ok := lConn.(*net.TCPConn); ok {
+		if raw, rerr := tc.SyscallConn(); rerr == nil {
+			_ = raw.Control(func(fd uintptr) {
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, tcpUserTimeoutMs)
+			})
+		}
+	}
+
 	// Get tuples and outbound.
 	src := lConn.RemoteAddr().(*net.TCPAddr).AddrPort()
 	dstTcpAddr := lConn.LocalAddr().(*net.TCPAddr)
