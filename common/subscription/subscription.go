@@ -79,11 +79,19 @@ func ResolveSubscriptionAsSIP008(b []byte) (nodes []string, err error) {
 		return nil, fmt.Errorf("does not seems like a standard sip008 subscription")
 	}
 	for _, server := range sip.Servers {
+		query := make(url.Values)
+		if server.Plugin != "" {
+			plugin := server.Plugin
+			if server.PluginOpts != "" {
+				plugin += ";" + server.PluginOpts
+			}
+			query.Set("plugin", plugin)
+		}
 		u := url.URL{
 			Scheme:   "ss",
 			User:     url.UserPassword(server.Method, server.Password),
 			Host:     net.JoinHostPort(server.Server, strconv.Itoa(server.ServerPort)),
-			RawQuery: url.Values{"plugin": []string{server.PluginOpts}}.Encode(),
+			RawQuery: query.Encode(),
 			Fragment: server.Remarks,
 		}
 		nodes = append(nodes, u.String())
