@@ -284,13 +284,13 @@ retryLoadBpf:
 			padding2             uint16
 			daeSocketMark        uint32
 		}{
-			tproxyPort:           uint32(opts.BigEndianTproxyPort),
-			controlPlanePid:      uint32(os.Getpid()),
-			dae0Ifindex:          uint32(GetDaeNetns().Dae0().Attrs().Index),
-			dae0NetnsId:          uint32(netnsID),
-			dae0peerMac:          [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
-			paddingAfterMac:      [2]byte{},
-			useRedirectPeer:      func() uint8 {
+			tproxyPort:      uint32(opts.BigEndianTproxyPort),
+			controlPlanePid: uint32(os.Getpid()),
+			dae0Ifindex:     uint32(GetDaeNetns().Dae0().Attrs().Index),
+			dae0NetnsId:     uint32(netnsID),
+			dae0peerMac:     [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
+			paddingAfterMac: [2]byte{},
+			useRedirectPeer: func() uint8 {
 				if opts.KernelVersion != nil && !opts.KernelVersion.Less(consts.RedirectPeerFeatureVersion) {
 					return 1
 				}

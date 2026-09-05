@@ -141,53 +141,51 @@ func (c *ControlPlane) RouteDialOption(
 	return nil
 }
 
+// couldBeIP reports whether s consists solely of characters that can appear
+// in an IP literal (hex digits, dots and colons). It is a cheap pre-filter
+// for netip.ParseAddr: ParseAddr allocates on every failure (the boxed
+// parseAddrError), and the common case here is a real hostname, so we avoid
+// even entering the parser for it.
+func couldBeIP(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c == '.', c == ':',
+			c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// chooseDialTarget decides what the exit dial should connect to.
+//
+// domain arrives normalized by sniffing.NormalizeDomain: lowercased, without
+// port and without brackets — so it is either a hostname or an IP literal
+// string (sniffers extract SNI/Host verbatim and do not reject IPs; see
+// VerifySniff for how an IP-literal "domain" gets verified).
+//
+// Rewriting to the sniffed value only makes sense for a hostname. For an IP
+// literal the rewrite is a no-op in every sane case (the client dialed that
+// very IP, so it equals dst), so we fall back to the original dst while
+// keeping strict IP-version dialer selection (dialIp=true) — same as the
+// no-domain case. This also replaces the previous hand-rolled classifier,
+// which dialed bare IPv6 literals without a port (guaranteed dial failure)
+// and misclassified hex-only hostnames like "beef.cafe" as IPs.
 func chooseDialTarget(dst netip.AddrPort, domain string, override bool) (dialTarget string, dialIp bool) {
-	if !override || len(domain) == 0 {
+	if !override || domain == "" {
 		return dst.String(), true
 	}
-	// domain cases:
-	// - ""
-	// - "abc.xyz.com"
-	// - "abc.xyz.com:789"
-	// - "[2606:4700:20::681a:d1f]"
-	// - "2606:4700:20::681a:d1f"
-	// - "111.222.333.444"
-	// - "[2606:4700:20::681a:d1f]:5678"
-	// - "111.222.333.444:5678"
-	hasAlpha := false
-	lastColon := -1
-	colonCount := 0
-	inBracket := domain[0] == '['
-	for i := range len(domain) {
-		c := domain[i]
-		if !hasAlpha && ((c >= 'g' && c <= 'z') || (c >= 'G' && c <= 'Z')) {
-			hasAlpha = true
-		}
-		if inBracket && c == ']' {
-			inBracket = false
-		}
-		if !inBracket && c == ':' {
-			lastColon = i
-			colonCount++
+	if couldBeIP(domain) {
+		if _, err := netip.ParseAddr(domain); err == nil {
+			return dst.String(), true
 		}
 	}
-
-	if lastColon > 0 {
-		// domain-or-ip4/6:port
-		dialTarget = domain
-	} else if colonCount > 1 {
-		// ipv6 address
-		dialTarget = "[" + domain + "]:" + strconv.Itoa(int(dst.Port()))
-		dialIp = true
-	} else {
-		// ipv4 address or domain
-		dialTarget = domain + ":" + strconv.Itoa(int(dst.Port()))
-		if !hasAlpha {
-			// ipv4 address
-			dialIp = true
-		}
-	}
-
+	dialTarget = domain + ":" + strconv.Itoa(int(dst.Port()))
 	if log.IsLevelEnabled(log.DebugLevel) {
 		log.WithFields(log.Fields{
 			"from": dst.String(),
