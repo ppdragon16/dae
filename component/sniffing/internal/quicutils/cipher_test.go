@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/daeuniverse/dae/common"
+	"github.com/daeuniverse/outbound/pool"
 )
 
 var destConnId = []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
@@ -94,4 +95,76 @@ func TestKeys_PayloadDecrypt_(t *testing.T) {
 		t.Fatal("PayloadDecryptFromPool:", err)
 	}
 	t.Log(hex.EncodeToString(plaintext))
+}
+
+// TestKeys_PayloadDecrypt_RecyclesBufferOnAuthFailure verifies that an AEAD
+// authentication failure still returns the pooled plaintext buffer to the
+// pool (bogus QUIC-looking packets hit this path constantly).
+func TestKeys_PayloadDecrypt_RecyclesBufferOnAuthFailure(t *testing.T) {
+	keys, err := NewKeys(destConnId, Version_V1, common.NewGcm)
+	if err != nil {
+		t.Fatal("NewKeys", err)
+	}
+	defer keys.Close()
+
+	// plaintext length 300 → GetBuffer serves size class 512 (stats index 9).
+	const classIdx = 9
+	ciphertext := make([]byte, 300+16) // + AEAD overhead
+	header := []byte{0xc3, 0x00, 0x00, 0x00, 0x01}
+	packetNumber := []byte{0x02}
+
+	var stats pool.StatsSnapshot
+	pool.PoolStats(&stats)
+	putsBefore := stats[classIdx].Puts
+
+	if _, err = keys.PayloadDecrypt(ciphertext, packetNumber, header); err == nil {
+		t.Fatal("expected authentication failure for garbage ciphertext")
+	}
+
+	pool.PoolStats(&stats)
+	if got := stats[classIdx].Puts - putsBefore; got != 1 {
+		t.Fatalf("expected exactly 1 PutBuffer into class %d after auth failure, got %d", 1<<classIdx, got)
+	}
+}
+
+// TestKeys_Close_ScrubsAndPools verifies that Close zeroes the derived key
+// material (three of the four key buffers are handed to the shared pool) and
+// pools exactly the pow2-cap buffers: 32-class once (clientInitialSecret),
+// 16-class twice (key, headerProtectionKey); iv (cap 12) must not be pooled.
+func TestKeys_Close_ScrubsAndPools(t *testing.T) {
+	keys, err := NewKeys(destConnId, Version_V1, common.NewGcm)
+	if err != nil {
+		t.Fatal("NewKeys", err)
+	}
+
+	var stats pool.StatsSnapshot
+	pool.PoolStats(&stats)
+	puts32 := stats[5].Puts // class 32
+	puts16 := stats[4].Puts // class 16
+
+	if err = keys.Close(); err != nil {
+		t.Fatal("Close", err)
+	}
+
+	for name, buf := range map[string][]byte{
+		"clientInitialSecret": keys.clientInitialSecret,
+		"key":                 keys.key,
+		"iv":                  keys.iv,
+		"headerProtectionKey": keys.headerProtectionKey,
+		"nonce":               keys.nonce,
+	} {
+		for i, b := range buf {
+			if b != 0 {
+				t.Fatalf("%s not scrubbed: byte %d = %#x", name, i, b)
+			}
+		}
+	}
+
+	pool.PoolStats(&stats)
+	if got := stats[5].Puts - puts32; got != 1 {
+		t.Fatalf("expected exactly 1 PutBuffer into class 32, got %d", got)
+	}
+	if got := stats[4].Puts - puts16; got != 2 {
+		t.Fatalf("expected exactly 2 PutBuffers into class 16, got %d", got)
+	}
 }

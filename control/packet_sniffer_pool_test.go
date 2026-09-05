@@ -8,7 +8,9 @@ package control
 import (
 	"encoding/hex"
 	"net/netip"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/daeuniverse/dae/component/sniffing"
 )
@@ -69,5 +71,78 @@ func TestPacketSniffer_Mismatched(t *testing.T) {
 			t.Log("part1 was enough, skipping split test for this entry")
 		}
 		return
+	}
+}
+
+// TestPacketSniffer_ExpireWaitsForInFlightSniff pins the locking invariant of
+// PacketSnifferPool.expire: the timer path must not close a sniffer while a
+// sniff is in flight. Closing concurrently with a sniff could close the same
+// *quicutils.Keys twice, double-putting its pooled key buffers and aliasing
+// unrelated future pool consumers.
+func TestPacketSniffer_ExpireWaitsForInFlightSniff(t *testing.T) {
+	mgr := NewPacketSnifferPool()
+	key := PacketSnifferKey{
+		Src: netip.MustParseAddrPort("10.0.0.1:1000"),
+		Dst: netip.MustParseAddrPort("10.0.0.2:443"),
+	}
+	qs, _ := mgr.GetOrCreate(key, &PacketSnifferOptions{Ttl: time.Hour})
+	defer qs.deadlineTimer.Stop()
+
+	// Simulate an in-flight sniff: expire must block on Mu, not close.
+	qs.Mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		mgr.expire(key, qs)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("expire closed the sniffer while a sniff was in flight (Mu not honored)")
+	case <-time.After(100 * time.Millisecond):
+	}
+	qs.Mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("expire did not complete after Mu was released")
+	}
+	if mgr.Get(key) != nil {
+		t.Fatal("sniffer still registered after expire")
+	}
+}
+
+// TestPacketSniffer_ExpireRaceStress hammers expire against an in-flight
+// sniffing loop; run under -race it must report no data race on quicKeys.
+func TestPacketSniffer_ExpireRaceStress(t *testing.T) {
+	data, _ := hex.DecodeString(testPacketSnifferData[0])
+	for i := 0; i < 50; i++ {
+		mgr := NewPacketSnifferPool()
+		key := PacketSnifferKey{
+			Src: netip.MustParseAddrPort("10.1.0.1:1000"),
+			Dst: netip.MustParseAddrPort("10.1.0.2:443"),
+		}
+		qs, _ := mgr.GetOrCreate(key, &PacketSnifferOptions{Ttl: time.Hour})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				_qs := mgr.Get(key)
+				if _qs == nil {
+					return
+				}
+				_qs.Mu.Lock()
+				_qs.AppendData(data)
+				_, _ = _qs.SniffUdp()
+				_qs.Mu.Unlock()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			mgr.expire(key, qs)
+		}()
+		wg.Wait()
+		qs.deadlineTimer.Stop()
 	}
 }

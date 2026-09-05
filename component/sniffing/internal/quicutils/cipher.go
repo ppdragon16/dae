@@ -40,10 +40,17 @@ type Keys struct {
 	nonce               []byte
 }
 
+// Close scrubs the derived key material and recycles the poolable buffers.
+// Three of the four key buffers go back into the shared pool for reuse by
+// unrelated consumers, so their contents must be zeroed first. k.iv is
+// scrubbed too but deliberately not pooled: its cap (12) is not a power of
+// two, so PutBuffer would silently drop it (the pool only accepts pow2 caps).
 func (k *Keys) Close() error {
+	for _, buf := range [][]byte{k.clientInitialSecret, k.key, k.iv, k.headerProtectionKey, k.nonce} {
+		clear(buf)
+	}
 	pool.PutBuffer(k.clientInitialSecret)
 	pool.PutBuffer(k.headerProtectionKey)
-	pool.PutBuffer(k.iv)
 	pool.PutBuffer(k.key)
 	return nil
 }
@@ -128,9 +135,14 @@ func (k *Keys) PayloadDecrypt(ciphertext []byte, packetNumber []byte, header []b
 	for i := range packetNumber {
 		k.nonce[len(k.nonce)-len(packetNumber)+i] ^= packetNumber[i]
 	}
-	plaintext = pool.GetBuffer(len(ciphertext) - k.aead.Overhead())
-	plaintext, err = k.aead.Open(plaintext[:0], k.nonce, ciphertext, header)
+	// GetBuffer returns a class-sized buffer, so Open never grows dst and the
+	// result aliases buf. On auth failure (common for bogus QUIC-looking
+	// packets) Open returns nil, so the original buf must be recycled here
+	// before returning, or the pool loses one buffer per bad packet.
+	buf := pool.GetBuffer(len(ciphertext) - k.aead.Overhead())
+	plaintext, err = k.aead.Open(buf[:0], k.nonce, ciphertext, header)
 	if err != nil {
+		pool.PutBuffer(buf)
 		return nil, err
 	}
 	return plaintext, nil
