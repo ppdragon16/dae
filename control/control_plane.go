@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -659,6 +660,9 @@ func (c *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch cmd {
 	case "gc":
 		runtime.GC()
+		fmt.Fprintf(writer, "OK\n")
+	case "free":
+		debug.FreeOSMemory()
 		fmt.Fprintf(writer, "OK\n")
 	case "redirect":
 		if r.Method == "GET" {
