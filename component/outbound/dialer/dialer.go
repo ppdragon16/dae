@@ -61,7 +61,10 @@ type Dialer struct {
 	// by this dialer. AbortConns uses this to close BOTH ends of the relay
 	// when the dialer transitions alive -> not alive, so a relay goroutine
 	// stuck in Write(lConn) or Read(lConn) actually gets unblocked.
-	activeConns   sync.Map
+	// Every access happens under activeConnsMu, so a plain map suffices;
+	// sync.Map would only add per-entry allocation overhead (HashTrieMap
+	// nodes) with no lock-free reader to justify it.
+	activeConns   map[net.Conn]net.Conn
 	activeConnsMu sync.Mutex
 }
 type GlobalOption struct {
@@ -110,6 +113,7 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 		Latencies10:            make(map[DialerGroup]*LatenciesN),
 		MovingAverage:          make(map[DialerGroup]time.Duration),
 		registeredDialerGroups: make(map[DialerGroup]int),
+		activeConns:            make(map[net.Conn]net.Conn),
 		tickerMu:               sync.Mutex{},
 		ticker:                 nil,
 		checkCh:                make(chan time.Time, 1),
@@ -167,14 +171,14 @@ func (d *Dialer) Close() error {
 func (d *Dialer) RegisterConn(lConn, rConn net.Conn) {
 	d.activeConnsMu.Lock()
 	defer d.activeConnsMu.Unlock()
-	d.activeConns.Store(rConn, lConn)
+	d.activeConns[rConn] = lConn
 }
 
 // UnregisterConn unregisters a connection from this dialer.
 func (d *Dialer) UnregisterConn(rConn net.Conn) {
 	d.activeConnsMu.Lock()
 	defer d.activeConnsMu.Unlock()
-	d.activeConns.Delete(rConn)
+	delete(d.activeConns, rConn)
 }
 
 // AbortConns closes every registered connection pair (lConn + rConn) and
@@ -189,16 +193,15 @@ func (d *Dialer) UnregisterConn(rConn net.Conn) {
 func (d *Dialer) AbortConns() {
 	d.activeConnsMu.Lock()
 	defer d.activeConnsMu.Unlock()
-	d.activeConns.Range(func(key, value any) bool {
+	for rConn, lConn := range d.activeConns {
 		// Close the local side first so a goroutine parked in
 		// Write(lConn) or Read(lConn) gets unblocked; then close
 		// the upstream side to also unblock the opposite relay
 		// direction.
-		if value != nil {
-			value.(net.Conn).Close()
+		if lConn != nil {
+			lConn.Close()
 		}
-		key.(net.Conn).Close()
-		return true
-	})
-	d.activeConns.Clear()
+		rConn.Close()
+	}
+	clear(d.activeConns)
 }
