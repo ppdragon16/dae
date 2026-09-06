@@ -91,11 +91,16 @@ func (c *ControlPlane) handleTcpDns(
 	}
 	// Keep the id the same with request.
 	dnsIdSet(respData.respData, id)
+	// A client that fills the kernel send buffer and then stops reading
+	// while holding the connection open would block Write forever, pinning
+	// this goroutine and its fd. Bound the response write explicitly.
+	_ = lConn.SetWriteDeadline(time.Now().Add(TCPDNSWriteTimeout))
 	if err = binary.Write(lConn, binary.BigEndian, uint16(len(respData.respData))); err == nil {
 		if _, err = lConn.Write(respData.respData); err == nil {
 			return nil
 		}
 	}
+	_ = lConn.SetWriteDeadline(time.Time{})
 	return err
 }
 
@@ -111,6 +116,11 @@ func (c *ControlPlane) handleTcpDns(
 // RTT, and only counts time with unacknowledged retransmitted data;
 // idle connections are unaffected.
 const tcpUserTimeoutMs = 30000
+
+// TCPDNSWriteTimeout bounds a DNS-over-TCP response write. Without it, a
+// client that fills the kernel send buffer and then stalls blocks Write
+// forever, pinning this goroutine, its fd, and the connection.
+const TCPDNSWriteTimeout = 10 * time.Second
 
 func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	if tc, ok := lConn.(*net.TCPConn); ok {

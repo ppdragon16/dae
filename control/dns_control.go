@@ -51,6 +51,11 @@ var (
 	UnspecifiedAddressA        = netip.MustParseAddr("0.0.0.0")
 	UnspecifiedAddressAAAA     = netip.MustParseAddr("::")
 	ErrUnsupportedQuestionType = fmt.Errorf("unsupported question type")
+	// ErrDnsForwardersClosed is returned when a forwarder is requested
+	// after the controller's forwarder cache has been swept by Close.
+	// In-flight queries that outlived the close handle-gate must fail
+	// instead of repopulating forwarders nothing will ever close again.
+	ErrDnsForwardersClosed = fmt.Errorf("dns forwarder cache is closed")
 )
 
 type DnsControllerOption struct {
@@ -81,16 +86,21 @@ type DnsController struct {
 	clearLookupCache   func() error
 	bestDialerChooser  func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error
 
-	fixedDomainTtl     map[string]int
-	minSniffingTtl     time.Duration
-	enableCache        bool
-	dnsCache           *commonDnsCache
-	dnsCacheHashSeed   maphash.Seed
-	dnsForwarderCache  sync.Map // map[dnsForwarderKey]DnsForwarder
-	requestSelectCache *common.TimeWheelCache[HashKey, consts.DnsRequestOutboundIndex]
-	coreIpDomainCache  *common.TimeWheelCache[HashKey, coreIpDomainCacheValue] // Key: Hash by qname + ip
-	sniffDomainCache   *common.TimeWheelCache[HashKey, struct{}]               // Key: Loose mode hashes by qname; Strict mode hashes by qname+ip. Used by VerifySniff.
-	sniffVerifyMode    consts.SniffVerifyMode
+	fixedDomainTtl   map[string]int
+	minSniffingTtl   time.Duration
+	enableCache      bool
+	dnsCache         *commonDnsCache
+	dnsCacheHashSeed maphash.Seed
+	// dnsForwardersClosed is set before Close sweeps the forwarder cache.
+	// getOrCreate re-checks it after a store so an in-flight query that
+	// outlived the close handle-gate cannot repopulate a forwarder that
+	// nothing will ever sweep or close again.
+	dnsForwardersClosed atomic.Bool
+	dnsForwarderCache   sync.Map // map[dnsForwarderKey]DnsForwarder
+	requestSelectCache  *common.TimeWheelCache[HashKey, consts.DnsRequestOutboundIndex]
+	coreIpDomainCache   *common.TimeWheelCache[HashKey, coreIpDomainCacheValue] // Key: Hash by qname + ip
+	sniffDomainCache    *common.TimeWheelCache[HashKey, struct{}]               // Key: Loose mode hashes by qname; Strict mode hashes by qname+ip. Used by VerifySniff.
+	sniffVerifyMode     consts.SniffVerifyMode
 
 	// bitmapIntern canonicalizes domain match bitmaps by content: domains with
 	// an identical match result (e.g. every geosite:cn-only domain) share one
@@ -974,9 +984,23 @@ func (c *DnsController) singleFlightForwardDNS(
 			if err != nil {
 				return nil, err
 			}
+			if c.dnsForwardersClosed.Load() {
+				return nil, ErrDnsForwardersClosed
+			}
 			// Try to store the new forwarder, but use LoadOrStore to handle concurrent creation
 			actualValue, _ := c.dnsForwarderCache.LoadOrStore(forwarderKey, forwarder)
 			forwarder = actualValue.(DnsForwarder)
+			if c.dnsForwardersClosed.Load() {
+				// The controller was closed between the entry check and
+				// this store. Stores that landed before the sweep's Range
+				// reached the key were closed by it; a store landing after
+				// would leak a forwarder nobody owns, so close it here and
+				// fail the in-flight query.
+				if closer, ok := forwarder.(io.Closer); ok {
+					_ = closer.Close()
+				}
+				return nil, ErrDnsForwardersClosed
+			}
 		}
 
 		r, err := forwarder.ForwardDNS(data)
@@ -1222,6 +1246,7 @@ func (c *DnsController) Close() error {
 	}
 
 	// Close all DNS forwarders
+	c.dnsForwardersClosed.Store(true)
 	c.dnsForwarderCache.Range(func(key, value any) bool {
 		if forwarder, ok := value.(io.Closer); ok {
 			forwarder.Close()
