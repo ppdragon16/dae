@@ -1447,20 +1447,20 @@ func (c *ControlPlane) loopUdp(udpConn *net.UDPConn, udpTaskChan chan *udpRoutin
 
 func (c *ControlPlane) startUdpWorkers(workerCount int) chan *udpRoutineParam {
 	udpTaskChan := make(chan *udpRoutineParam, 10240)
-	for i := 0; i < workerCount; i++ {
-		go func() {
+	for range workerCount {
+		go func(cp *ControlPlane, ch chan *udpRoutineParam) {
 			for {
 				select {
-				case <-c.ctx.Done():
+				case <-cp.ctx.Done():
 					return
-				case p, ok := <-udpTaskChan:
+				case p, ok := <-ch:
 					if !ok {
 						return
 					}
-					c.udpRoutine(p)
+					cp.udpRoutine(p)
 				}
 			}
-		}()
+		}(c, udpTaskChan)
 	}
 	return udpTaskChan
 }
