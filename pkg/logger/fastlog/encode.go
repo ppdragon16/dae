@@ -28,14 +28,6 @@ func appendLvl(buf []byte) []byte {
 	return append(buf, " level=info"...)
 }
 
-// appendMsg appends:  msg="..."
-func appendMsg(buf []byte, msg string) []byte {
-	buf = append(buf, ` msg="`...)
-	buf = append(buf, msg...)
-	buf = append(buf, '"')
-	return buf
-}
-
 // ---- field helpers ----
 
 // appendStr appends:  key=val  (val quoted when it contains special chars,

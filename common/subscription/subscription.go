@@ -151,9 +151,7 @@ func ResolveFile(u *url.URL, configDir string) (b []byte, err error) {
 // tag->nodeList mapping. Manual nodes are added under the empty tag "".
 func ResolveAllSubscriptions(client *http.Client, subscriptionDir string, nodes []string, subscriptions []string) (tagToNodeList map[string][]string) {
 	tagToNodeList = make(map[string][]string)
-	for _, node := range nodes {
-		tagToNodeList[""] = append(tagToNodeList[""], node)
-	}
+	tagToNodeList[""] = append(tagToNodeList[""], nodes...)
 	for _, sub := range subscriptions {
 		tag, nodes, err := ResolveSubscription(client, subscriptionDir, sub)
 		if err != nil {

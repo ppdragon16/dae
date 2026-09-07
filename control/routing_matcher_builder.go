@@ -32,7 +32,6 @@ type RoutingMatcherBuilder struct {
 	rules              []bpfMatchSet
 	simulatedLpmTries  [][]netip.Prefix
 	simulatedDomainSet []routing.DomainSet
-	fallback           *routing.Outbound
 }
 
 func NewRoutingMatcherBuilder(rules []*config_parser.RoutingRule, outboundName2Id map[string]uint8, bpf *bpfState, fallback config.FunctionOrString, ifmgr *component.InterfaceManager) (b *RoutingMatcherBuilder, err error) {
@@ -413,7 +412,7 @@ func (b *RoutingMatcherBuilder) BuildKernspace() (err error) {
 		// We cannot invoke BpfMapBatchUpdate when value is ebpf.Map.
 		if err = b.bpf.LpmArrayMap.Update(uint32(i), m, ebpf.UpdateAny); err != nil {
 			m.Close()
-			return fmt.Errorf("Update: %w", err)
+			return fmt.Errorf("update LpmArrayMap: %w", err)
 		}
 		m.Close()
 	}

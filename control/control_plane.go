@@ -213,8 +213,8 @@ func NewControlPlane(
 	}
 	var bpf *bpfState
 	if _bpf != nil {
-		if _bpf, ok := _bpf.(*bpfState); ok {
-			bpf = _bpf
+		if s, ok := _bpf.(*bpfState); ok {
+			bpf = s
 		} else {
 			return nil, common.Errf("unexpected bpf type: %T", _bpf)
 		}

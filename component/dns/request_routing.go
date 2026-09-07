@@ -24,7 +24,6 @@ type RequestMatcherBuilder struct {
 	simulatedDomainSet []routing.DomainSet
 	macSet             []*trie.Trie
 	sourceIpSet        []*trie.Trie
-	fallback           *routing.Outbound
 	rules              []requestMatchSet
 }
 

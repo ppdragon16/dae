@@ -64,10 +64,10 @@ func TestLogDialFormat(t *testing.T) {
 		"tcp4", "example.com",
 		makePname("curl"), makeMac("aa:bb:cc:dd:ee:ff"),
 		1234, 2, 0,
-		false,  // controlPlaneRoute
-		false,  // fallbackIpVersion
+		false, // controlPlaneRoute
+		false, // fallbackIpVersion
 		"1.2.3.4:443",
-		false,  // fallback
+		false, // fallback
 		"my-out", "min_moving_avg", "my-dialer",
 		"", "", "",
 	)
@@ -114,7 +114,7 @@ func TestLogDialFallback(t *testing.T) {
 		false, // controlPlaneRoute
 		false, // fallbackIpVersion
 		"1.2.3.4:443",
-		true, // fallback
+		true,       // fallback
 		"", "", "", // not used when fallback=true
 		"orig-out", "orig-policy", "fb-dialer",
 	)
@@ -198,7 +198,7 @@ func TestLogDnsResponseFormat(t *testing.T) {
 	LogDnsResponse(
 		mustAddrPort("192.168.1.1:54321"),
 		mustAddrPort("8.8.8.8:53"),
-		false, // not TCP
+		false,                      // not TCP
 		mustAddrPort("8.8.8.8:53"), // same as dst
 		"udp4", "my-out", "min_moving_avg", "my-dialer",
 		"example.com", 1,

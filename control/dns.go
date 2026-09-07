@@ -583,10 +583,8 @@ func (d *DoTcpAndUdp) maybeReviveUdp() {
 	}
 }
 
-func (d *DoTcpAndUdp) Close() (err error) {
-	err = d.doTcp.Close()
-	err = d.doUdp.Close()
-	return
+func (d *DoTcpAndUdp) Close() error {
+	return errors.Join(d.doTcp.Close(), d.doUdp.Close())
 }
 
 type StaticForwarder struct {

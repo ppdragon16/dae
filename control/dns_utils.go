@@ -378,11 +378,7 @@ func isDnsResponseValid(resp []byte) bool {
 	// 4. 检查 Answer 数量 (ANCOUNT) 是否 > 0
 	// 偏移量 6-7 字节
 	anCount := binary.BigEndian.Uint16(resp[6:8])
-	if anCount == 0 {
-		return false
-	}
-
-	return true
+	return anCount != 0
 }
 
 func dnsAnswers(data []byte) (ips []netip.Addr, minTTL uint32) {

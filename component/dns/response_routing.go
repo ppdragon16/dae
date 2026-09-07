@@ -25,7 +25,6 @@ type ResponseMatcherBuilder struct {
 	ipSet              []*trie.Trie
 	macSet             []*trie.Trie
 	sourceIpSet        []*trie.Trie
-	fallback           *routing.Outbound
 	rules              []responseMatchSet
 }
 

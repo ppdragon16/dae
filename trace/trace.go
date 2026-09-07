@@ -90,7 +90,7 @@ func StartTrace(ctx context.Context, ipVersion int, l4ProtoNo uint16, port int, 
 func rewriteAndLoadBpf(ipVersion int, l4ProtoNo uint16, port int) (_ *bpfObjects, err error) {
 	spec, err := loadBpf()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load BPF: %+v\n", err)
+		return nil, fmt.Errorf("failed to load BPF: %+v", err)
 	}
 	if err := internal.RewriteConstants(spec, map[string]interface{}{
 		"tracing_cfg": struct {
@@ -105,7 +105,7 @@ func rewriteAndLoadBpf(ipVersion int, l4ProtoNo uint16, port int) (_ *bpfObjects
 			pad:       0,
 		},
 	}); err != nil {
-		return nil, fmt.Errorf("failed to rewrite constants: %+v\n", err)
+		return nil, fmt.Errorf("failed to rewrite constants: %+v", err)
 	}
 	var opts ebpf.CollectionOptions
 	opts.Programs.LogLevel = ebpf.LogLevelInstruction
@@ -126,7 +126,7 @@ func searchAvailableTargets() (targets map[string]int, kfreeSkbReasons map[uint6
 
 	btfSpec, err := btf.LoadKernelSpec()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to load kernel BTF: %+v\n", err)
+		return nil, nil, fmt.Errorf("failed to load kernel BTF: %+v", err)
 	}
 
 	if kfreeSkbReasons, err = getKFreeSKBReasons(btfSpec); err != nil {
@@ -213,9 +213,14 @@ func attachBpfToTargets(objs *bpfObjects, targets map[string]int) (links []link.
 		links = append(links, kp)
 	}
 	if len(links) == 0 {
-		err = fmt.Errorf("failed to attach kprobes to any target")
+		if kp != nil {
+			kp.Close()
+		}
+		return nil, fmt.Errorf("failed to attach kprobes to any target")
 	}
-	links = append(links, kp)
+	if kp != nil {
+		links = append(links, kp)
+	}
 	return links, nil
 }
 
@@ -227,7 +232,7 @@ func handleEvents(ctx context.Context, objs *bpfObjects, outputFile string, kfre
 
 	eventsReader, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
-		return fmt.Errorf("failed to create ringbuf reader: %+v\n", err)
+		return fmt.Errorf("failed to create ringbuf reader: %+v", err)
 	}
 	defer eventsReader.Close()
 

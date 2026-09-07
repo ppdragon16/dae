@@ -24,15 +24,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type _bpfTuples struct {
-	Sip     [4]uint32
-	Dip     [4]uint32
-	Sport   uint16
-	Dport   uint16
-	L4proto uint8
-	_       [3]byte
-}
-
 type _bpfLpmKey struct {
 	PrefixLen uint32
 	Data      [4]uint32

@@ -156,7 +156,7 @@ func Run(conf *config.Config, externGeoDataDirs []string) {
 	var listener *control.Listener
 	sigs := make(chan os.Signal, 1)
 	errCh := make(chan error, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGILL, syscall.SIGUSR1, syscall.SIGUSR2)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGILL, syscall.SIGUSR1, syscall.SIGUSR2)
 	go func() {
 		readyChan := make(chan bool, 1)
 		go func() {
