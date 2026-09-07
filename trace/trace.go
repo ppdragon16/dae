@@ -92,7 +92,7 @@ func rewriteAndLoadBpf(ipVersion int, l4ProtoNo uint16, port int) (_ *bpfObjects
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BPF: %+v", err)
 	}
-	if err := internal.RewriteConstants(spec, map[string]interface{}{
+	if err := internal.RewriteConstants(spec, map[string]any{
 		"tracing_cfg": struct {
 			port      uint16
 			l4Proto   uint16

@@ -27,7 +27,7 @@ func (m *MissingConstantsError) Error() string {
 // CollectionSpec. It reimplements the removed
 // (*ebpf.CollectionSpec).RewriteConstants API from cilium/ebpf < v0.22,
 // which is now spelled via CollectionSpec.Variables.
-func RewriteConstants(spec *ebpf.CollectionSpec, constants map[string]interface{}) error {
+func RewriteConstants(spec *ebpf.CollectionSpec, constants map[string]any) error {
 	var missing []string
 	for name, value := range constants {
 		v, ok := spec.Variables[name]

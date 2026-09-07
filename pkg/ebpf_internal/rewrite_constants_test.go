@@ -19,7 +19,7 @@ func TestRewriteConstantsSet(t *testing.T) {
 	spec := newSpecWithVariables(map[string]*ebpf.VariableSpec{
 		"foo": {Name: "foo", SectionName: ".rodata"},
 	})
-	if err := RewriteConstants(spec, map[string]interface{}{"foo": uint32(42)}); err != nil {
+	if err := RewriteConstants(spec, map[string]any{"foo": uint32(42)}); err != nil {
 		t.Fatalf("RewriteConstants returned error: %v", err)
 	}
 	var got uint32
@@ -35,7 +35,7 @@ func TestRewriteConstantsMissing(t *testing.T) {
 	spec := newSpecWithVariables(map[string]*ebpf.VariableSpec{
 		"foo": {Name: "foo", SectionName: ".rodata"},
 	})
-	err := RewriteConstants(spec, map[string]interface{}{"foo": uint32(1), "bar": uint32(2), "baz": uint32(3)})
+	err := RewriteConstants(spec, map[string]any{"foo": uint32(1), "bar": uint32(2), "baz": uint32(3)})
 	if err == nil {
 		t.Fatal("expected error for missing constants, got nil")
 	}
@@ -64,7 +64,7 @@ func TestRewriteConstantsNotConstant(t *testing.T) {
 	spec := newSpecWithVariables(map[string]*ebpf.VariableSpec{
 		"foo": {Name: "foo", SectionName: ".data"},
 	})
-	err := RewriteConstants(spec, map[string]interface{}{"foo": 1})
+	err := RewriteConstants(spec, map[string]any{"foo": 1})
 	if err == nil {
 		t.Fatal("expected error for non-constant variable, got nil")
 	}

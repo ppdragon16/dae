@@ -461,7 +461,7 @@ func startCommandServer(port uint16, handler http.Handler) {
 	go commandServer.ListenAndServe()
 }
 
-func newControlPlane(bpf interface{}, conf *config.Config, externGeoDataDirs []string) (c *control.ControlPlane, err error) {
+func newControlPlane(bpf any, conf *config.Config, externGeoDataDirs []string) (c *control.ControlPlane, err error) {
 	// Deep copy to prevent modification.
 	conf = deepcopy.Copy(conf).(*config.Config)
 

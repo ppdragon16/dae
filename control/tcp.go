@@ -391,26 +391,26 @@ func RelayTCP(lConn, rConn net.Conn) error {
 	var (
 		r2lErr   error
 		l2rErr   error
-		errState int32
+		errState atomic.Int32
 		wg       sync.WaitGroup
 	)
 	wg.Go(func() {
 		e := relayDirection(lConn, rConn) // rConn -> lConn
 		if e != nil {
-			if atomic.CompareAndSwapInt32(&errState, 0, 1) {
+			if errState.CompareAndSwap(0, 1) {
 				r2lErr = e
 			}
 		}
 	})
 	e := relayDirection(rConn, lConn) // lConn -> rConn
 	if e != nil {
-		if atomic.CompareAndSwapInt32(&errState, 0, 2) {
+		if errState.CompareAndSwap(0, 2) {
 			l2rErr = e
 		}
 	}
 	wg.Wait()
 
-	switch atomic.LoadInt32(&errState) {
+	switch errState.Load() {
 	case 1: // r -> l
 		errMsg := r2lErr.Error()
 		switch {

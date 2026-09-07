@@ -308,10 +308,10 @@ func TestConcurrentSafety(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
 
-	for g := 0; g < goroutines; g++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
-			for i := 0; i < iterations; i++ {
+			for range iterations {
 				LogDial(
 					mustAddrPort("192.168.1.1:54321"),
 					mustAddrPort("1.2.3.4:443"),

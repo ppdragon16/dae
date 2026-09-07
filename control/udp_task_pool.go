@@ -109,7 +109,7 @@ func NewUdpTaskPool[K comparable, P any](hasher Hasher[K]) *UdpTaskPool[K, P] {
 		}},
 		hasher: hasher,
 	}
-	for i := 0; i < shardingCount; i++ {
+	for i := range shardingCount {
 		p.shards[i] = &udpTaskPoolShard[K, P]{
 			m: make(map[K]*UdpTaskQueue[K, P]),
 		}

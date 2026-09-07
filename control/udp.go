@@ -8,6 +8,7 @@ package control
 import (
 	"context"
 	"net/netip"
+	"slices"
 
 	"time"
 
@@ -35,13 +36,7 @@ type sniffingResult struct {
 func (c *ControlPlane) sniffPkt(key PacketSnifferKey, data []byte) (result *sniffingResult, err error) {
 	// Check if the destination port is in the configured udp_sniff_ports list.
 	port := key.Dst.Port()
-	shouldSniff := false
-	for _, p := range c.udpSniffPorts {
-		if p == port {
-			shouldSniff = true
-			break
-		}
-	}
+	shouldSniff := slices.Contains(c.udpSniffPorts, port)
 	if !shouldSniff {
 		return &sniffingResult{ignored: true}, nil
 	}

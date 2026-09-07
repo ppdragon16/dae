@@ -80,7 +80,7 @@ func (m *Marshaller) MarshalSection(name string, from reflect.Value, depth int) 
 		case reflect.String:
 			keyable := false
 			switch elemType {
-			case reflect.TypeOf(KeyableString("")):
+			case reflect.TypeFor[KeyableString]():
 				keyable = true
 			default:
 			}

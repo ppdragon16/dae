@@ -7,6 +7,7 @@ package dns
 
 import (
 	"fmt"
+	"maps"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -345,9 +346,7 @@ func (s *Dns) GetStaticEntries() map[string]*config.DnsStaticEntry {
 	defer s.staticEntriesMu.RUnlock()
 	// Return a copy to avoid race conditions
 	result := make(map[string]*config.DnsStaticEntry, len(s.staticEntries))
-	for k, v := range s.staticEntries {
-		result[k] = v
-	}
+	maps.Copy(result, s.staticEntries)
 	return result
 }
 

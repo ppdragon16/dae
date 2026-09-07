@@ -49,19 +49,19 @@ func (l *quicLogAdapter) Debug() bool {
 	return l.logLevel >= quic.LogLevelDebug
 }
 
-func (l *quicLogAdapter) Errorf(format string, args ...interface{}) {
+func (l *quicLogAdapter) Errorf(format string, args ...any) {
 	if l.logLevel >= quic.LogLevelError {
 		l.entry.Errorf("[QUIC] "+format, args...)
 	}
 }
 
-func (l *quicLogAdapter) Infof(format string, args ...interface{}) {
+func (l *quicLogAdapter) Infof(format string, args ...any) {
 	if l.logLevel >= quic.LogLevelInfo {
 		l.entry.Infof("[QUIC] "+format, args...)
 	}
 }
 
-func (l *quicLogAdapter) Debugf(format string, args ...interface{}) {
+func (l *quicLogAdapter) Debugf(format string, args ...any) {
 	if l.logLevel >= quic.LogLevelDebug {
 		l.entry.Debugf("[QUIC] "+format, args...)
 	}

@@ -246,7 +246,7 @@ func dnsDomain(data []byte, startOffset int) (qname string, nextOff int, err err
 			return "", 0, errors.New("qname length exceeds buffer size")
 		}
 
-		for i := 0; i < length; i++ {
+		for i := range length {
 			char := data[off+i]
 			if char >= 'A' && char <= 'Z' {
 				char += 'a' - 'A'
@@ -437,7 +437,7 @@ func newDNSRRIterator(data []byte) (dnsRRIterator, bool) {
 
 	// 1. 跳过 Question 区
 	off := 12
-	for i := 0; i < qdCount; i++ {
+	for range qdCount {
 		nextOff, err := dnsSkipDomain(data, off)
 		if err != nil {
 			return dnsRRIterator{}, false

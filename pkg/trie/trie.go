@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/bits"
 	"net/netip"
+	"slices"
 	"sort"
 
 	"github.com/daeuniverse/dae/common/bitlist"
@@ -107,7 +108,7 @@ func Prefix2bin128(prefix netip.Prefix) (bin128 string) {
 	buf := pool.PooledBuffer{}
 	defer buf.Reset()
 loop:
-	for i := 0; i < len(ip); i++ {
+	for i := range len(ip) {
 		for j := 7; j >= 0; j-- {
 			if (ip[i]>>j)&1 == 1 {
 				_ = buf.WriteByte('1')
@@ -338,12 +339,11 @@ func (ss *Trie) HasSuffix(word []byte) bool {
 
 	// Fast path for domain trie (6-bit labels) without branching inside loop
 	if unitBitSize == 6 {
-		for i := len(word) - 1; i >= 0; i-- {
+		for _, c := range slices.Backward(word) {
 			if (ss.leaves[nodeId>>6] & (1 << uint(nodeId&63))) != 0 {
 				return true
 			}
 
-			c := word[i]
 			charIndex := ss.chars.table[c]
 			if charIndex == 0 && c != ss.chars.zeroChar {
 				return false
@@ -379,12 +379,11 @@ func (ss *Trie) HasSuffix(word []byte) bool {
 	}
 
 	// Generic Path
-	for i := len(word) - 1; i >= 0; i-- {
+	for _, c := range slices.Backward(word) {
 		if (ss.leaves[nodeId>>6] & (1 << uint(nodeId&63))) != 0 {
 			return true
 		}
 
-		c := word[i]
 		charIndex := ss.chars.table[c]
 		if charIndex == 0 && c != ss.chars.zeroChar {
 			return false

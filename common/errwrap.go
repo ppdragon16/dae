@@ -83,7 +83,7 @@ func (e *Err) Is(target error) bool {
 }
 
 // As returns true if the target can be found in the error chain.
-func (e *Err) As(target interface{}) bool {
+func (e *Err) As(target any) bool {
 	if e.wrapped == nil {
 		return false
 	}

@@ -115,7 +115,7 @@ func RecycleBpfRoutingResult(r *bpfRoutingResult) {
 	bpfRoutingResultPool.Put(r)
 }
 
-func BpfMapBatchUpdate(m *ebpf.Map, keys interface{}, values interface{}, opts *ebpf.BatchOptions) (n int, err error) {
+func BpfMapBatchUpdate(m *ebpf.Map, keys any, values any, opts *ebpf.BatchOptions) (n int, err error) {
 	CheckBatchUpdateFeatureOnce.Do(func() {
 		version, e := internal.KernelVersion()
 		if e != nil {
@@ -155,7 +155,7 @@ func BpfMapBatchUpdate(m *ebpf.Map, keys interface{}, values interface{}, opts *
 		return 0, fmt.Errorf("keys and values must have same length")
 	}
 
-	for i := 0; i < length; i++ {
+	for i := range length {
 		vKey := vKeys.Index(i)
 		vVal := vVals.Index(i)
 		if err = m.Update(vKey.Interface(), vVal.Interface(), ebpf.MapUpdateFlags(opts.ElemFlags)); err != nil {
@@ -167,7 +167,7 @@ func BpfMapBatchUpdate(m *ebpf.Map, keys interface{}, values interface{}, opts *
 
 // BpfMapBatchDelete deletes keys and ignores ErrKeyNotExist.
 // Uses kernel batch delete API when available (5.6+), otherwise falls back to loop.
-func BpfMapBatchDelete(m *ebpf.Map, keys interface{}) (n int, err error) {
+func BpfMapBatchDelete(m *ebpf.Map, keys any) (n int, err error) {
 	if !SimulateBatchUpdate {
 		n, err = m.BatchDelete(keys, &ebpf.BatchOptions{})
 		if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -242,7 +242,7 @@ type loadBpfOptions struct {
 	KernelVersion       *internal.Version
 }
 
-func loadBpfObjectsWithConstants(obj interface{}, opts *ebpf.CollectionOptions, constants map[string]interface{}) error {
+func loadBpfObjectsWithConstants(obj any, opts *ebpf.CollectionOptions, constants map[string]any) error {
 	spec, err := loadBpf()
 	if err != nil {
 		return err
@@ -262,7 +262,7 @@ retryLoadBpf:
 	if err != nil {
 		return fmt.Errorf("failed to get netns id: %w", err)
 	}
-	constants := map[string]interface{}{
+	constants := map[string]any{
 		"PARAM": struct {
 			tproxyPort           uint32
 			controlPlanePid      uint32

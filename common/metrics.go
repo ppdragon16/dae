@@ -138,10 +138,7 @@ func (g *Gauge) createSlow(key uint64, v1, v2, v3, v4 string) *Series {
 	buf := make([]byte, 0, 128)
 	buf = append(buf, g.name...)
 
-	numKeys := len(g.labelKeys)
-	if numKeys > 4 {
-		numKeys = 4
-	}
+	numKeys := min(len(g.labelKeys), 4)
 	if numKeys > 0 {
 		buf = append(buf, '{')
 		vals := [4]string{v1, v2, v3, v4}

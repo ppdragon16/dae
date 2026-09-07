@@ -66,7 +66,7 @@ type Utls struct {
 	Imitate string `mapstructure:"imitate"`
 }
 
-type FunctionOrString interface{}
+type FunctionOrString any
 
 func FunctionOrStringToFunction(fs FunctionOrString) (f *config_parser.Function) {
 	switch fs := fs.(type) {
@@ -85,7 +85,7 @@ func FunctionOrStringToFunction(fs FunctionOrString) (f *config_parser.Function)
 	}
 }
 
-type FunctionListOrString interface{}
+type FunctionListOrString any
 
 func FunctionListOrStringToFunctionList(fs FunctionListOrString) (f []*config_parser.Function) {
 	switch fs := fs.(type) {

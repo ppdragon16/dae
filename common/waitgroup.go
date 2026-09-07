@@ -16,7 +16,7 @@ import (
 type TimedWaitGroup struct {
 	wg        sync.WaitGroup
 	mu        sync.Mutex
-	counter   uint64
+	counter   atomic.Uint64
 	itemsByID map[uint64]*twgItem
 }
 
@@ -37,7 +37,7 @@ func NewTimedWaitGroup() *TimedWaitGroup {
 // Add registers a new item with a timeout and a message.
 // It returns an id which must be provided to Done when the item completes.
 func (t *TimedWaitGroup) Add(timeout time.Duration, message string) uint64 {
-	id := atomic.AddUint64(&t.counter, 1)
+	id := t.counter.Add(1)
 	t.wg.Add(1)
 
 	item := &twgItem{message: message, timeout: timeout}

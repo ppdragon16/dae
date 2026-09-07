@@ -222,7 +222,7 @@ select_dialer:
 
 func (g *DialerGroup) PrintLatency() {
 	if log.IsLevelEnabled(log.InfoLevel) {
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			networkType := common.IndexToNetworkType(i)
 			g.mu.RLock()
 			g.selector.PrintLatencies(networkType, log.Infoln)

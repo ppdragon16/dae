@@ -86,7 +86,7 @@ func TestDialer_ResetLatency_AcrossGroups(t *testing.T) {
 	d.RegisterDialerGroup(g2)
 
 	// Seed both groups with a few samples so we have something to clear.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		d.Update(true, 100*time.Millisecond, testNetType, nil)
 	}
 

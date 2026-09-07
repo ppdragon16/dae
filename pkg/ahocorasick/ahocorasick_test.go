@@ -34,7 +34,7 @@ func TestContainsMatchesBruteForce(t *testing.T) {
 		return b
 	}
 
-	for round := 0; round < 200; round++ {
+	for round := range 200 {
 		n := 1 + rand.Intn(30)
 		keywords := make([][]byte, n)
 		for i := range keywords {
@@ -44,7 +44,7 @@ func TestContainsMatchesBruteForce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for trial := 0; trial < 1000; trial++ {
+		for range 1000 {
 			l := rand.Intn(40)
 			in := make([]byte, l)
 			for i := range in {

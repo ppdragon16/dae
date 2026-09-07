@@ -112,14 +112,14 @@ func (s *RandomSelector) NotifyStatusChange(dialer *dialer.Dialer) {
 		s.dialerToLatency[dialer] = latency
 	}
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		networkType := common.IndexToNetworkType(i)
 		s.networkIndexToDialers[i] = s.getSortedHighestPriorityAliveDialers(networkType)
 		s.handleAliveStateChange(len(s.networkIndexToDialers[i]) > 0, networkType)
 	}
 }
 
-func (s *RandomSelector) PrintLatencies(networkType *common.NetworkType, logfn func(args ...interface{})) {
+func (s *RandomSelector) PrintLatencies(networkType *common.NetworkType, logfn func(args ...any)) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

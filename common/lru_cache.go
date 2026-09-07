@@ -48,10 +48,7 @@ func NewShardedLru[K comparable, V any](totalCapacity int, shardCount int, ttl t
 		ttl:       ttl,
 	}
 
-	shardCap := totalCapacity / shardCount
-	if shardCap < 1 {
-		shardCap = 1
-	}
+	shardCap := max(totalCapacity/shardCount, 1)
 
 	for i := 0; i < shardCount; i++ {
 		s.shards[i] = &lruShard[K, V]{

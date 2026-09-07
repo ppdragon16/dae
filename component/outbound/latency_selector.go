@@ -48,7 +48,7 @@ func (s *LatencyBasedSelector) getSortingLatency(d *dialer.Dialer) time.Duration
 }
 
 var dialerSlicePool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return make([]*dialer.Dialer, 0, 10)
 	},
 }
@@ -89,7 +89,7 @@ func isDialerAlive(dialer *dialer.Dialer, networkType *common.NetworkType) bool 
 	return true
 }
 
-func (s *LatencyBasedSelector) PrintLatencies(networkType *common.NetworkType, logfn func(args ...interface{})) {
+func (s *LatencyBasedSelector) PrintLatencies(networkType *common.NetworkType, logfn func(args ...any)) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -99,7 +99,7 @@ func (s *LatencyBasedSelector) PrintLatencies(networkType *common.NetworkType, l
 	dialerSlicePool.Put(aliveDialers[:0])
 }
 
-func (s *LatencyBasedSelector) printLatencies(aliveDialers []*dialer.Dialer, networkType *common.NetworkType, logfn func(args ...interface{})) {
+func (s *LatencyBasedSelector) printLatencies(aliveDialers []*dialer.Dialer, networkType *common.NetworkType, logfn func(args ...any)) {
 	// Note: the first aliveDialer may not be the selected one due to tolerance.
 	var selected *dialer.Dialer
 	if networkType != nil {
@@ -260,7 +260,7 @@ func (s *LatencyBasedSelector) NotifyStatusChange(d *dialer.Dialer) {
 		dialerSlicePool.Put(dialersBuf[:0])
 	}()
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		networkType := common.IndexToNetworkType(i)
 		aliveDialers := s.getSortedAliveDialers(networkType, dialersBuf)
 		dialersBuf = aliveDialers

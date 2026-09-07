@@ -76,7 +76,7 @@ func (w *Walker) parseNonEmptyParamList(list *dae_config.NonEmptyParameterListCo
 	return paramParser.list
 }
 
-type functionVerifier func(function *Function, ctx interface{}) bool
+type functionVerifier func(function *Function, ctx any) bool
 
 func (w *Walker) parseFunctionPrototype(ctx *dae_config.FunctionPrototypeContext, verifier functionVerifier) *Function {
 	children := ctx.GetChildren()
@@ -115,7 +115,7 @@ func (w *Walker) parseFunctionPrototype(ctx *dae_config.FunctionPrototypeContext
 	return f
 }
 
-func (w *Walker) ReportError(ctx interface{}, errorType ErrorType, target ...string) {
+func (w *Walker) ReportError(ctx any, errorType ErrorType, target ...string) {
 	if _, ok := ctx.(*antlr.ErrorNodeImpl); ok {
 		return
 	}
@@ -132,7 +132,7 @@ func (w *Walker) ReportError(ctx interface{}, errorType ErrorType, target ...str
 	w.parser.NotifyErrorListeners(fmt.Sprintf("%v %v.", tgt, errorType), bCtx.GetStart(), nil)
 }
 
-func (w *Walker) declarationFunctionVerifier(function *Function, ctx interface{}) bool {
+func (w *Walker) declarationFunctionVerifier(function *Function, ctx any) bool {
 	//if function.Not {
 	//	w.ReportError(ctx, ErrorType_Unsupported, "Not operator in param declaration")
 	//	return false

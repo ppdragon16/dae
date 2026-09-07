@@ -115,7 +115,7 @@ func TestPacketSniffer_ExpireWaitsForInFlightSniff(t *testing.T) {
 // sniffing loop; run under -race it must report no data race on quicKeys.
 func TestPacketSniffer_ExpireRaceStress(t *testing.T) {
 	data, _ := hex.DecodeString(testPacketSnifferData[0])
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		mgr := NewPacketSnifferPool()
 		key := PacketSnifferKey{
 			Src: netip.MustParseAddrPort("10.1.0.1:1000"),
@@ -127,7 +127,7 @@ func TestPacketSniffer_ExpireRaceStress(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 10; j++ {
+			for range 10 {
 				_qs := mgr.Get(key)
 				if _qs == nil {
 					return

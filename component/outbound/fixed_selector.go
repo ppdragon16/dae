@@ -61,14 +61,14 @@ func (s *FixedSelector) NotifyStatusChange(dialer *dialer.Dialer) {
 	}
 	if dialer == s.dialerGroup.Dialers[s.dialerGroup.selectionPolicy.FixedIndex] {
 		s.updateAliveState(dialer, dialer.Alive())
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			networkType := common.IndexToNetworkType(i)
 			s.handleAliveStateChange(dialer.Alive() && dialer.Supported(i), networkType)
 		}
 	}
 }
 
-func (s *FixedSelector) PrintLatencies(networkType *common.NetworkType, logfn func(args ...interface{})) {
+func (s *FixedSelector) PrintLatencies(networkType *common.NetworkType, logfn func(args ...any)) {
 	var builder strings.Builder
 	if networkType != nil {
 		builder.WriteString(fmt.Sprintf("Group '%v' [%v]:\n", s.dialerGroup.Name, networkType.String()))

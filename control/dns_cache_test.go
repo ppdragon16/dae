@@ -62,7 +62,7 @@ func TestDnsCacheRefreshBackoff(t *testing.T) {
 
 	// Repeated failures cap at dnsRefreshBackoffMax.
 	last := t1
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		last = last.Add(time.Minute)
 		c.PostponeRefresh(key, last)
 	}

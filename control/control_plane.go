@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,7 +121,7 @@ type ControlPlane struct {
 // TODO: Hy2 的 mark 支持
 // TODO: HandlePkt HandleConn 分割 Route 和 Dial
 func NewControlPlane(
-	_bpf interface{},
+	_bpf any,
 	tagToNodeList map[string][]string,
 	groups []config.Group,
 	routingA *config.Routing,
@@ -1058,7 +1059,7 @@ func traceColumn(header string, entries []pool.StackTraceEntry) []string {
 	}
 	for _, e := range entries {
 		lines = append(lines, fmt.Sprintf("%d x", e.Count))
-		for _, frame := range strings.Split(e.Stack, "\n") {
+		for frame := range strings.SplitSeq(e.Stack, "\n") {
 			lines = append(lines, "  "+frame)
 		}
 	}
@@ -1073,8 +1074,8 @@ func traceColumn(header string, entries []pool.StackTraceEntry) []string {
 //	ttl: 60
 func parseStaticEntry(body string) (*config.DnsStaticEntry, error) {
 	entry := &config.DnsStaticEntry{}
-	lines := strings.Split(body, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(body, "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -2209,8 +2210,8 @@ func (c *ControlPlane) Close() (err error) {
 	c.bpfMapJanitor.Stop()
 
 	// Invoke defer funcs in reverse order.
-	for i := len(c.deferFuncs) - 1; i >= 0; i-- {
-		if e := c.deferFuncs[i](); e != nil {
+	for _, v := range slices.Backward(c.deferFuncs) {
+		if e := v(); e != nil {
 			// Combine errors.
 			if err != nil {
 				err = common.Errf("%w; %v", err, e)

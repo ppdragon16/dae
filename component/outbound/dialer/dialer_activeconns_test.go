@@ -39,7 +39,7 @@ func TestRegisterUnregisterConn(t *testing.T) {
 func TestAbortConnsClosesBothEnds(t *testing.T) {
 	d := newRegistryTestDialer()
 	var pairs [][2]net.Conn
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		l, r := net.Pipe()
 		pairs = append(pairs, [2]net.Conn{l, r})
 		d.RegisterConn(l, r)
@@ -93,18 +93,16 @@ func TestActiveConnsConcurrentAccess(t *testing.T) {
 	d := newRegistryTestDialer()
 	const workers, iters = 8, 500
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iters; j++ {
+	for range workers {
+		wg.Go(func() {
+			for range iters {
 				l, r := net.Pipe()
 				d.RegisterConn(l, r)
 				d.UnregisterConn(r)
 				_ = l.Close()
 				_ = r.Close()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if len(d.activeConns) != 0 {

@@ -19,7 +19,7 @@ func StringListParser(to reflect.Value, section *config_parser.Section) error {
 		return fmt.Errorf("StringListParser can only unmarshal section to *[]string")
 	}
 	to = to.Elem()
-	if to.Type() != reflect.TypeOf([]string{}) &&
+	if to.Type() != reflect.TypeFor[[]string]() &&
 		!(to.Kind() == reflect.Slice && to.Type().Elem().Kind() == reflect.String) {
 		return fmt.Errorf("StringListParser can only unmarshal section to *[]string")
 	}
@@ -173,7 +173,7 @@ func ParamParser(to reflect.Value, section *config_parser.Section, ignoreType []
 		case *config_parser.RoutingRule:
 			// Assign. "to" should have field "Rules".
 			structField, ok := to.Type().FieldByName("Rules")
-			if !ok || structField.Type != reflect.TypeOf([]*config_parser.RoutingRule{}) {
+			if !ok || structField.Type != reflect.TypeFor[[]*config_parser.RoutingRule]() {
 				return fmt.Errorf("cannot use routing rule in this context: %v", itemVal.String(true, false, false))
 			}
 			if structField.Tag.Get("mapstructure") != "_" {

@@ -144,7 +144,7 @@ func ResolveUDP(conn net.Conn, data []byte, respBuf []byte) (resp []byte, err er
 	ticker := time.NewTicker(resolveUdpRetryInterval)
 	defer ticker.Stop()
 
-	for i := 0; i < resolveUdpRetryCount; i++ {
+	for range resolveUdpRetryCount {
 		_, err = conn.Write(data)
 		if err != nil {
 			return nil, common.Wrap(err, "udp write error")

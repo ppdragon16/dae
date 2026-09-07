@@ -31,7 +31,7 @@ type SingleFlight[K comparable, V any, P any] struct {
 // Result holds the results of Do, so they can be passed
 // on a channel.
 type Result struct {
-	Val    interface{}
+	Val    any
 	Err    error
 	Shared bool
 }

@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"regexp"
+	"slices"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -140,8 +141,8 @@ func (c *controlPlaneCore) Close() (err error) {
 	default:
 	}
 	// Invoke defer funcs in reverse order.
-	for i := len(c.deferFuncs) - 1; i >= 0; i-- {
-		if e := c.deferFuncs[i](); e != nil {
+	for _, v := range slices.Backward(c.deferFuncs) {
+		if e := v(); e != nil {
 			// Combine errors.
 			if err != nil {
 				err = common.Errf("%w; %v", err, e)
@@ -790,10 +791,7 @@ func (c *controlPlaneCore) BatchNewDomain(ip netip.Addr, domainBitmap *[32]uint3
 // current domainBitLength. domainState entries live as long as the IP stays
 // cached (min_sniffing_ttl), so no pooling is needed.
 func (c *controlPlaneCore) newDomainState() *domainState {
-	n := c.domainBitLength
-	if n < 1 {
-		n = 1
-	}
+	n := max(c.domainBitLength, 1)
 	return &domainState{matched: make([]uint32, n)}
 }
 

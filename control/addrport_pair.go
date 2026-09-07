@@ -40,7 +40,7 @@ func hashAddr(h uint32, addr netip.Addr, prime uint32) uint32 {
 		h = (h ^ uint32(a4[3])) * prime
 	} else {
 		a16 := addr.As16()
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			h = (h ^ uint32(a16[i])) * prime
 		}
 	}
