@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -136,7 +137,31 @@ unsupported:
 	return fmt.Errorf("unsupported section type %v", from.Type())
 }
 
-func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int) (err error) {
+func (m *Marshaller) marshalAndFunctionList(key string, from, annotation reflect.Value, depth int) error {
+	for i := 0; i < from.Len(); i++ {
+		andFuncs := from.Index(i)
+		if andFuncs.Len() == 0 {
+			continue
+		}
+		funcs := make([]*config_parser.Function, 0, andFuncs.Len())
+		for j := 0; j < andFuncs.Len(); j++ {
+			funcs = append(funcs, andFuncs.Index(j).Interface().(*config_parser.Function))
+		}
+		p := &config_parser.Param{
+			Key:          key,
+			AndFunctions: funcs,
+		}
+		if annotation.IsValid() && annotation.Kind() == reflect.Slice && i < annotation.Len() {
+			if a, ok := annotation.Index(i).Interface().([]*config_parser.Param); ok {
+				p.Annotation = a
+			}
+		}
+		m.writeLine(depth, p.String(true, true))
+	}
+	return nil
+}
+
+func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int, annotation reflect.Value) (err error) {
 	if m.IgnoreZero && from.IsZero() {
 		// Do not marshal zero value.
 		return nil
@@ -145,6 +170,9 @@ func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int) (err
 	case reflect.Slice:
 		if from.Len() == 0 {
 			return nil
+		}
+		if from.Type().Elem().Kind() == reflect.Slice && from.Type().Elem().Elem() == reflect.TypeFor[*config_parser.Function]() {
+			return m.marshalAndFunctionList(key, from, annotation, depth)
 		}
 		switch from.Index(0).Interface().(type) {
 		case fmt.Stringer, string,
@@ -161,7 +189,7 @@ func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int) (err
 			var vals []string
 			for i := 0; i < from.Len(); i++ {
 				v := from.Index(i).Interface().(*config_parser.Function)
-				vals = append(vals, v.String(true, true, false))
+				vals = append(vals, v.MarshalString(true, true, false))
 			}
 			m.writeLine(depth, key+":"+strings.Join(vals, "&&"))
 		case KeyableString:
@@ -176,14 +204,35 @@ func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int) (err
 	default:
 		switch val := from.Interface().(type) {
 		case fmt.Stringer, string,
-			uint8, uint16, uint32, uint64,
-			int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			int, int8, int16, int32, int64,
 			float32, float64,
 			bool:
 			m.writeLine(depth, key+":"+strconv.Quote(fmt.Sprintf("%v", val)))
 		case *config_parser.Function:
-			m.writeLine(depth, key+":"+val.String(true, true, false))
+			m.writeLine(depth, key+":"+val.MarshalString(true, true, false))
 		default:
+			// Named string types (e.g. consts.RerouteMode) marshal like
+			// plain strings, so config round-trips survive config structs
+			// carrying them.
+			if v := reflect.ValueOf(from.Interface()); v.Kind() == reflect.String {
+				m.writeLine(depth, key+":"+strconv.Quote(v.String()))
+				return nil
+			}
+			// Maps of structs (e.g. dns.static) marshal as named blocks:
+			// key { ... } with sorted keys for deterministic output.
+			if v := reflect.ValueOf(from.Interface()); v.Kind() == reflect.Map {
+				keys := v.MapKeys()
+				sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+				for _, k := range keys {
+					m.writeLine(depth, fmt.Sprintf("%v", k.Interface())+" {")
+					if err = m.marshalParam(v.MapIndex(k), depth+1); err != nil {
+						return err
+					}
+					m.writeLine(depth, "}")
+				}
+				return nil
+			}
 			return fmt.Errorf("unknown leaf type: %T", val)
 		}
 	}
@@ -217,6 +266,8 @@ func (m *Marshaller) marshalParam(from reflect.Value, depth int) (err error) {
 				for _, r := range rules {
 					m.writeLine(depth, r.String(false, true, true))
 				}
+			case "FilterAnnotation":
+				// Consumed via FieldByName pairing with its Filter field.
 			default:
 				return fmt.Errorf("unknown reserved field: %v", structField.Name)
 			}
@@ -232,8 +283,9 @@ func (m *Marshaller) marshalParam(from reflect.Value, depth int) (err error) {
 			continue
 		}
 
-		// Normal field.
-		if err = m.marshalLeaf(key, field, depth); err != nil {
+		// Pair Field with sibling FieldAnnotation by index (Group.Filter).
+		annotation := from.FieldByName(structField.Name + "Annotation")
+		if err = m.marshalLeaf(key, field, depth, annotation); err != nil {
 			return err
 		}
 	}
