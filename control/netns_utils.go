@@ -106,7 +106,18 @@ func (ns *DaeNetns) With(f func() error) (err error) {
 	if err = netns.Set(ns.daeNs); err != nil {
 		return fmt.Errorf("failed to switch to daens: %v", err)
 	}
-	defer netns.Set(ns.hostNs)
+	defer func() {
+		// A silently-failed restore would leave this worker thread inside
+		// the dae namespace when it returns to the scheduler pool, so
+		// unrelated goroutines scheduled on it would run in the wrong
+		// namespace. Fail closed instead of ignoring the error.
+		if restoreErr := netns.Set(ns.hostNs); restoreErr != nil {
+			log.Errorf("failed to restore host netns: %v", restoreErr)
+			if err == nil {
+				err = fmt.Errorf("failed to restore host netns: %v", restoreErr)
+			}
+		}
+	}()
 
 	if err = f(); err != nil {
 		return fmt.Errorf("failed to run func in dae netns: %v", err)
@@ -123,7 +134,18 @@ func (ns *DaeNetns) setup() (err error) {
 	if ns.hostNs, err = netns.Get(); err != nil {
 		return fmt.Errorf("failed to get host netns: %v", err)
 	}
-	defer netns.Set(ns.hostNs)
+	defer func() {
+		// Same as With(): the restore must never fail silently, or the
+		// thread leaks back into the scheduler pool inside whatever
+		// namespace it was last in, and every later guest of that thread
+		// inherits the wrong namespace.
+		if restoreErr := netns.Set(ns.hostNs); restoreErr != nil {
+			log.Errorf("failed to restore host netns: %v", restoreErr)
+			if err == nil {
+				err = fmt.Errorf("failed to restore host netns: %v", restoreErr)
+			}
+		}
+	}()
 
 	if err = ns.setupVeth(); err != nil {
 		return
