@@ -168,7 +168,7 @@ func Run(conf *config.Config, externGeoDataDirs []string) {
 			_ = os.WriteFile(SignalProgressFilePath, []byte{consts.ReloadDone}, 0644)
 		}()
 		err := control.GetDaeNetns().With(func() error {
-			if listener, err = c.ListenAndServe(readyChan, conf.Global.TproxyPort); err != nil {
+			if listener, err = c.ListenAndServe(readyChan, conf.Global.TproxyPort, conf.Global.TproxyReuseport); err != nil {
 				return common.Wrap(err, "ListenAndServe")
 			}
 			return nil

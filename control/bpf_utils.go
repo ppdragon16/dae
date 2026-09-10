@@ -240,6 +240,7 @@ func (p bpfIfParams) CheckVersionRequirement(version *internal.Version) (err err
 type loadBpfOptions struct {
 	PinPath             string
 	BigEndianTproxyPort uint32
+	TproxyReuseport     uint8
 	CollectionOptions   *ebpf.CollectionOptions
 	KernelVersion       *internal.Version
 }
@@ -281,7 +282,8 @@ retryLoadBpf:
 			paddingAfterMac      [2]byte
 			useRedirectPeer      uint8
 			hasBpfGetCurrentTask uint8
-			padding2             uint16
+			tproxyReuseport      uint8
+			padding2             uint8
 			daeSocketMark        uint32
 		}{
 			tproxyPort:      uint32(opts.BigEndianTproxyPort),
@@ -297,6 +299,7 @@ retryLoadBpf:
 				return 0
 			}(),
 			hasBpfGetCurrentTask: hasBpfGetCurrentTask,
+			tproxyReuseport:      opts.TproxyReuseport,
 			padding2:             0,
 			daeSocketMark:        0,
 		},

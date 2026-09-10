@@ -93,11 +93,16 @@ struct {
 } outbound_connectivity_map SEC(".maps");
 
 // Sockmap:
+// Slots for the tproxy listener pool (see tproxy_reuseport). Keys are
+// interleaved: 2*i is the i-th TCP listener and 2*i+1 the i-th UDP listener,
+// so the default single-listener layout (key 0 = TCP, key 1 = UDP) is
+// preserved.
+#define TPROXY_REUSEPORT_MAX 16
 struct {
 	__uint(type, BPF_MAP_TYPE_SOCKMAP);
-	__type(key, __u32); // 0 is tcp, 1 is udp.
+	__type(key, __u32);
 	__type(value, __u64); // fd of socket.
-	__uint(max_entries, 2);
+	__uint(max_entries, 2 * TPROXY_REUSEPORT_MAX);
 } listen_socket_map SEC(".maps");
 
 union ip6 {
@@ -166,7 +171,10 @@ struct dae_param {
 	__u8 padding_after_mac[2]; // pad to align use_redirect_peer
 	__u8 use_redirect_peer;
 	__u8 has_bpf_get_current_task;
-	__u16 padding2;
+	// Number of tproxy listener sockets per l4proto in listen_socket_map
+	// (tproxy_reuseport). 0 is treated as 1.
+	__u8 tproxy_reuseport;
+	__u8 padding2;
 	// dae_socket_mark is set on dae's own sockets to identify them.
 	__u32 dae_socket_mark;
 };
@@ -1439,13 +1447,24 @@ static __always_inline int redirect_to_control_plane_egress(void)
 
 static __always_inline int assign_listener(struct __sk_buff *skb, __u8 l4proto)
 {
+	__u32 reuseport = PARAM.tproxy_reuseport;
+
+	if (!reuseport)
+		reuseport = 1;
+	// Keys are interleaved: 2*i = i-th TCP slot, 2*i+1 = i-th UDP slot,
+	// keeping key 0 (TCP) / key 1 (UDP) for the single-listener default.
+	__u32 proto_bit = (l4proto == IPPROTO_TCP) ? 0 : 1;
+	__u32 key = proto_bit;
+	if (reuseport > 1) {
+		// Spread over the listener pool by packet hash; packets without
+		// an l4 hash land on slot 0.
+		__u32 h = skb->hash;
+		if (h)
+			key = (h % reuseport) * 2 + proto_bit;
+	}
+
 	struct bpf_sock *sk;
-
-	if (l4proto == IPPROTO_TCP)
-		sk = bpf_map_lookup_elem(&listen_socket_map, &zero_key);
-	else
-		sk = bpf_map_lookup_elem(&listen_socket_map, &one_key);
-
+	sk = bpf_map_lookup_elem(&listen_socket_map, &key);
 	if (!sk)
 		return -1;
 

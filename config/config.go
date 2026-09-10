@@ -21,7 +21,12 @@ var (
 type Global struct {
 	TproxyPort        uint16 `mapstructure:"tproxy_port" default:"12345"`
 	TproxyPortProtect bool   `mapstructure:"tproxy_port_protect" default:"true"`
-	SoMarkFromDae     uint32 `mapstructure:"so_mark_from_dae"`
+	// TproxyReuseport is the number of tproxy listener sockets per l4proto.
+	// >1 creates a SO_REUSEPORT listener pool and spreads packets by flow
+	// hash via bpf_sk_assign, improving multi-core receive scaling under
+	// high pps. Requires kernel >= 6.6 for sk_assign to reuseport sockets.
+	TproxyReuseport uint8  `mapstructure:"tproxy_reuseport" default:"1"`
+	SoMarkFromDae   uint32 `mapstructure:"so_mark_from_dae"`
 	LogLevel          string `mapstructure:"log_level" default:"info"`
 	// We use DirectTcpCheckUrl to check (tcp)*(ipv4/ipv6) connectivity for direct.
 	//DirectTcpCheckUrl string `mapstructure:"direct_tcp_check_url" default:"http://www.qualcomm.cn/generate_204"`

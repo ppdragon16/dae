@@ -9,6 +9,11 @@ global {
     # iptables tproxy rules.
     tproxy_port_protect: true
 
+    # Number of tproxy listener sockets per l4proto (SO_REUSEPORT pool). Packets are spread over the pool by
+    # flow hash via bpf_sk_assign, improving multi-core receive scaling under high pps. Requires kernel >= 6.6.
+    # Default to 1 (single listener, no behavior change).
+    # tproxy_reuseport: 1
+
     # Set non-zero value to enable pprof.
     pprof_port: 0
 

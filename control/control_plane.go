@@ -36,6 +36,7 @@ import (
 	"github.com/daeuniverse/dae/common/assets"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/subscription"
+	"golang.org/x/sys/unix"
 	"github.com/daeuniverse/dae/component/dns"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
@@ -224,6 +225,7 @@ func NewControlPlane(
 		if err = fullLoadBpfObjects(bpf.bpfObjects, &loadBpfOptions{
 			PinPath:             pinPath,
 			BigEndianTproxyPort: uint32(common.Htons(global.TproxyPort)),
+			TproxyReuseport:     global.TproxyReuseport,
 			CollectionOptions:   collectionOpts,
 			KernelVersion:       &kernelVersion,
 		}); err != nil {
@@ -1235,7 +1237,11 @@ func (c *ControlPlane) VerifySniff(outbound consts.OutboundIndex, dst netip.Addr
 type Listener struct {
 	tcpListener net.Listener
 	packetConn  net.PacketConn
-	port        uint16
+	// Extra sockets of the tproxy_reuseport listener pool. Empty when the
+	// pool size is 1 (default).
+	extraTcpListeners []net.Listener
+	extraPacketConns  []net.PacketConn
+	port              uint16
 }
 
 func (l *Listener) Close() error {
@@ -1250,6 +1256,16 @@ func (l *Listener) Close() error {
 			err = common.Errf("%w: %v", err, err2)
 		}
 	}
+	for _, tl := range l.extraTcpListeners {
+		if e := tl.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	for _, pc := range l.extraPacketConns {
+		if e := pc.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
 	return err
 }
 
@@ -1261,7 +1277,8 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 		}
 	}()
 	/// Serve.
-	// TCP socket.
+	// TCP listener pool: even keys 2*i are TCP slots, odd keys 2*i+1 are UDP
+	// slots (see listen_socket_map). Slot 0 keeps the legacy ZeroKey/OneKey.
 	tcpFile, err := listener.tcpListener.(*net.TCPListener).File()
 	if err != nil {
 		return common.Errf("failed to retrieve copy of the underlying TCP connection file")
@@ -1271,6 +1288,19 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	})
 	if err := c.core.bpf.ListenSocketMap.Update(consts.ZeroKey, uint64(tcpFile.Fd()), ebpf.UpdateAny); err != nil {
 		return err
+	}
+	for i, l := range listener.extraTcpListeners {
+		f, err := l.(*net.TCPListener).File()
+		if err != nil {
+			return common.Errf("failed to retrieve copy of the underlying TCP connection file")
+		}
+		c.deferFuncs = append(c.deferFuncs, func() error {
+			return f.Close()
+		})
+		key := consts.ParamKey(2 * (i + 1))
+		if err := c.core.bpf.ListenSocketMap.Update(key, uint64(f.Fd()), ebpf.UpdateAny); err != nil {
+			return err
+		}
 	}
 	// UDP socket.
 	udpConn := listener.packetConn.(*net.UDPConn)
@@ -1285,6 +1315,22 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	})
 	if err := c.core.bpf.ListenSocketMap.Update(consts.OneKey, uint64(udpFile.Fd()), ebpf.UpdateAny); err != nil {
 		return err
+	}
+	for i, pc := range listener.extraPacketConns {
+		uc := pc.(*net.UDPConn)
+		uc.SetDeadline(time.Time{})
+		f, err := uc.File()
+		if err != nil {
+			return common.Errf("failed to retrieve copy of the underlying UDP connection file")
+		}
+		c.deferFuncs = append(c.deferFuncs, func() error {
+			uc.SetDeadline(time.Unix(0, 1)) // unblock ReadMsgUDPAddrPort
+			return f.Close()
+		})
+		key := consts.ParamKey(2*(i+1) + 1)
+		if err := c.core.bpf.ListenSocketMap.Update(key, uint64(f.Fd()), ebpf.UpdateAny); err != nil {
+			return err
+		}
 	}
 
 	sentReady = true
@@ -1307,13 +1353,24 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 			}
 		}
 	}()
-	go c.loopTcp(listener)
+	for _, l := range append([]net.Listener{listener.tcpListener}, listener.extraTcpListeners...) {
+		go c.loopTcp(l)
+	}
 
 	DefaultAnyfromPool = NewAnyfromPool()
 	go DefaultAnyfromPool.Start(c.ctx)
 
 	udpTaskChan := c.startUdpWorkers(100)
-	go c.loopUdp(udpConn, udpTaskChan)
+	udpConns := make([]*net.UDPConn, 0, len(listener.extraPacketConns)+1)
+	udpConns = append(udpConns, udpConn)
+	for _, pc := range listener.extraPacketConns {
+		uc := pc.(*net.UDPConn)
+		uc.SetDeadline(time.Time{})
+		udpConns = append(udpConns, uc)
+	}
+	for _, uc := range udpConns {
+		go c.loopUdp(uc, udpTaskChan)
+	}
 
 	c.bpfMapJanitor.Start(c.ctx)
 
@@ -1321,14 +1378,14 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	return nil
 }
 
-func (c *ControlPlane) loopTcp(listener *Listener) {
+func (c *ControlPlane) loopTcp(tcpListener net.Listener) {
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
 		default:
 		}
-		lconn, err := listener.tcpListener.Accept()
+		lconn, err := tcpListener.Accept()
 		if err != nil {
 			if !strings.Contains(err.Error(), "use of closed network connection") {
 				log.Errorf("%+v", common.Wrap(err, "Error when accept"))
@@ -1549,27 +1606,67 @@ func recycleUdpEmitTask(t *UdpTask[emitParam]) {
 	udpEmitTaskPool.Put(t)
 }
 
-func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16) (listener *Listener, err error) {
+func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16, reuseport uint8) (listener *Listener, err error) {
+	if reuseport == 0 {
+		reuseport = 1
+	}
 	// Listen.
 	var listenConfig = net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return dialer.TproxyControl(c)
 		},
 	}
-	listenAddr := net.JoinHostPort(c.listenIp, strconv.Itoa(int(port)))
-	tcpListener, err := listenConfig.Listen(context.TODO(), "tcp", listenAddr)
-	if err != nil {
-		return nil, common.Errf("listenTCP: %w", err)
+	if reuseport > 1 {
+		// Every socket of a reuseport group must set SO_REUSEPORT before
+		// bind, with identical effective socket options.
+		baseControl := listenConfig.Control
+		listenConfig.Control = func(network, address string, c syscall.RawConn) error {
+			if err := baseControl(network, address, c); err != nil {
+				return err
+			}
+			var sockOptErr error
+			if err := c.Control(func(fd uintptr) {
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+					sockOptErr = fmt.Errorf("error setting SO_REUSEPORT socket option: %w", err)
+				}
+			}); err != nil {
+				return err
+			}
+			return sockOptErr
+		}
 	}
-	packetConn, err := listenConfig.ListenPacket(context.TODO(), "udp", listenAddr)
-	if err != nil {
-		_ = tcpListener.Close()
-		return nil, common.Errf("listenUDP: %w", err)
+	listenAddr := net.JoinHostPort(c.listenIp, strconv.Itoa(int(port)))
+	tcpListeners := make([]net.Listener, 0, int(reuseport))
+	packetConns := make([]net.PacketConn, 0, int(reuseport))
+	cleanup := func() {
+		for _, l := range tcpListeners {
+			_ = l.Close()
+		}
+		for _, pc := range packetConns {
+			_ = pc.Close()
+		}
+	}
+	for i := 0; i < int(reuseport); i++ {
+		tcpListener, err := listenConfig.Listen(context.TODO(), "tcp", listenAddr)
+		if err != nil {
+			cleanup()
+			return nil, common.Errf("listenTCP: %w", err)
+		}
+		tcpListeners = append(tcpListeners, tcpListener)
+		packetConn, err := listenConfig.ListenPacket(context.TODO(), "udp", listenAddr)
+		if err != nil {
+			_ = tcpListener.Close()
+			cleanup()
+			return nil, common.Errf("listenUDP: %w", err)
+		}
+		packetConns = append(packetConns, packetConn)
 	}
 	listener = &Listener{
-		tcpListener: tcpListener,
-		packetConn:  packetConn,
-		port:        port,
+		tcpListener:       tcpListeners[0],
+		packetConn:        packetConns[0],
+		extraTcpListeners: tcpListeners[1:],
+		extraPacketConns:  packetConns[1:],
+		port:              port,
 	}
 	defer func() {
 		if err != nil {
