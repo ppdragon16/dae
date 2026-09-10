@@ -18,6 +18,8 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/features"
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	internal "github.com/daeuniverse/dae/pkg/ebpf_internal"
@@ -262,6 +264,13 @@ retryLoadBpf:
 	if err != nil {
 		return fmt.Errorf("failed to get netns id: %w", err)
 	}
+	hasBpfGetCurrentTask := uint8(0)
+	if err := features.HaveProgramHelper(ebpf.CGroupSockAddr, asm.FnGetCurrentTask); err == nil {
+		hasBpfGetCurrentTask = 1
+		log.Debugf("bpf_get_current_task is supported")
+	} else {
+		log.Warnf("Kernel does not support bpf_get_current_task helper: %v; process names may be truncated or less accurate (degraded to bpf_get_current_comm)", err)
+	}
 	constants := map[string]any{
 		"PARAM": struct {
 			tproxyPort           uint32
@@ -287,7 +296,7 @@ retryLoadBpf:
 				}
 				return 0
 			}(),
-			hasBpfGetCurrentTask: 1,
+			hasBpfGetCurrentTask: hasBpfGetCurrentTask,
 			padding2:             0,
 			daeSocketMark:        0,
 		},

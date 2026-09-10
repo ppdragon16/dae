@@ -2170,6 +2170,18 @@ static int __noinline get_real_comm_loop_cb(__u32 index, void *data)
 static __always_inline int get_pid_pname(struct pid_pname *pid_pname)
 {
 	int ret;
+
+	// Fallback to bpf_get_current_comm when bpf_get_current_task is not
+	// supported by the kernel (backport of upstream #995). Process names
+	// may be truncated or less accurate in this degraded mode.
+	if (!PARAM.has_bpf_get_current_task) {
+		if (bpf_get_current_comm(&pid_pname->pname,
+					 sizeof(pid_pname->pname)))
+			pid_pname->pname[0] = '\0';
+		pid_pname->pid = bpf_get_current_pid_tgid() >> 32;
+		return 0;
+	}
+
 	// Get pointer to args string.
 	struct task_struct *task = (void *)bpf_get_current_task();
 	char *args = (void *)BPF_CORE_READ(task, mm, arg_start);
