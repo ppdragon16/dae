@@ -57,7 +57,7 @@ var GlobalDesc = Desc{
 	"sniffing_timeout":             "Timeout to waiting for first data sending for sniffing. It is always 0 if dial_mode is ip. Set it higher is useful in high latency LAN network.",
 	"udp_sniff_ports":              "Enable QUIC sniffing on these destination ports. By default, it is 443 for HTTP/3. This is useful for sniffing protocols like SRT that run on non-standard ports.",
 	"tls_implementation":           "TLS implementation. \"tls\" is to use Go's crypto/tls. \"utls\" is to use uTLS, which can imitate browser's Client Hello.",
-	"utls_imitate":                 "The Client Hello ID for uTLS to imitate. This takes effect only if tls_implementation is utls. See more: https://github.com/daeuniverse/dae/blob/331fa23c16/component/outbound/transport/tls/utls.go#L17",
+	"utls_imitate":                 "The Client Hello ID for uTLS to imitate, e.g. chrome_auto, chrome_102, firefox_105, safari_16_0, ios_14. This takes effect only if tls_implementation is utls. It also determines the User-Agent and browser headers sent by ws/httpupgrade/grpc/REALITY so the cleartext layer matches the TLS fingerprint.",
 	"mptcp":                        "Enable Multipath TCP.  If is true, dae will try to use MPTCP to connect all nodes, but it will only take effects when the node supports MPTCP. It can use for load balance and failover to multiple interfaces and IPs.",
 }
 
