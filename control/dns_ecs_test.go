@@ -14,6 +14,7 @@ import (
 
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
+	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
 	"hash/maphash"
 )
@@ -325,6 +326,47 @@ func TestSetEcsIdenticalIsNoop(t *testing.T) {
 	out, changed := dnsRewriteEcs(data, &dialer.EcsSpec{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Key: "203.0.113.0/24"})
 	if changed || &out[0] != &data[0] {
 		t.Fatal("identical ECS must be a no-op returning the original slice")
+	}
+}
+
+// Rewrite paths (strip-hit and cidr-append) hand out pooled buffers;
+// with the pool warm, even the changing paths must not allocate.
+func TestEcsRewritePathsPooledNoAlloc(t *testing.T) {
+	withEcs := mustPackQuery(t, []dnsmessage.RR{
+		ecsOpt(t, []dnsmessage.EDNS0{makeEcsOption(1, 24, net.IPv4(198, 51, 100, 0))}),
+	})
+	withoutOpt := mustPackQuery(t, nil)
+	strip := &dialer.EcsSpec{Strip: true, Key: "strip"}
+	cidr := &dialer.EcsSpec{Prefix: netip.MustParsePrefix("2001:db8:aa::/48"), Key: "2001:db8:aa::/48"}
+
+	// Warm every pool bucket used below and keep cycling the buffers so
+	// the measured loop only ever hits the pool.
+	for i := 0; i < 64; i++ {
+		if out, changed := dnsRewriteEcs(withEcs, strip); !changed {
+			t.Fatal("strip should remove the ECS option")
+		} else {
+			pool.PutBuffer(out)
+		}
+		if out, changed := dnsRewriteEcs(withoutOpt, cidr); !changed {
+			t.Fatal("cidr should inject an OPT+ECS option")
+		} else {
+			pool.PutBuffer(out)
+		}
+	}
+	avg := testing.AllocsPerRun(500, func() {
+		if out, changed := dnsRewriteEcs(withEcs, strip); !changed {
+			t.Fatal("strip should remove the ECS option")
+		} else {
+			pool.PutBuffer(out)
+		}
+		if out, changed := dnsRewriteEcs(withoutOpt, cidr); !changed {
+			t.Fatal("cidr should inject an OPT+ECS option")
+		} else {
+			pool.PutBuffer(out)
+		}
+	})
+	if avg != 0 {
+		t.Fatalf("pooled rewrite paths allocate %.2f objects/run; want 0 with a warm pool", avg)
 	}
 }
 
