@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	dnsmessage "github.com/miekg/dns"
 	"hash/maphash"
@@ -277,6 +278,31 @@ func TestSetEcsReplacesExisting(t *testing.T) {
 // The no-op path must be allocation-free: the new-option buffer is a
 // stack array (a non-constant-length make would heap-allocate even
 // without escaping). Guards against regressing to make().
+// The most common path — an ECS-free client query forwarded under the
+// global strip default — must not allocate at all: annotation map miss,
+// no OPT record found (input returned as-is), cache key mixing via
+// maphash only.
+func TestEcsCommonPathNoAlloc(t *testing.T) {
+	data := mustPackQuery(t, nil) // no OPT, arcount=0
+	c := &DnsController{dnsCacheHashSeed: maphash.MakeSeed()}
+	c.ecsDefaultSpec = &dialer.EcsSpec{Strip: true, Key: "strip"}
+	g := outbound.NewDialerGroup(&dialer.GlobalOption{}, "ecs-alloc-test", nil, nil, dialer.DialerSelectionPolicy{}, nil)
+	d := &dialer.Dialer{}
+	avg := testing.AllocsPerRun(1000, func() {
+		spec := c.resolveEcsPolicy(g, d)
+		if spec == nil || !spec.Strip {
+			t.Fatal("strip default must resolve without annotation")
+		}
+		if rewritten, changed := dnsRewriteEcs(data, spec); changed || &rewritten[0] != &data[0] {
+			t.Fatal("ECS-free query must pass through untouched")
+		}
+		_ = c.GetHashKey("www.example.com", 1, g, d)
+	})
+	if avg != 0 {
+		t.Fatalf("common path allocates %.2f objects/run; want 0", avg)
+	}
+}
+
 func TestSetEcsIdenticalNoAlloc(t *testing.T) {
 	data := mustPackQuery(t, []dnsmessage.RR{
 		ecsOpt(t, []dnsmessage.EDNS0{makeEcsOption(1, 24, net.IPv4(203, 0, 113, 0))}),
