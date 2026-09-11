@@ -33,6 +33,7 @@ dae (daeuniverse/dae)          — Original project
 | HTTP APIs | RESTful command server via `command_port` (redirect control, priority management, dynamic DNS static entries) |
 | `udp_sniff_ports` | Configurable UDP port list for traffic sniffing (default: `443`) |
 | DNS `dns_cache_tag` | Dialer-level DNS cache domain annotation (`-l`), allowing dialers on the same VPS/region to share DNS cache |
+| DNS `ecs` | EDNS0 Client Subnet control: global `dns.ecs` default (`strip`) plus per-dialer `[ecs: ...]` annotation (`strip`/`<cidr>`/`pass`) — stops client-subnet leaks and CDN region mismatch through proxies |
 | DNS `static` | User-defined static DNS entries with A, AAAA, TXT records — hot-reloadable via HTTP API |
 | DNS `via` | Route DNS queries through a specific outbound group (e.g. `proxy_dns(via: ai)`) |
 | DNS `race` | Query multiple upstreams concurrently, first response wins |
@@ -232,6 +233,23 @@ group {
   }
 }
 ```
+
+### `ecs` (EDNS0 Client Subnet)
+
+Queries forwarded through a proxy while carrying the client's ECS option make CDNs schedule by the client's region, yet the connection actually leaves from the exit IP: answers and connection path disagree, and the client subnet leaks through the tunnel. dae strips the client subnet by default (`dns { ecs: 'strip' }`), and allows a per-dialer override via the filter annotation:
+
+```shell
+group {
+  mix {
+    filter: subtag(sub1) [ecs: 'strip']           # remove the client subnet before forwarding (default)
+    filter: subtag(sub2) [ecs: '203.0.113.0/24']  # announce this subnet so CDN answers match that region
+    filter: subtag(sub3) [ecs: 'pass']            # forward the client's ECS option as-is
+    policy: min_moving_avg
+  }
+}
+```
+
+Dialers applying different ECS policies never share cached DNS answers — the effective policy is mixed into the cache key, and a CIDR value has its host bits masked automatically.
 
 ### `dns/static`
 

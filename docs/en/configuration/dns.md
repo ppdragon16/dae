@@ -71,6 +71,14 @@ dns {
     # respond to type A queries and response empty answer to type AAAA queries.
     ipversion_prefer: 4
 
+    # EDNS0 Client Subnet policy for queries forwarded to upstreams:
+    # 'strip' (default) removes any client-subnet option, so answers follow
+    # the resolver's view of the exit IP and the client subnet is not leaked
+    # through the proxy; 'pass' forwards queries as-is.
+    # Per-dialer override: [ecs: 'strip' | <cidr> | 'pass'] in a group filter
+    # line. Dialers applying different ECS policies never share cached answers.
+    ecs: strip
+
     # Give a fixed ttl for domains. Zero means that dae will request to upstream every time and not cache DNS results
     # for these domains.
     fixed_domain_ttl {

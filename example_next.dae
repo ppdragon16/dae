@@ -36,6 +36,15 @@ group {
   #   policy: min_moving_avg
   # }
 
+  # Example: per-dialer EDNS0 Client Subnet policy (overrides global dns.ecs).
+  #
+  # mix2 {
+  #   filter: subtag(sub1) [ecs: 'strip']           # remove client subnet before forwarding (default)
+  #   filter: subtag(sub2) [ecs: '203.0.113.0/24']  # announce this subnet so CDN answers match that region
+  #   filter: subtag(sub3) [ecs: 'pass']            # forward the client's ECS option as-is
+  #   policy: min_moving_avg
+  # }
+
   # Redirect groups: no filter/policy required.
   # Traffic will be forwarded to the target group via direct dialer.
   macbook {
@@ -75,6 +84,7 @@ group {
 
 dns {
   enable_cache: true # dns cache can be completely turned off
+  ecs: strip # EDNS0 Client Subnet policy for forwarded queries: 'strip' (default) or 'pass'; per-dialer [ecs: ...] annotation overrides
   min_sniffing_ttl: 30m # The ttl to expire the saved IP-DomainBitmap info in ebpf
   udp_pool_size: 10 # UDP connnection pool for each dns forwarder (key'ed by upstream+dialer+target)
   udp_pool_ttl: 10m # TTL to recycle UDP connnections in pool

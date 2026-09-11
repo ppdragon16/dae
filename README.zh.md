@@ -33,6 +33,7 @@ dae (daeuniverse/dae)          — 原始项目
 | HTTP APIs | 通过 `command_port` 提供 RESTful 命令接口（redirect 控制、priority 管理、动态 DNS 静态条目） |
 | `udp_sniff_ports` | 可配置的 UDP 流量嗅探端口列表（默认 `443`） |
 | DNS `dns_cache_tag` | 节点级 DNS 缓存域标注（`-l`），同 VPS/地区的节点可共享 DNS 缓存 |
+| DNS `ecs` | EDNS0 Client Subnet 控制：全局 `dns.ecs` 默认值（`strip`）+ 节点级 `[ecs: ...]` 标注（`strip`/`<cidr>`/`pass`）——防止客户端网段经代理泄漏与 CDN 区域错配 |
 | DNS `static` | 用户自定义静态 DNS 条目，支持 A、AAAA、TXT 记录，可通过 HTTP API 热更新 |
 | DNS `via` | DNS 查询通过指定 outbound 组发出（如 `proxy_dns(via: ai)`） |
 | DNS `race` | 并发查询多个上游，取最快响应 |
@@ -232,6 +233,23 @@ group {
   }
 }
 ```
+
+### `ecs`（EDNS0 Client Subnet）
+
+携带客户端 ECS 选项的 DNS 查询经代理转发时，CDN 会按客户端真实区域调度，但连接实际从代理出口 IP 发起：答案区域与连接路径错位，且客户端网段经隧道泄漏。dae 默认剥离客户端网段（`dns { ecs: 'strip' }`），并支持按节点覆盖：
+
+```shell
+group {
+  mix {
+    filter: subtag(sub1) [ecs: 'strip']           # 转发前移除客户端网段（默认）
+    filter: subtag(sub2) [ecs: '203.0.113.0/24']  # 声明该网段，使 CDN 答案匹配指定区域
+    filter: subtag(sub3) [ecs: 'pass']            # 原样透传客户端 ECS 选项
+    policy: min_moving_avg
+  }
+}
+```
+
+应用不同 ECS 策略的节点不会共享缓存的 DNS 答案——生效策略会混入缓存键，CIDR 值的主机位会自动掩码。
 
 ### `dns/static`
 
