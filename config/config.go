@@ -27,7 +27,7 @@ type Global struct {
 	// high pps. Requires kernel >= 6.6 for sk_assign to reuseport sockets.
 	TproxyReuseport uint8  `mapstructure:"tproxy_reuseport" default:"1"`
 	SoMarkFromDae   uint32 `mapstructure:"so_mark_from_dae"`
-	LogLevel          string `mapstructure:"log_level" default:"info"`
+	LogLevel        string `mapstructure:"log_level" default:"info"`
 	// We use DirectTcpCheckUrl to check (tcp)*(ipv4/ipv6) connectivity for direct.
 	//DirectTcpCheckUrl string `mapstructure:"direct_tcp_check_url" default:"http://www.qualcomm.cn/generate_204"`
 	// TcpCheckUrl                []string      `mapstructure:"tcp_check_url" default:"http://cp.cloudflare.com,1.1.1.1,2606:4700:4700::1111"`
@@ -199,9 +199,16 @@ func New(sections []*config_parser.Section) (conf *Config, err error) {
 		if !ok {
 			if _, required := structField.Tag.Lookup("required"); required {
 				return nil, fmt.Errorf("section %v is required but not provided", sectionName)
-			} else {
-				continue
 			}
+			// Optional section that the user did not write. It must still be
+			// decoded from an empty section, otherwise the documented
+			// `default:` tags on its fields never run and the whole section
+			// silently keeps its Go zero values (e.g. a missing dns section
+			// left min_sniffing_ttl at zero instead of the documented
+			// default). Decoding an empty section only applies defaults and
+			// required-param checks; it never invents a value for a field
+			// the user did provide.
+			section = &Section{Val: &config_parser.Section{Name: sectionName}}
 		}
 
 		// Parse section and unmarshal to field.

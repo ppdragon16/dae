@@ -219,3 +219,51 @@ routing {
 		t.Fatalf("marshal dropped outbound n6:\n%s", string(b))
 	}
 }
+
+// TestMarshalPolicyFixedListIsSupported pins the interface-field regression: a
+// group whose policy is written as a function call (`policy: fixed(0)`) stores
+// an any-typed []*config_parser.Function, which marshalLeaf's leaf switch had
+// no case for and rejected as an "unknown leaf type". (Port of kdae a4cffe92.)
+func TestMarshalPolicyFixedListIsSupported(t *testing.T) {
+	sections, err := config_parser.Parse(`
+global {}
+group {
+    g {
+        policy: fixed(0)
+        filter: name(keyword: hk)
+    }
+}
+routing {
+    fallback: g
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf, err := New(sections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conf.Group) != 1 {
+		t.Fatalf("groups = %d, want 1", len(conf.Group))
+	}
+	b, err := conf.Marshal(2)
+	if err != nil {
+		t.Fatalf("Marshal with policy: fixed(N) failed: %v", err)
+	}
+	if !bytes.Contains(b, []byte("policy:fixed(")) {
+		t.Fatalf("marshalled policy line missing:\n%s", string(b))
+	}
+	// The marshalled config must decode again with the same policy value.
+	sections2, err := config_parser.Parse(string(b))
+	if err != nil {
+		t.Fatalf("parse-after-marshal: %v\n%s", err, string(b))
+	}
+	conf2, err := New(sections2)
+	if err != nil {
+		t.Fatalf("decode-after-marshal: %v\n%s", err, string(b))
+	}
+	if !reflect.DeepEqual(conf.Group[0].Policy, conf2.Group[0].Policy) {
+		t.Fatalf("policy changed across round-trip: %#v -> %#v", conf.Group[0].Policy, conf2.Group[0].Policy)
+	}
+}

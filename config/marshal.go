@@ -211,6 +211,18 @@ func (m *Marshaller) marshalLeaf(key string, from reflect.Value, depth int, anno
 			m.writeLine(depth, key+":"+strconv.Quote(fmt.Sprintf("%v", val)))
 		case *config_parser.Function:
 			m.writeLine(depth, key+":"+val.MarshalString(true, true, false))
+		case []*config_parser.Function:
+			// Interface-typed fields (Group.Policy, Routing.Fallback) hold a
+			// function list when the config used the `policy: fixed(N)` /
+			// multi-function shape. from.Kind() is Interface for those, so
+			// the slice switch above never sees them; reuse its rendering.
+			var vals []string
+			for _, v := range val {
+				vals = append(vals, v.MarshalString(true, true, false))
+			}
+			m.writeLine(depth, key+":"+strings.Join(vals, "&&"))
+		case [][]*config_parser.Function:
+			return m.marshalAndFunctionList(key, reflect.ValueOf(val), annotation, depth)
 		default:
 			// Named string types (e.g. consts.RerouteMode) marshal like
 			// plain strings, so config round-trips survive config structs
