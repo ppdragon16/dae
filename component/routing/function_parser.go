@@ -32,26 +32,46 @@ func PlainParserFactory(callback func(f *config_parser.Function, key string, par
 
 // EmptyKeyPlainParserFactory only accepts function with empty key.
 func EmptyKeyPlainParserFactory(callback func(f *config_parser.Function, values []string, overrideOutbound *Outbound) (err error)) FunctionParser {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+		return callback(f, paramValueGroup, overrideOutbound)
+	})
+}
+
+// emptyKeyOnly rejects named parameters for the functions whose operands are
+// bare values. The config grammar accepts `key: value` inside every function
+// call and groups the operands by key before a parser sees them, but the
+// value-only parsers ignore the key entirely: a mistyped parameter name did not
+// fail, its value was folded into the operand list, and `port(bogus_param: 443)`
+// built the same match set as `port(443)` -- a typo became a different,
+// effective rule. The bare form is the documented spelling, so an empty key
+// stays accepted while a non-empty one is reported with the function name, the
+// rejected key and the accepted form. Key-aware functions (domain, qname) use
+// PlainParserFactory and validate their keys themselves.
+func emptyKeyOnly(parse FunctionParser) FunctionParser {
 	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		if key != "" {
-			return fmt.Errorf("this function cannot accept a key")
+			name := "this function"
+			if f != nil {
+				name = f.Name
+			}
+			return fmt.Errorf("%v: unsupported parameter key %v; %v takes bare values only and accepts no named parameter, so write %v(<value>)", name, strconv.Quote(key), name, name)
 		}
-		return callback(f, paramValueGroup, overrideOutbound)
+		return parse(f, key, paramValueGroup, overrideOutbound)
 	}
 }
 
 func IpParserFactory(callback func(f *config_parser.Function, cidrs []netip.Prefix, overrideOutbound *Outbound) (err error)) FunctionParser {
-	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		cidrs, err := parsePrefixes(paramValueGroup)
 		if err != nil {
 			return err
 		}
 		return callback(f, cidrs, overrideOutbound)
-	}
+	})
 }
 
 func MacParserFactory(callback func(f *config_parser.Function, macAddrs [][6]byte, overrideOutbound *Outbound) (err error)) FunctionParser {
-	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		var macAddrs [][6]byte
 		for _, v := range paramValueGroup {
 			mac, err := common.ParseMac(v)
@@ -61,11 +81,11 @@ func MacParserFactory(callback func(f *config_parser.Function, macAddrs [][6]byt
 			macAddrs = append(macAddrs, mac)
 		}
 		return callback(f, macAddrs, overrideOutbound)
-	}
+	})
 }
 
 func PortRangeParserFactory(callback func(f *config_parser.Function, portRanges [][2]uint16, overrideOutbound *Outbound) (err error)) FunctionParser {
-	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		var portRanges [][2]uint16
 		for _, v := range paramValueGroup {
 			portRange, err := common.ParsePortRange(v)
@@ -75,11 +95,11 @@ func PortRangeParserFactory(callback func(f *config_parser.Function, portRanges 
 			portRanges = append(portRanges, portRange)
 		}
 		return callback(f, portRanges, overrideOutbound)
-	}
+	})
 }
 
 func L4ProtoParserFactory(callback func(f *config_parser.Function, l4protoType consts.L4ProtoType, overrideOutbound *Outbound) (err error)) FunctionParser {
-	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		var l4protoType consts.L4ProtoType
 		for _, v := range paramValueGroup {
 			switch v {
@@ -92,11 +112,11 @@ func L4ProtoParserFactory(callback func(f *config_parser.Function, l4protoType c
 			}
 		}
 		return callback(f, l4protoType, overrideOutbound)
-	}
+	})
 }
 
 func IpVersionParserFactory(callback func(f *config_parser.Function, ipVersion consts.IpVersionType, overrideOutbound *Outbound) (err error)) FunctionParser {
-	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		var ipVersion consts.IpVersionType
 		for _, v := range paramValueGroup {
 			switch v {
@@ -107,11 +127,11 @@ func IpVersionParserFactory(callback func(f *config_parser.Function, ipVersion c
 			}
 		}
 		return callback(f, ipVersion, overrideOutbound)
-	}
+	})
 }
 
 func ProcessNameParserFactory(callback func(f *config_parser.Function, procNames [][consts.TaskCommLen]byte, overrideOutbound *Outbound) (err error)) FunctionParser {
-	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		var procNames [][consts.TaskCommLen]byte
 		for _, v := range paramValueGroup {
 			if len([]byte(v)) > consts.TaskCommLen {
@@ -120,7 +140,7 @@ func ProcessNameParserFactory(callback func(f *config_parser.Function, procNames
 			procNames = append(procNames, toProcessName(v))
 		}
 		return callback(f, procNames, overrideOutbound)
-	}
+	})
 }
 
 func parsePrefixes(values []string) (cidrs []netip.Prefix, err error) {
@@ -146,7 +166,7 @@ func toProcessName(processName string) (procName [consts.TaskCommLen]byte) {
 
 func UintParserFactory[T constraints.Unsigned](callback func(f *config_parser.Function, values []T, overrideOutbound *Outbound) (err error)) FunctionParser {
 	size := binary.Size(new(T))
-	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
+	return emptyKeyOnly(func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *Outbound) (err error) {
 		var values []T
 		for _, v := range paramValueGroup {
 			val, err := strconv.ParseUint(v, 0, 8*size)
@@ -156,5 +176,5 @@ func UintParserFactory[T constraints.Unsigned](callback func(f *config_parser.Fu
 			values = append(values, T(val))
 		}
 		return callback(f, values, overrideOutbound)
-	}
+	})
 }
