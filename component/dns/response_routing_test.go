@@ -7,10 +7,12 @@ package dns
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/config_parser"
+	"github.com/daeuniverse/dae/pkg/trie"
 )
 
 func testResponseRule(outbound string, andFunctions ...*config_parser.Function) *config_parser.RoutingRule {
@@ -117,5 +119,115 @@ func TestResponseSelectPassesClientIdentity(t *testing.T) {
 	}
 	if up != nil {
 		t.Fatalf("ResponseSelect() upstream = %v, want nil for reserved outbound", up)
+	}
+}
+
+// TestMatchIpSetDifferential drives the IpSet and SourceIpSet match paths over a
+// grid of sets and addresses and compares them against the expressions they
+// replaced (a []string of Prefix2bin128 output + trie.Trie.HasPrefix). The two
+// must agree bit for bit: matching decides which DNS upstream a response goes to.
+func TestMatchIpSetDifferential(t *testing.T) {
+	sets := [][]string{
+		{"10.0.0.0/8"},
+		{"192.168.1.0/24", "172.16.0.0/12"},
+		{"0.0.0.0/0"},
+		{"0.0.0.0/1"},
+		{"2001:db8::/32"},
+		{"::ffff:0:0/96", "10.0.0.0/8"},
+		{"255.255.255.255/32", "0.0.0.1/32"},
+		{"2001:db8:1234::/48", "2001:db8::/64"},
+		{"::/0"},
+		{"64:ff9b::/96"},
+		{"2001:db8::/128"},
+	}
+	addrStrs := []string{
+		"0.0.0.0", "1.2.3.4", "10.1.2.3", "10.255.255.255", "11.1.1.1",
+		"172.16.5.9", "192.168.1.1", "192.168.2.1", "203.0.113.7", "255.255.255.255",
+		"::", "::1", "::ffff:1.2.3.4", "::ffff:10.1.2.3", "::ffff:192.168.1.1",
+		"2001:db8::1", "2001:db8:1234::5", "2001:db9::1", "64:ff9b::1.2.3.4",
+		"fe80::1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+	}
+	addrs := make([]netip.Addr, 0, len(addrStrs))
+	for _, s := range addrStrs {
+		addrs = append(addrs, netip.MustParseAddr(s))
+	}
+	lists := [][]netip.Addr{nil}
+	for _, a := range addrs {
+		lists = append(lists, []netip.Addr{a})
+	}
+	// Lists where only a later element matches, to pin the "any" semantics.
+	lists = append(lists,
+		[]netip.Addr{netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.1.2.3")},
+		[]netip.Addr{netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("2001:db8::1")},
+	)
+
+	for _, cidrs := range sets {
+		prefixes := make([]netip.Prefix, 0, len(cidrs))
+		for _, c := range cidrs {
+			prefixes = append(prefixes, netip.MustParsePrefix(c))
+		}
+		set, err := trie.NewTrieFromPrefixes(prefixes)
+		if err != nil {
+			t.Fatalf("NewTrieFromPrefixes(%v): %v", cidrs, err)
+		}
+		for _, ips := range lists {
+			ref := make([]string, 0, len(ips))
+			for _, ip := range ips {
+				ref = append(ref, trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(ip.As16()), 128)))
+			}
+			want := slices.ContainsFunc(ref, set.HasPrefix)
+			if got := matchIpSet(set, ips); got != want {
+				t.Errorf("matchIpSet(%v, %v) = %v, want %v", cidrs, ips, got, want)
+			}
+		}
+		for _, ip := range addrs {
+			want := set.HasPrefix(trie.Prefix2bin128(netip.PrefixFrom(ip, ip.BitLen())))
+			if got := matchSourceIpSet(set, ip); got != want {
+				t.Errorf("matchSourceIpSet(%v, %v) = %v, want %v", cidrs, ip, got, want)
+			}
+		}
+	}
+}
+
+// TestResponseMatcherIpSetEndToEnd pins IpSet routing through the real matcher,
+// including the case where only the last resolved address is in the set.
+func TestResponseMatcherIpSetEndToEnd(t *testing.T) {
+	m := buildTestResponseMatcher(t, []*config_parser.RoutingRule{
+		testResponseRule("reject", testResponseFunction("ip", "10.0.0.0/8")),
+		testResponseRule("reject", testResponseFunction("ip", "192.168.0.0/16")),
+		testResponseRule("reject", testResponseFunction("ip", "2001:db8::/32")),
+	}, "accept")
+
+	cases := []struct {
+		name string
+		ips  []netip.Addr
+		want consts.DnsResponseOutboundIndex
+	}{
+		{"v4-hit-last-element", []netip.Addr{
+			netip.MustParseAddr("93.184.216.34"),
+			netip.MustParseAddr("192.168.1.5"),
+		}, consts.DnsResponseOutboundIndex_Reject},
+		{"v6-hit", []netip.Addr{
+			netip.MustParseAddr("2001:db8::1"),
+		}, consts.DnsResponseOutboundIndex_Reject},
+		{"miss", []netip.Addr{
+			netip.MustParseAddr("93.184.216.34"),
+		}, consts.DnsResponseOutboundIndex_Accept},
+		{"v6-miss", []netip.Addr{
+			netip.MustParseAddr("2001:db9::1"),
+		}, consts.DnsResponseOutboundIndex_Accept},
+		{"no-addresses", nil, consts.DnsResponseOutboundIndex_Accept},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := m.Match("", 1, tc.ips, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.Addr{})
+			if err != nil {
+				t.Fatalf("Match() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("Match() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

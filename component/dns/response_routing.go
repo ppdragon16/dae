@@ -8,7 +8,6 @@ package dns
 import (
 	"fmt"
 	"net/netip"
-	"slices"
 	"strconv"
 
 	"github.com/daeuniverse/dae/common"
@@ -280,6 +279,22 @@ type responseMatchSet struct {
 	Upstream uint8
 }
 
+// matchIpSet reports whether any resolved address of the response is in the set.
+//
+// The set is built from 128-bit keys (addIp passes /128-shaped prefixes, IPv4
+// widened into 4-in-6 form), so walking the trie with the 16 raw address bytes
+// is equivalent to walking it with the 128-character bit string Prefix2bin128
+// used to produce, and it skips both the per-address string and the []string
+// holding them.
+func matchIpSet(set *trie.Trie, ips []netip.Addr) bool {
+	for _, ip := range ips {
+		if set.HasPrefixAddr(ip.As16()) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *ResponseMatcher) Match(
 	qName string,
 	qType uint16,
@@ -293,11 +308,6 @@ func (m *ResponseMatcher) Match(
 	if qName != "" {
 		m.domainMatcher.MatchDomainBitmapInplace(qName, domainMatchBitmap)
 	}
-	bin128 := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		bin128 = append(bin128, trie.Prefix2bin128(netip.PrefixFrom(netip.AddrFrom16(ip.As16()), 128)))
-	}
-
 	goodSubrule := false
 	badRule := false
 	for i, match := range m.matches {
@@ -310,7 +320,7 @@ func (m *ResponseMatcher) Match(
 				goodSubrule = true
 			}
 		case consts.MatchType_IpSet:
-			if slices.ContainsFunc(bin128, m.ipSet[match.Value].HasPrefix) {
+			if matchIpSet(m.ipSet[match.Value], ips) {
 				goodSubrule = true
 			}
 		case consts.MatchType_QType:
@@ -326,11 +336,8 @@ func (m *ResponseMatcher) Match(
 				goodSubrule = true
 			}
 		case consts.MatchType_SourceIpSet:
-			if srcIp.IsValid() {
-				srcBin128 := trie.Prefix2bin128(netip.PrefixFrom(srcIp, srcIp.BitLen()))
-				if m.sourceIpSet[match.Value].HasPrefix(srcBin128) {
-					goodSubrule = true
-				}
+			if srcIp.IsValid() && matchSourceIpSet(m.sourceIpSet[match.Value], srcIp) {
+				goodSubrule = true
 			}
 		case consts.MatchType_Fallback:
 			goodSubrule = true
