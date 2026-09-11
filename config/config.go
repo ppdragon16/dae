@@ -149,10 +149,14 @@ type Dns struct {
 	Routing         DnsRouting                `mapstructure:"routing"`
 	MinSniffingTtl  time.Duration             `mapstructure:"min_sniffing_ttl" default:"24h"`
 	EnableCache     bool                      `mapstructure:"enable_cache" default:"true"`
-	UdpPoolSize     int                       `mapstructure:"udp_pool_size" default:"10"`
-	UdpPoolTtl      time.Duration             `mapstructure:"udp_pool_ttl" default:"10m"`
-	TcpPoolSize     int                       `mapstructure:"tcp_pool_size" default:"3"`
-	TcpPoolTtl      time.Duration             `mapstructure:"tcp_pool_ttl" default:"60s"`
+	// Ecs is the default EDNS0 Client Subnet policy for queries
+	// forwarded to upstreams: "strip" (default) or "pass". Per-dialer
+	// [ecs: ...] filter annotations override it.
+	Ecs         string        `mapstructure:"ecs" default:"strip"`
+	UdpPoolSize int           `mapstructure:"udp_pool_size" default:"10"`
+	UdpPoolTtl  time.Duration `mapstructure:"udp_pool_ttl" default:"10m"`
+	TcpPoolSize int           `mapstructure:"tcp_pool_size" default:"3"`
+	TcpPoolTtl  time.Duration `mapstructure:"tcp_pool_ttl" default:"60s"`
 }
 
 type Routing struct {

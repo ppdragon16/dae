@@ -542,6 +542,7 @@ func NewControlPlane(
 		FixedDomainTtl:    fixedDomainTtl,
 		MinSniffingTtl:    dnsConfig.MinSniffingTtl,
 		EnableCache:       dnsConfig.EnableCache,
+		EcsDefault:        dnsConfig.Ecs,
 		SniffVerifyMode:   plane.sniffVerifyMode,
 	}); err != nil {
 		return nil, err
@@ -2159,6 +2160,7 @@ func (c *ControlPlane) UpdateDns() error {
 		FixedDomainTtl:    fixedDomainTtl,
 		MinSniffingTtl:    dnsCfg.MinSniffingTtl,
 		EnableCache:       dnsCfg.EnableCache,
+		EcsDefault:        dnsCfg.Ecs,
 		SniffVerifyMode:   c.sniffVerifyMode,
 	})
 	if err != nil {

@@ -8,6 +8,7 @@ package dialer
 import (
 	"fmt"
 	"math"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,12 +21,40 @@ const (
 	AnnotationKey_AddLatency  = "add_latency"
 	AnnotationKey_Priority    = "priority"
 	AnnotationKey_DnsCacheTag = "dns_cache_tag"
+	AnnotationKey_Ecs         = "ecs"
+
+	// EcsModeStrip removes any EDNS0 Client Subnet option from queries
+	// forwarded via the annotated dialer.
+	EcsModeStrip = "strip"
+
+	// EcsModePass forwards the client's EDNS0 Client Subnet option
+	// as-is, overriding a strip global default for this dialer.
+	EcsModePass = "pass"
 )
 
 type Priority struct {
 	Pri  int
 	Low  time.Duration
 	High time.Duration
+}
+
+// EcsSpec is the resolved EDNS0 Client Subnet policy of a dialer.
+// Strip and Prefix are mutually exclusive; a nil *EcsSpec on the
+// annotation means pass-through (forward the client's ECS as-is).
+type EcsSpec struct {
+	// Strip removes the ECS option from forwarded queries.
+	Strip bool
+	// PassThrough forwards the client's ECS option as-is. It exists to
+	// override a strip global default at dialer granularity; a nil
+	// *EcsSpec on the annotation already means "no annotation policy".
+	PassThrough bool
+	// Prefix, when Strip and PassThrough are false, is the subnet
+	// injected into (or replacing the client's) ECS option. Host bits
+	// are masked off.
+	Prefix netip.Prefix
+	// Key is the canonical identity used for DNS cache key mixing
+	// ("strip", "pass", or the masked prefix in string form).
+	Key string
 }
 
 type Annotation struct {
@@ -38,6 +67,9 @@ type Annotation struct {
 	// while dialers with different tags are isolated.
 	// When empty, falls back to per-group caching (default behavior).
 	DnsCacheTag string
+	// Ecs carries the per-dialer EDNS0 Client Subnet policy
+	// ("strip" or a CIDR prefix). Nil means pass-through.
+	Ecs *EcsSpec
 }
 
 func (p *Priority) String() string {
@@ -89,6 +121,29 @@ func ParsePriority(priorityStr string) (pri int, condPris []*Priority, err error
 	return pri, condPris, nil
 }
 
+// ParseEcs validates and canonicalizes the value of the "ecs" annotation:
+// "strip", "pass", or a CIDR prefix (e.g. "203.0.113.0/24") whose host
+// bits are masked off. An empty value means "no annotation policy" (the
+// global dns.ecs default applies).
+func ParseEcs(val string) (*EcsSpec, error) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return nil, nil
+	}
+	switch val {
+	case EcsModeStrip:
+		return &EcsSpec{Strip: true, Key: EcsModeStrip}, nil
+	case EcsModePass:
+		return &EcsSpec{PassThrough: true, Key: EcsModePass}, nil
+	}
+	prefix, err := netip.ParsePrefix(val)
+	if err != nil {
+		return nil, fmt.Errorf("incorrect ecs format (want 'strip' or CIDR like '203.0.113.0/24'): %w", err)
+	}
+	prefix = prefix.Masked()
+	return &EcsSpec{Prefix: prefix, Key: prefix.String()}, nil
+}
+
 func NewAnnotation(annotation []*config_parser.Param) (*Annotation, error) {
 	var anno Annotation
 	for _, param := range annotation {
@@ -108,6 +163,12 @@ func NewAnnotation(annotation []*config_parser.Param) (*Annotation, error) {
 			anno.ConditionalPriority = condPris
 		case AnnotationKey_DnsCacheTag:
 			anno.DnsCacheTag = param.Val
+		case AnnotationKey_Ecs:
+			ecs, err := ParseEcs(param.Val)
+			if err != nil {
+				return nil, err
+			}
+			anno.Ecs = ecs
 		default:
 			return nil, fmt.Errorf("unknown filter annotation: %v", param.Key)
 		}

@@ -69,6 +69,9 @@ type DnsControllerOption struct {
 	MinSniffingTtl     time.Duration
 	EnableCache        bool
 	SniffVerifyMode    consts.SniffVerifyMode
+	// EcsDefault is the global dns.ecs policy ("strip"/"pass"),
+	// already validated by ParseEcsDefault. Nil means pass-through.
+	EcsDefault string
 }
 
 type coreIpDomainCacheValue struct {
@@ -101,6 +104,11 @@ type DnsController struct {
 	coreIpDomainCache   *common.TimeWheelCache[HashKey, coreIpDomainCacheValue] // Key: Hash by qname + ip
 	sniffDomainCache    *common.TimeWheelCache[HashKey, struct{}]               // Key: Loose mode hashes by qname; Strict mode hashes by qname+ip. Used by VerifySniff.
 	sniffVerifyMode     consts.SniffVerifyMode
+
+	// ecsDefaultSpec is the effective dns.ecs default (validated at
+	// construction). Per-dialer [ecs: ...] annotations override it;
+	// nil means pass-through.
+	ecsDefaultSpec *dialer.EcsSpec
 
 	// bitmapIntern canonicalizes domain match bitmaps by content: domains with
 	// an identical match result (e.g. every geosite:cn-only domain) share one
@@ -145,12 +153,16 @@ func NewDnsController(routing *dns.Dns, option *DnsControllerOption) (c *DnsCont
 		minSniffingTtl:     option.MinSniffingTtl,
 		enableCache:        option.EnableCache,
 		sniffVerifyMode:    option.SniffVerifyMode,
+		ecsDefaultSpec:     nil,
 		dnsForwarderCache:  sync.Map{},
 		dnsCache:           NewCommonDnsCache(),
 		dnsCacheHashSeed:   maphash.MakeSeed(),
 		requestSelectCache: common.NewTimeWheelCache[HashKey, consts.DnsRequestOutboundIndex](1*time.Hour, 5*time.Second, nil),
 		sniffDomainCache:   common.NewTimeWheelCache[HashKey, struct{}](1*time.Hour, 5*time.Second, nil),
 		bitmapIntern:       make(map[[32]uint32]*[32]uint32),
+	}
+	if c.ecsDefaultSpec, err = ParseEcsDefault(option.EcsDefault); err != nil {
+		return nil, err
 	}
 	c.coreIpDomainCache = common.NewTimeWheelCache(
 		1*time.Hour, 5*time.Second, func(_ HashKey, v coreIpDomainCacheValue, replaced bool) {
@@ -229,6 +241,37 @@ var dnsResponseDataPool = sync.Pool{
 	},
 }
 
+// mixDnsAnnotationKey folds the per-dialer annotation identity into the
+// DNS cache key. Returns (mixed, isolated): isolated reports whether a
+// dns_cache_tag domain was applied (callers stop mixing further keys).
+// Dialers applying different ECS policies must not share cached answers
+// either, so the canonical ECS key is mixed into both branches. With no
+// annotations the key stays bit-identical to the legacy scheme.
+// mixDnsAnnotationKey folds the per-dialer annotation identity and the
+// effective ECS policy into the DNS cache key. Returns (mixed,
+// isolated): isolated reports whether a dns_cache_tag domain was
+// applied (callers stop mixing further keys). The annotation's ECS
+// policy wins over the global default; dialers applying different ECS
+// policies must not share cached answers, so the canonical ECS key is
+// mixed into both branches. With no annotations and no global default
+// the key stays bit-identical to the legacy scheme.
+func mixDnsAnnotationKey(h1 uint64, seed maphash.Seed, anno *dialer.Annotation, ecsDefault *dialer.EcsSpec) (uint64, bool) {
+	ecs := ecsDefault
+	if anno != nil && anno.Ecs != nil {
+		ecs = anno.Ecs
+	}
+	if ecs != nil {
+		h1 ^= maphash.String(seed, ecs.Key)
+	}
+	if anno == nil {
+		return h1, false
+	}
+	if anno.DnsCacheTag != "" {
+		h1 ^= maphash.String(seed, anno.DnsCacheTag)
+	}
+	return h1, anno.DnsCacheTag != ""
+}
+
 func (c *DnsController) GetHashKey(qname string, qtype uint16, outbound *outbound.DialerGroup, dialer *dialer.Dialer) HashKey {
 	// 1. 获取字符串的基础哈希（汇编加速）
 	h1 := maphash.String(c.dnsCacheHashSeed, qname)
@@ -238,11 +281,19 @@ func (c *DnsController) GetHashKey(qname string, qtype uint16, outbound *outboun
 	if outbound != nil {
 		// If the dialer has a dns_cache_tag annotation, use it as the cache domain.
 		// Dialers with the same tag share DNS cache; different tags are isolated.
+		// NOTE: the parameter names `outbound`/`dialer` shadow the packages here,
+		// so the annotation type is only ever inferred, never spelled out.
 		if dialer != nil {
-			if anno := outbound.GetAnnotation(dialer); anno != nil && anno.DnsCacheTag != "" {
-				h1 ^= maphash.String(c.dnsCacheHashSeed, anno.DnsCacheTag)
-				return HashKey(h1)
+			if anno := outbound.GetAnnotation(dialer); anno != nil {
+				var isolated bool
+				if h1, isolated = mixDnsAnnotationKey(h1, c.dnsCacheHashSeed, anno, c.ecsDefaultSpec); isolated {
+					return HashKey(h1)
+				}
+			} else {
+				h1, _ = mixDnsAnnotationKey(h1, c.dnsCacheHashSeed, nil, c.ecsDefaultSpec)
 			}
+		} else {
+			h1, _ = mixDnsAnnotationKey(h1, c.dnsCacheHashSeed, nil, c.ecsDefaultSpec)
 		}
 		h1 ^= uint64(uintptr(unsafe.Pointer(outbound)))
 	}
@@ -890,6 +941,17 @@ func recycleDnsRefreshParam(p *dnsRefreshParam) {
 }
 
 func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
+	// Effective EDNS0 Client Subnet policy (global dns.ecs default,
+	// overridden by the dialer's [ecs: ...] annotation): strip or
+	// rewrite before cache lookup and forwarding. The input query may be
+	// shared across racing dialers, so a rewrite always produces a fresh
+	// buffer; the caller's bytes are never mutated.
+	if spec := c.resolveEcsPolicy(dialArg.Outbound, dialArg.Dialer); spec != nil {
+		if rewritten, changed := dnsRewriteEcs(data, spec); changed {
+			data = rewritten
+			defer pool.PutBuffer(rewritten)
+		}
+	}
 	// Lookup Cache
 	if c.enableCache {
 		hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)
