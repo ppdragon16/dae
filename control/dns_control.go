@@ -579,19 +579,20 @@ Dial:
 					With("Outbound", dialArgument.Outbound.Name).
 					With("Dialer", dialArgument.Dialer.Name).
 					Wrapf(err, "DNS dialSend error")
+				labels := [...]string{
+					dialArgument.Outbound.Name,
+					dialArgument.Dialer.Property.SubscriptionTag,
+					dialArgument.Dialer.Name,
+					dialArgument.networkType.String(),
+				}
+				common.Metrics.ErrorCount.With4(labels).Inc()
+
 				if !isNetError || isClosed || !dnsResponse(dnsResp.respData) {
 					return err
-				} else if !isTimeout && dialArgument.Dialer.NeedAliveState() {
-					labels := [...]string{
-						dialArgument.Outbound.Name,
-						dialArgument.Dialer.Property.SubscriptionTag,
-						dialArgument.Dialer.Name,
-						dialArgument.networkType.String(),
-					}
-					common.Metrics.ErrorCount.With4(labels).Inc()
-					dialArgument.Dialer.ReportUnavailable()
-					return err
 				}
+				// !isTimeout && dialArgument.Dialer.NeedAliveState()
+				dialArgument.Dialer.ReportUnavailable()
+				return err
 			}
 		}
 		if !c.routing.HasResponseRules() {

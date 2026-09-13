@@ -236,11 +236,11 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 				With("dst", dst.String()).
 				With("domain", sniffedDomain).
 				Wrapf(err, "failed to DialContext")
+			common.Metrics.ErrorCount.With4(labels).Inc()
 			if !isNetError {
 				return err
 			}
 			// Must be !isTimeout && dialOption.Dialer.NeedAliveState()
-			common.Metrics.ErrorCount.With4(labels).Inc()
 			dialOption.Dialer.ReportUnavailable()
 			return err
 		}
@@ -310,11 +310,11 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 				With("dst", dst.String()).
 				With("domain", sniffedDomain).
 				Wrapf(err, "failed to RelayTCP")
+			common.Metrics.ErrorCount.With4(labels).Inc()
 			if !isNetError {
 				return err
 			}
 			// Must be !isTimeout && dialOption.Dialer.NeedAliveState()
-			common.Metrics.ErrorCount.With4(labels).Inc()
 			dialOption.Dialer.ReportUnavailable()
 			return err
 		}

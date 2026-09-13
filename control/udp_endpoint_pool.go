@@ -125,6 +125,7 @@ func (ue *UdpEndpoint) run() {
 				With("Dialer", ue.dialer.Name).
 				Wrap(readErr)
 			if !isNetError {
+				common.Metrics.ErrorCount.With4(ue.labels).Inc()
 				log.Warnf("%+v", readErr)
 			} else if isClosed {
 				// Endpoint was closed locally; normal termination.

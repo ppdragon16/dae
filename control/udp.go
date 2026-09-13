@@ -121,11 +121,11 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 				With("dst", dst.String()).
 				With("domain", sniffingResult.domain).
 				Wrapf(err, "failed to ListenPacket")
+			common.Metrics.ErrorCount.With4(labels).Inc()
 			if !isNetError {
 				return nil, err
 			}
 			// Must be !isTimeout && dialOption.Dialer.NeedAliveState()
-			common.Metrics.ErrorCount.With4(labels).Inc()
 			dialOption.Dialer.ReportUnavailable()
 			return nil, err
 		}
@@ -203,11 +203,11 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 				With("Is Timeout", isTimeout).
 				With("Dialer", ue.dialer.Name).
 				Wrapf(err, "failed to write UDP packet")
+			common.Metrics.ErrorCount.With4(ue.labels).Inc()
 			if !isNetError {
 				return err
 			}
 			// Must be !isTimeout && ue.dialer.NeedAliveState()
-			common.Metrics.ErrorCount.With4(ue.labels).Inc()
 			ue.dialer.ReportUnavailable()
 			return err
 		}
