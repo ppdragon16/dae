@@ -38,6 +38,12 @@ const (
 	// (push-notification keep-alives, video streams, etc.).
 	DefaultTCPIdleTimeout = 60 * time.Minute
 
+	// DefaultHalfCloseIdleTimeout is the read-side bound after the l2r
+	// direction has ended cleanly (half-close). It arms both the CloseWriter
+	// fallback and the re-arm clamp: once the peer's client side is gone,
+	// a silent read must exit on this scale, not on the idle-timeout scale.
+	DefaultHalfCloseIdleTimeout = 10 * time.Second
+
 	// DefaultTCPWriteTimeout bounds the Write deadline: if a single
 	// dst.Write call doesn't return within this window, the relay
 	// gives up on the connection. Unlike Read, this is about
@@ -328,7 +334,16 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	return nil
 }
 
-func relayDirection(dst, src net.Conn) error {
+// relayDirection relays src -> dst. readIdle is the caller-shared read
+// bound for this relay session: every re-arm takes time.Now().Add(its
+// current value). RelayTCP initializes it before starting any goroutine
+// and drops it to DefaultHalfCloseIdleTimeout after a clean l2r end —
+// without that drop, data still in flight when the client disconnects
+// keeps resurrecting the idle timeout, and a peer that then goes silent
+// without FIN parks this relay for the whole hour. Callers must store a
+// positive value before arming a relay: a zero or negative bound expires
+// immediately.
+func relayDirection(dst, src net.Conn, readIdle *atomic.Int64) error {
 	// As `io.Copy` uses a 32KB buffer.
 	// See https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/io/io.go;l=419
 	// Uses a smaller buffer for less memory blooming. And 2K is enough for tcp dns.
@@ -337,7 +352,7 @@ func relayDirection(dst, src net.Conn) error {
 	maxBufSize := 32 * 1024
 	buf := pool.GetBuffer(bufSize)
 	for {
-		src.SetReadDeadline(time.Now().Add(DefaultTCPIdleTimeout))
+		src.SetReadDeadline(time.Now().Add(time.Duration(readIdle.Load())))
 		n, rerr := src.Read(buf)
 		if n > 0 {
 			dst.SetWriteDeadline(time.Now().Add(DefaultTCPWriteTimeout))
@@ -380,7 +395,7 @@ func relayDirection(dst, src net.Conn) error {
 	} else if writeCloser, ok := dst.(netproxy.CloseWriter); ok {
 		writeCloser.CloseWrite()
 	} else {
-		dst.SetReadDeadline(time.Now().Add(10 * time.Second))
+		dst.SetReadDeadline(time.Now().Add(DefaultHalfCloseIdleTimeout))
 	}
 	return err
 }
@@ -392,21 +407,28 @@ func RelayTCP(lConn, rConn net.Conn) error {
 		r2lErr   error
 		l2rErr   error
 		errState atomic.Int32
+		readIdle atomic.Int64
 		wg       sync.WaitGroup
 	)
+	readIdle.Store(int64(DefaultTCPIdleTimeout))
 	wg.Go(func() {
-		e := relayDirection(lConn, rConn) // rConn -> lConn
+		e := relayDirection(lConn, rConn, &readIdle) // rConn -> lConn
 		if e != nil {
 			if errState.CompareAndSwap(0, 1) {
 				r2lErr = e
 			}
 		}
 	})
-	e := relayDirection(rConn, lConn) // lConn -> rConn
+	e := relayDirection(rConn, lConn, &readIdle) // lConn -> rConn
 	if e != nil {
 		if errState.CompareAndSwap(0, 2) {
 			l2rErr = e
 		}
+	} else {
+		// The l2r direction ended without error: the relay half-closed
+		// the peer (CloseWriter) or armed the fallback bound. From now on
+		// the r2l re-arms are clamped to the half-close bound.
+		readIdle.Store(int64(DefaultHalfCloseIdleTimeout))
 	}
 	wg.Wait()
 
