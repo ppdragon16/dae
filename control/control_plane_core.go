@@ -408,12 +408,12 @@ func (c *controlPlaneCore) setupSkPidMonitor() error {
 		Attach ebpf.AttachType
 	}
 	cgProgs := []cgProg{
-		{Prog: c.bpf.TproxyWanCgSockCreate, Attach: ebpf.AttachCGroupInetSockCreate},
-		{Prog: c.bpf.TproxyWanCgSockRelease, Attach: ebpf.AttachCgroupInetSockRelease},
-		{Prog: c.bpf.TproxyWanCgConnect4, Attach: ebpf.AttachCGroupInet4Connect},
-		{Prog: c.bpf.TproxyWanCgConnect6, Attach: ebpf.AttachCGroupInet6Connect},
-		{Prog: c.bpf.TproxyWanCgSendmsg4, Attach: ebpf.AttachCGroupUDP4Sendmsg},
-		{Prog: c.bpf.TproxyWanCgSendmsg6, Attach: ebpf.AttachCGroupUDP6Sendmsg},
+		{Name: "sock_create", Prog: c.bpf.TproxyWanCgSockCreate, Attach: ebpf.AttachCGroupInetSockCreate},
+		{Name: "sock_release", Prog: c.bpf.TproxyWanCgSockRelease, Attach: ebpf.AttachCgroupInetSockRelease},
+		{Name: "connect4", Prog: c.bpf.TproxyWanCgConnect4, Attach: ebpf.AttachCGroupInet4Connect},
+		{Name: "connect6", Prog: c.bpf.TproxyWanCgConnect6, Attach: ebpf.AttachCGroupInet6Connect},
+		{Name: "sendmsg4", Prog: c.bpf.TproxyWanCgSendmsg4, Attach: ebpf.AttachCGroupUDP4Sendmsg},
+		{Name: "sendmsg6", Prog: c.bpf.TproxyWanCgSendmsg6, Attach: ebpf.AttachCGroupUDP6Sendmsg},
 	}
 	for _, prog := range cgProgs {
 		attached, err := ciliumLink.AttachCgroup(ciliumLink.CgroupOptions{
@@ -424,8 +424,12 @@ func (c *controlPlaneCore) setupSkPidMonitor() error {
 		if err != nil {
 			return common.Wrap(err, "AttachCgroup: %v", prog.Prog.String())
 		}
+		// Name the exact hook in the teardown error: a stale blanket
+		// "inet6Bind.Close()" wrap points at a program that does not
+		// exist, and six of those leave the failing hook unidentifiable.
+		// (Port of kdae 79cb5c07.)
 		c.deferFuncs = append(c.deferFuncs, func() error {
-			return common.Wrap(attached.Close(), "inet6Bind.Close()")
+			return common.Wrap(attached.Close(), "cgroup detach %v", prog.Name)
 		})
 	}
 	return nil
