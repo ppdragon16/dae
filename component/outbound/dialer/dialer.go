@@ -8,6 +8,7 @@ package dialer
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -66,6 +67,14 @@ type Dialer struct {
 	// nodes) with no lock-free reader to justify it.
 	activeConns   map[net.Conn]net.Conn
 	activeConnsMu sync.Mutex
+
+	// udpEndpoints holds every live UDP endpoint (UdpEndpoint) created
+	// through this dialer. AbortConns closes them alongside the TCP pairs:
+	// UDP endpoints are NOT covered by activeConns, so without this a
+	// dialer flipping alive -> not alive used to leave QUIC/HTTP-3 flows
+	// blackholing on a dead anytls session until their own NAT timeout.
+	udpEndpoints   map[io.Closer]struct{}
+	udpEndpointsMu sync.Mutex
 }
 type GlobalOption struct {
 	D.ExtraOption
@@ -114,6 +123,7 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 		MovingAverage:          make(map[DialerGroup]time.Duration),
 		registeredDialerGroups: make(map[DialerGroup]int),
 		activeConns:            make(map[net.Conn]net.Conn),
+		udpEndpoints:           make(map[io.Closer]struct{}),
 		tickerMu:               sync.Mutex{},
 		ticker:                 nil,
 		checkCh:                make(chan time.Time, 1),
@@ -204,4 +214,34 @@ func (d *Dialer) AbortConns() {
 		rConn.Close()
 	}
 	clear(d.activeConns)
+	d.AbortUdpEndpoints()
+}
+
+// RegisterUdpEndpoint registers a live UDP endpoint created through this
+// dialer so that AbortConns (alive -> not alive, or dialer removal) can
+// close it. The returned unregister func removes the entry; call it when
+// the endpoint is closed for any other reason. Closing an already-closed
+// endpoint from AbortConns is safe (idempotent), so a stale entry that
+// raced with a natural close is harmless.
+func (d *Dialer) RegisterUdpEndpoint(ue io.Closer) (unregister func()) {
+	d.udpEndpointsMu.Lock()
+	defer d.udpEndpointsMu.Unlock()
+	d.udpEndpoints[ue] = struct{}{}
+	return func() {
+		d.udpEndpointsMu.Lock()
+		defer d.udpEndpointsMu.Unlock()
+		delete(d.udpEndpoints, ue)
+	}
+}
+
+// AbortUdpEndpoints closes every registered UDP endpoint and empties the
+// registry. Safe to call with activeConnsMu held (AbortConns does):
+// endpoint Close paths never take activeConnsMu, so no lock cycle exists.
+func (d *Dialer) AbortUdpEndpoints() {
+	d.udpEndpointsMu.Lock()
+	defer d.udpEndpointsMu.Unlock()
+	for ue := range d.udpEndpoints {
+		ue.Close()
+	}
+	clear(d.udpEndpoints)
 }

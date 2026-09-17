@@ -145,6 +145,17 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 
 	LogDial(src, dst, ue.sniffedDomain, dialOption, networkType, routingResult)
 
+	// Track the endpoint on its dialer so an alive -> not-alive transition
+	// aborts it together with the TCP relays (Dialer.AbortConns). Without
+	// this, QUIC/HTTP-3 flows kept blackholing on a dead upstream session
+	// until their own NAT timeout. The watcher unregisters when the
+	// endpoint closes for any other reason (NAT timeout, pool removal).
+	unregisterUe := dialOption.Dialer.RegisterUdpEndpoint(ue)
+	go func() {
+		<-ue.ctx.Done()
+		unregisterUe()
+	}()
+
 	// Receive UDP messages.
 	go ue.run()
 

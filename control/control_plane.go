@@ -1395,6 +1395,14 @@ func (c *ControlPlane) loopTcp(tcpListener net.Listener) {
 		}
 		go func(lconn net.Conn) {
 			c.inConnections.Store(lconn, struct{}{})
+			// Unconditional close on the way out: handleConn itself only
+			// closes lconn via the deferred sniffer, which is registered
+			// when sniffing is enabled. On every early-error path (dial
+			// failure, not-alive discard, no-alive-dialer routing error)
+			// with sniffing disabled, nothing used to close lconn — the
+			// client socket stayed ESTABLISHED and the browser spun
+			// forever on a connection nobody would ever serve or reset.
+			defer lconn.Close()
 			defer c.inConnections.Delete(lconn)
 			if err := c.handleConn(lconn); err != nil && c.ctx.Err() == nil {
 				if log.IsLevelEnabled(log.ErrorLevel) {
