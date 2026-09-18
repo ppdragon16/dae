@@ -656,9 +656,63 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 	d.notifyStatusChangeLocked()
 	d.mu.Unlock()
 
-	// Dialer just became not alive; abort all connections.
+	// alive -> not alive no longer aborts immediately: arm a deferred abort
+	// that fires one CheckInterval later unless a recovery cancels it (see
+	// scheduleAbortConns). Any successful check disarms the timer, so a
+	// single flapped check round never kills the connections whose tunnels
+	// are actually still up.
 	if oldAlive && !ok {
+		d.scheduleAbortConns()
+	}
+	if ok {
+		d.cancelAbortConns()
+	}
+}
+
+// scheduleAbortConns arms the deferred AbortConns: a full CheckInterval must
+// pass with the dialer still not alive — i.e. two consecutive check rounds
+// failed — before the connections through it are killed. A node that flaps
+// briefly and recovers within the window cancels the timer and its live
+// connections survive. Retries must not stack timers: an armed timer is
+// left alone. A dialer with no CheckInterval configured keeps the legacy
+// immediate-abort behavior.
+func (d *Dialer) scheduleAbortConns() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.abortConnsTimer != nil {
+		return // already armed
+	}
+	if d.CheckInterval <= 0 {
 		d.AbortConns()
+		return
+	}
+	d.abortConnsTimer = time.AfterFunc(d.CheckInterval, d.abortConnsTimerFired)
+}
+
+// abortConnsTimerFired runs one CheckInterval after the first failed check.
+// The alive re-check guards the race where recovery landed between the last
+// check tick and the fire.
+func (d *Dialer) abortConnsTimerFired() {
+	d.mu.Lock()
+	d.abortConnsTimer = nil
+	d.mu.Unlock()
+	if d.alive.Load() {
+		return
+	}
+	log.WithFields(log.Fields{
+		"node":  d.Name,
+		"after": d.CheckInterval,
+	}).Warnln("Dialer still not alive after two consecutive check failures; aborting its connections")
+	d.AbortConns()
+}
+
+// cancelAbortConns disarms a pending deferred abort (the dialer recovered).
+func (d *Dialer) cancelAbortConns() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.abortConnsTimer != nil {
+		d.abortConnsTimer.Stop()
+		d.abortConnsTimer = nil
 	}
 }
 

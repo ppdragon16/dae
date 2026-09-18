@@ -75,6 +75,12 @@ type Dialer struct {
 	// blackholing on a dead anytls session until their own NAT timeout.
 	udpEndpoints   map[io.Closer]struct{}
 	udpEndpointsMu sync.Mutex
+
+	// abortConnsTimer is armed when the dialer transitions alive -> not
+	// alive and fires AbortConns one CheckInterval later unless a recovery
+	// disarms it first: two consecutive failed check rounds are treated as
+	// a real death, a single flapped round is not. Guarded by mu.
+	abortConnsTimer *time.Timer
 }
 type GlobalOption struct {
 	D.ExtraOption
@@ -163,6 +169,7 @@ func (d *Dialer) stopCheck() {
 
 func (d *Dialer) Close() error {
 	d.stopCheck()
+	d.cancelAbortConns()
 	// AbortConns first: this dialer is going away (e.g. dialer removed from
 	// config via update-sub, or the daemon is shutting down), so every
 	// relay using it must exit.
