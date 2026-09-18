@@ -132,8 +132,8 @@ github.com/onsi/gomega v1.42.1/go.mod h1:REff/hsDsodHoKlWsP2mAPhu1+5/6hVYNf9rIEB
 github.com/oschwald/maxminddb-golang/v2 v2.5.0 h1:WvEHCE8HwFS5pKWhW8nvvRxNzczuRUOGBLn2L03VlEQ=
 github.com/oschwald/maxminddb-golang/v2 v2.5.0/go.mod h1:EBnvLGgY+aSckqcgyfB5LPDviqaWdMZPBDwu8c2jJbs=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/ppdragon16/outbound v0.0.0-next.utls.40 h1:2yDQKASp9lnSB/mwEn4HDHXOuicCNZRGB5Qoy5KiOJE=
-github.com/ppdragon16/outbound v0.0.0-next.utls.40/go.mod h1:QfBF8CNnG09I57YbbfAgkH7p1ESp6gbFnh0I0jwbWqE=
+github.com/ppdragon16/outbound v0.0.0-next.utls.41 h1:19tgoZ3KkU//1DbrJlVEcmulfNP6b0a459vd71GrVrE=
+github.com/ppdragon16/outbound v0.0.0-next.utls.41/go.mod h1:QfBF8CNnG09I57YbbfAgkH7p1ESp6gbFnh0I0jwbWqE=
 github.com/ppdragon16/quic-go v0.0.0-next.utls.11 h1:awMW2Zq2+Q1mkXIPSSi0ajB14LoDrvjket1SmDiq4dY=
 github.com/ppdragon16/quic-go v0.0.0-next.utls.11/go.mod h1:qs6AdOGIQVKLInZqqBBnPpEt7mXOVvab/CzXEbpT6xw=
 github.com/ppdragon16/utls v1.8.2-pooled.15 h1:RaHrAc5cf00tMkNdrnLOGjdJF+fPsKBjhtE6L1sFFys=
