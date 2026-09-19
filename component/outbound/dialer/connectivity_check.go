@@ -404,32 +404,61 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 		case <-done:
 			return
 		case <-d.checkCh:
-			didUpdate := false
+			// Phase 1: reconnect. A dialer that is not alive (the previous
+			// cycle marked it so) gets its own reconnect budget here, before
+			// any probing — the check-retry loop below is for riding out
+			// transient probe blips, not for rebuilding connections. A
+			// dialer that cannot reconnect is dead for real: land the flip
+			// immediately and wait for the next ticker tick.
+			var lastErr error
+			if !d.Alive() {
+				d.NotifyStatusChange()
+				reconnected := false
+				for i := range RetryCount {
+					if i > 0 {
+						time.Sleep(RetryInterval)
+					}
+					if lastErr = d.connectOnce(); lastErr == nil {
+						reconnected = true
+						break
+					}
+				}
+				if !reconnected {
+					d.Update(false, 0, checkOpt.networkType,
+						common.Errf("reconnect failed after %d retries: %v", RetryCount, lastErr))
+					// Cleanup channel to avoid consecutive checks.
+					select {
+					case <-d.checkCh:
+					default:
+					}
+					continue
+				}
+			}
+			// Phase 2: check retries. Probes only, no reconnecting. A failed
+			// attempt must NOT flip the dialer not-alive while retries
+			// remain: the retry loop exists to ride out transient blips, and
+			// an eager flip (the old behavior) defeated that — a single lost
+			// probe flipped the eBPF connectivity map and downgraded the
+			// whole group's flows for one interval. Failed attempts are
+			// therefore only accumulated here; Update(false) lands once
+			// after the loop is exhausted. Success lands immediately:
+			// recovery should propagate ASAP.
+			checkPassed := false
 			for i := range RetryCount {
 				if i > 0 {
 					time.Sleep(RetryInterval)
 				}
-				if !d.Alive() {
-					d.NotifyStatusChange()
-					if err := d.connectOnce(); err != nil {
-						// Dialer is already dead and reconnect failed;
-						// no point retrying within this cycle — wait for
-						// the next ticker tick.
-						d.Update(false, 0, checkOpt.networkType, err)
-						didUpdate = true
-						break
-					}
-				}
 				ok, latency, err := d.Check(checkOpt)
-				d.Update(ok, latency, checkOpt.networkType, err)
-				didUpdate = true
 				if ok {
+					d.Update(ok, latency, checkOpt.networkType, err)
+					checkPassed = true
 					break
 				}
+				lastErr = err
 			}
-			if !didUpdate {
+			if !checkPassed {
 				d.Update(false, 0, checkOpt.networkType,
-					common.Errf("connect failed after %d retries", RetryCount))
+					common.Errf("check failed after %d retries: %v", RetryCount, lastErr))
 			}
 			// Cleanup channel to avoid consecutive checks.
 			select {
