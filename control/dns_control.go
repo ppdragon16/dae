@@ -408,7 +408,19 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 				}()
 				copy(data2, data)
 				dnsSwitchQtype(data2)
-				err := c.handleDNSRequest(data2, req, queryInfo, dnsResp2)
+				// Recompute queryInfo from the switched packet: the cache
+				// key and singleflight key are derived from queryInfo, so
+				// reusing the original qtype here would file the A response
+				// under the AAAA key (and vice versa), poisoning the cache
+				// and collapsing both lookups into one singleflight entry
+				// that can hand the client the wrong-question response.
+				queryInfo2 := dnsQueryInfo(data2)
+				if queryInfo2.qname == "" {
+					// Malformed after the switch; treat as no answer.
+					resultCh <- &alternateResult{err: common.Errf("alternate query malformed")}
+					return
+				}
+				err := c.handleDNSRequest(data2, req, queryInfo2, dnsResp2)
 				if err != nil {
 					resultCh <- &alternateResult{err: err}
 					return
