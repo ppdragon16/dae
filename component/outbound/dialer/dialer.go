@@ -26,6 +26,37 @@ var (
 	InvalidParameterErr = fmt.Errorf("invalid parameters")
 )
 
+// underlyingRefs counts Dialer wrappers that share one underlying
+// netproxy.Dialer. Clones (created for group-level option overrides) wrap the
+// SAME underlying dialer as the original: Disconnecting the shared pool when
+// only one wrapper is being closed would kill every connection other groups
+// still hold through that node. The underlying is disconnected only when the
+// last wrapper closes. Construction and Close are rare (init / update-sub),
+// so a plain mutex is fine.
+var (
+	underlyingRefsMu sync.Mutex
+	underlyingRefs   = make(map[netproxy.Dialer]int)
+)
+
+func refUnderlying(u netproxy.Dialer) {
+	underlyingRefsMu.Lock()
+	underlyingRefs[u]++
+	underlyingRefsMu.Unlock()
+}
+
+// unrefUnderlying reports whether the caller holds the last reference and
+// must disconnect the underlying dialer.
+func unrefUnderlying(u netproxy.Dialer) bool {
+	underlyingRefsMu.Lock()
+	defer underlyingRefsMu.Unlock()
+	underlyingRefs[u]--
+	if underlyingRefs[u] <= 0 {
+		delete(underlyingRefs, u)
+		return true
+	}
+	return false
+}
+
 type DialerGroup interface {
 	NotifyStatusChange(*Dialer)
 	GetEmaAlpha() float64
@@ -137,6 +168,7 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 		checkCancel:            checkCancel,
 	}
 	d.alive.Store(!needAliveState)
+	refUnderlying(dialer)
 	log.WithField("dialer", d.Name).
 		WithField("p", unsafe.Pointer(d)).
 		Traceln("NewDialer")
@@ -174,6 +206,13 @@ func (d *Dialer) Close() error {
 	// config via update-sub, or the daemon is shutting down), so every
 	// relay using it must exit.
 	d.AbortConns()
+	// Per-wrapper teardown is done; the underlying pool goes away only with
+	// the LAST wrapper. Clones share one underlying dialer: closing a
+	// discarded clone must not Disconnect the shared pool out from under
+	// groups that still reference the node.
+	if !unrefUnderlying(d.Dialer) {
+		return nil
+	}
 	return d.Dialer.Disconnect()
 }
 
