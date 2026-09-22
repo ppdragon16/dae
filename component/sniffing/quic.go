@@ -104,7 +104,14 @@ func (s *Sniffer) sniffQuicBlock(buf []byte) (next []byte, err error) {
 	if ((protectedFlag >> QuicFlag_HeaderForm) & 0b11) != QuicFlag_HeaderForm_LongHeader {
 		return nil, ErrNotApplicable
 	}
-	if ((protectedFlag >> QuicFlag_LongPacketType) & 0b11) != QuicFlag_LongPacketType_Initial {
+	// Parse the version before the type check: RFC 9369 (QUIC v2) remapped
+	// the long-header packet-type codes, so the Initial type bits depend on
+	// the version (v1/draft: 0b00, v2: 0b01).
+	version, err := quicutils.ParseVersion(binary.BigEndian.Uint32(buf[1:5]))
+	if err != nil {
+		return nil, ErrNotApplicable
+	}
+	if ((protectedFlag >> QuicFlag_LongPacketType) & 0b11) != quicutils.InitialTypeBits(version) {
 		return nil, ErrNotApplicable
 	}
 
@@ -164,10 +171,6 @@ func (s *Sniffer) sniffQuicBlock(buf []byte) (next []byte, err error) {
 	// Initial packets of the same connection share the same DCID (and thus the
 	// same keys), so caching them avoids re-running HKDF and rebuilding the
 	// AES/GCM ciphers for every packet.
-	version, err := quicutils.ParseVersion(binary.BigEndian.Uint32(header[1:]))
-	if err != nil {
-		return nil, ErrNotApplicable
-	}
 	if !s.quicKeys.Matches(destConnId, version) {
 		if s.quicKeys != nil {
 			s.quicKeys.Close()

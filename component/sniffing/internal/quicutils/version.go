@@ -29,6 +29,16 @@ func ParseVersion(version uint32) (Version, error) {
 	}
 }
 
+// InitialTypeBits returns the long-header packet-type bits that encode an
+// Initial packet for the given version. QUIC v1 (and drafts) use 0b00;
+// QUIC v2 remapped the codes so Initial is 0b01 (RFC 9369, section 1.1).
+func InitialTypeBits(v Version) byte {
+	if v == Version_V2 {
+		return 0b01
+	}
+	return 0b00
+}
+
 func (v Version) InitialSalt() []byte {
 	switch v {
 	case Version_Draft:
