@@ -16,6 +16,16 @@ import (
 
 var fwmarkIoctl int
 
+// TproxyTCPMaxSeg defines the maximum segment size clamped on the tproxy
+// stream listener. Clamping prevents oversized segments when proxied traffic
+// is later encapsulated in tunnel protocols: the client sizes its segments to
+// the LAN MTU, but after proxy encapsulation each segment carries extra
+// headers and may exceed the egress path MTU. Setting TproxyTCPMaxSeg <= 0
+// disables MSS clamping on the listener. Note: on Linux TCP connections with
+// timestamp options (12 bytes), setting TCP_MAXSEG to 1380 yields an
+// effective payload MSS of ~1368 bytes in data segments.
+var TproxyTCPMaxSeg = 1380
+
 func init() {
 	switch runtime.GOOS {
 	case "linux", "android":
@@ -64,6 +74,27 @@ func TproxyControl(c syscall.RawConn) error {
 				sockOptErr = fmt.Errorf("error setting IPV6_RECVORIGDSTADDR socket option: %w", e6)
 			}
 			return
+		}
+
+		// Check socket type: apply TCP-specific options only on stream
+		// sockets (this control also serves the UDP listeners). Only on
+		// Linux: the eBPF datapath was never supported on the BSD targets,
+		// and unix.TCP_MAXSEG is not defined on all of their toolchains.
+		//
+		// Deliberately NO TCP_FASTOPEN here (RFC 7413): this transparent
+		// proxy listener receives redirected SYNs whose Fast Open cookies
+		// were minted for the real destination, so they would fail
+		// validation and risk unconsented duplicate delivery of
+		// non-idempotent request data. See kdae fce18b20.
+		if runtime.GOOS != "linux" {
+			return
+		}
+		if sockType, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_TYPE); err == nil && sockType == unix.SOCK_STREAM {
+			// Best-effort: a listener that refuses the clamp still works,
+			// it just loses the oversize-segment protection.
+			if TproxyTCPMaxSeg > 0 {
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG, TproxyTCPMaxSeg)
+			}
 		}
 	})
 	if controlErr != nil {
