@@ -36,7 +36,6 @@ import (
 	"github.com/daeuniverse/dae/common/assets"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/subscription"
-	"golang.org/x/sys/unix"
 	"github.com/daeuniverse/dae/component/dns"
 	"github.com/daeuniverse/dae/component/outbound"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
@@ -47,6 +46,7 @@ import (
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/direct"
+	"golang.org/x/sys/unix"
 
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/quic-go"
@@ -1835,6 +1835,7 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	}
 
 	// Phase 1: Re-resolve subscriptions.
+	log.Infoln("[update-sub] Phase 1: re-resolving subscriptions...")
 	client := http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -1857,10 +1858,12 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	}
 
 	// Phase 2: Build new DialerSet from fresh data.
+	log.Infoln("[update-sub] Phase 2: building new dialer set...")
 	option := dialer.NewGlobalOption(c.config.Global)
 	newDialerSet := outbound.NewDialerSetFromLinks(option, newTagToNodeList)
 
 	// Phase 3: For each user-defined outbound group, re-filter and swap dialers.
+	log.Infoln("[update-sub] Phase 3: hot-swapping dialers in groups...")
 	// discardedDialers accumulates dialers the swap recycled away so they can be
 	// closed in Phase 4 (otherwise their underlying connections leak).
 	var discardedDialers []*dialer.Dialer
@@ -1921,6 +1924,7 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	}
 
 	// Phase 4: Cleanup.
+	log.Infoln("[update-sub] Phase 4: closing discarded dialers...")
 	// Build current in-use set from all group dialers.
 	newInuse := make(map[*dialer.Dialer]bool)
 	for _, g := range c.outbounds {
