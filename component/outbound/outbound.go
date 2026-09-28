@@ -11,6 +11,7 @@ import (
 	_ "github.com/daeuniverse/outbound/dialer/hysteria2"
 
 	_ "github.com/daeuniverse/outbound/dialer/juicity"
+	_ "github.com/daeuniverse/outbound/dialer/masque"
 	_ "github.com/daeuniverse/outbound/dialer/shadowsocks"
 
 	_ "github.com/daeuniverse/outbound/dialer/shadowsocksr"
@@ -23,6 +24,7 @@ import (
 	_ "github.com/daeuniverse/outbound/protocol/hysteria2"
 
 	_ "github.com/daeuniverse/outbound/protocol/juicity"
+	_ "github.com/daeuniverse/outbound/protocol/masque"
 	_ "github.com/daeuniverse/outbound/protocol/shadowsocks"
 	_ "github.com/daeuniverse/outbound/protocol/shadowsocks_2022"
 	_ "github.com/daeuniverse/outbound/protocol/trojanc"
