@@ -163,3 +163,38 @@ func TestDialer_RunInitialCheck_UsesWarmLatency(t *testing.T) {
 		t.Fatalf("moving average should be seeded with the warm sample, got %v", ma)
 	}
 }
+
+// hoppingMockDialer is a netproxy.Dialer whose endpoint port can be re-rolled,
+// like hysteria2 with a port-hopping range.
+type hoppingMockDialer struct {
+	mockNetDialer
+	hops atomic.Int32
+}
+
+func (h *hoppingMockDialer) HopPort() bool {
+	h.hops.Add(1)
+	return true
+}
+
+// TestHopPortOnFailure pins the retry contract for port-hopping links: after a
+// failed probe dae must re-roll the endpoint port so the retry does not land on
+// the same (possibly blocked or lossy) port, and must leave other dialers
+// untouched.
+func TestHopPortOnFailure(t *testing.T) {
+	plain := &mockNetDialer{}
+	if hopPortOnFailure(plain) {
+		t.Fatal("a dialer that cannot hop ports must report no hop")
+	}
+
+	hopper := &hoppingMockDialer{}
+	if !hopPortOnFailure(hopper) {
+		t.Fatal("a port-hopping dialer must report a hop")
+	}
+	if got := hopper.hops.Load(); got != 1 {
+		t.Fatalf("hops = %d, want 1", got)
+	}
+
+	if hopPortOnFailure(nil) {
+		t.Fatal("a nil dialer must report no hop")
+	}
+}

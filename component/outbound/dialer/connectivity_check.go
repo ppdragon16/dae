@@ -24,6 +24,7 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/common/netutils"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	dnsmessage "github.com/miekg/dns"
@@ -455,6 +456,15 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 					break
 				}
 				lastErr = err
+				// A port-hopping link (hysteria2) may have lost its probe on
+				// a port that is blocked or lossy. Re-roll the endpoint port
+				// for the next attempt instead of retrying the same one; the
+				// QUIC connection is kept, so this costs no handshake.
+				if i < RetryCount-1 && hopPortOnFailure(d.Dialer) && log.IsLevelEnabled(log.DebugLevel) {
+					log.WithFields(log.Fields{
+						"node": d.Name,
+					}).Debugln("Port hop after a failed check")
+				}
 			}
 			if !checkPassed {
 				d.Update(false, 0, checkOpt.networkType,
@@ -743,6 +753,24 @@ func (d *Dialer) cancelAbortConns() {
 		d.abortConnsTimer.Stop()
 		d.abortConnsTimer = nil
 	}
+}
+
+// PortHopper is implemented by dialers whose endpoint port is drawn from a
+// range (hysteria2 port hopping). HopPort re-rolls the port of the live
+// connection without reconnecting, and reports whether it did.
+type PortHopper interface {
+	HopPort() bool
+}
+
+// hopPortOnFailure re-rolls a port-hopping dialer's endpoint port after a
+// failed probe, so the retry does not land on the same port. Dialers that do
+// not hop ports, or that are not connected, report false.
+func hopPortOnFailure(dl netproxy.Dialer) bool {
+	hopper, ok := dl.(PortHopper)
+	if !ok {
+		return false
+	}
+	return hopper.HopPort()
 }
 
 func (d *Dialer) Check(opts *CheckOption) (ok bool, latency time.Duration, err error) {
