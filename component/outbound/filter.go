@@ -7,6 +7,7 @@ package outbound
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/daeuniverse/dae/component/outbound/dialer"
@@ -60,6 +61,18 @@ type DialerSet struct {
 	nodeToTagMap map[*dialer.Dialer]string // Only for created dialers
 }
 
+// sortedSubscriptionTags returns the tag map's keys in a stable order so the
+// dialer list (and therefore what fixed(N) selects) is reproducible across
+// builds and reloads despite Go's randomized map iteration.
+func sortedSubscriptionTags(tagToNodeList map[string][]string) []string {
+	tags := make([]string, 0, len(tagToNodeList))
+	for tag := range tagToNodeList {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags
+}
+
 func NewDialerSetFromLinks(option *dialer.GlobalOption, tagToNodeList map[string][]string) *DialerSet {
 	s := &DialerSet{
 		option:       option,
@@ -67,7 +80,13 @@ func NewDialerSetFromLinks(option *dialer.GlobalOption, tagToNodeList map[string
 		nodeInfosMap: make(map[dialer.Property]*NodeInfo),
 		nodeToTagMap: make(map[*dialer.Dialer]string),
 	}
-	for subscriptionTag, nodes := range tagToNodeList {
+	// Map iteration order is randomized, which made the dialer order (and
+	// therefore what fixed(0) selects — documented in example.dae as "the first
+	// node from the group") differ between builds and reloads. Iterate the tags
+	// in a stable order instead. (Port of kdae 69ac2234, inherited from
+	// upstream.)
+	for _, subscriptionTag := range sortedSubscriptionTags(tagToNodeList) {
+		nodes := tagToNodeList[subscriptionTag]
 		for _, node := range nodes {
 			d, p, err := D.NewFromLink(node)
 			if err != nil {
