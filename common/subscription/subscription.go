@@ -99,6 +99,26 @@ func ResolveSubscriptionAsSIP008(b []byte) (nodes []string, err error) {
 	return nodes, nil
 }
 
+// maxSubscriptionSize caps how much of a subscription dae reads. It is a
+// variable so tests can shrink it. Port of kdae 1e4e47cf, adapted: this fork had
+// no cap at all, so an oversized (or hostile) subscription was read into memory
+// without bound instead of failing to parse a truncated body.
+var maxSubscriptionSize int64 = 10 << 20 // 10 MiB
+
+// readAllCapped reads at most maxSubscriptionSize bytes. One byte past the cap
+// is reported as an error naming the source, so an oversized subscription fails
+// at the read instead of surfacing far away as "resolved to 0 nodes".
+func readAllCapped(r io.Reader, source string) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxSubscriptionSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxSubscriptionSize {
+		return nil, fmt.Errorf("subscription %q exceeds the %d byte limit", source, maxSubscriptionSize)
+	}
+	return b, nil
+}
+
 func ResolveFile(u *url.URL, configDir string) (b []byte, err error) {
 	if u.Host == "" {
 		return nil, fmt.Errorf("not support absolute path")
@@ -140,7 +160,7 @@ func ResolveFile(u *url.URL, configDir string) (b []byte, err error) {
 		}
 	}
 
-	b, err = io.ReadAll(fReader)
+	b, err = readAllCapped(fReader, path)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +241,7 @@ func ResolveSubscription(client *http.Client, subscriptionDir string, subscripti
 		return "", nil, err
 	}
 	defer resp.Body.Close()
-	b, err = io.ReadAll(resp.Body)
+	b, err = readAllCapped(resp.Body, subscription)
 	if err != nil {
 		return "", nil, err
 	}
