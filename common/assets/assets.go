@@ -87,7 +87,9 @@ func (c *LocationFinder) GetLocationAsset(filename string) (path string, err err
 				filepath.Join("/usr/share", folder),
 			)
 		}
-		searchDirs = append(searchDirs, c.externDirs...)
+		// c.externDirs was already appended above; listing it twice meant a
+		// redundant stat per lookup and a duplicated directory list in the
+		// not-found error. (Port of kdae ea0eb3ad.)
 	} else {
 		// add /etc/dae to search path
 		searchDirs = append(searchDirs, c.externDirs...)
@@ -126,5 +128,13 @@ func (c *LocationFinder) GetLocationAsset(filename string) (path string, err err
 		// return the first path that exists
 		return searchPath, nil
 	}
-	return "", fmt.Errorf("%v: %w in [%v]", filename, os.ErrNotExist, strings.Join(searchDirs, ", "))
+	// Name the environment variable and whether this process actually saw it:
+	// DAE_LOCATION_ASSET is read from the daemon's own environment, so a value
+	// exported in an interactive shell is invisible to a process started by
+	// systemd or by a bare "sudo dae run" that resets the environment.
+	// (Port of kdae ea0eb3ad.)
+	if location == "" {
+		return "", fmt.Errorf("%v: %w in [%v] (DAE_LOCATION_ASSET is not set; set it to the directory holding %v, or install the file into one of the searched directories)", filename, os.ErrNotExist, strings.Join(searchDirs, ", "), filename)
+	}
+	return "", fmt.Errorf("%v: %w in [%v] (DAE_LOCATION_ASSET=%q)", filename, os.ErrNotExist, strings.Join(searchDirs, ", "), location)
 }
