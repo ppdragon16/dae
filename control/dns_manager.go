@@ -176,14 +176,22 @@ func (m *DnsManager) read() (data []byte, err error) {
 			return nil, AsDebug(err, "failed to read tcp DNS resp payload length")
 		}
 		msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
-		if msgLen > consts.EthernetMtu {
-			return nil, AsWarn(err, "tcp dns msg len too large: %d > %d", msgLen, consts.EthernetMtu)
+		// Defensive bound: the two-byte length field cannot encode more than
+		// consts.DnsMaxMessageSize, so this only trips if the framing changes.
+		if msgLen > consts.DnsMaxMessageSize {
+			return nil, AsWarn(err, "tcp dns msg len too large: %d > %d", msgLen, consts.DnsMaxMessageSize)
 		}
 		data = make([]byte, msgLen)
 		if _, err = io.ReadFull(m.conn, data); err != nil {
 			return nil, AsDebug(err, "failed to read tcp DNS resp payload")
 		}
 	} else {
+		// MTU-sized on purpose: the upstream-facing query is clamped to
+		// dnsUDPPayloadCap (1232) before it is sent, so a plain UDP upstream
+		// can never legitimately answer with more than fits this bucket —
+		// anything larger comes back over TCP via the TC bit instead. Keep
+		// the two in sync: raising the clamp without raising this buffer
+		// silently truncates answers again.
 		buf := pool.GetBuffer(consts.EthernetMtu)
 		var n int
 		if n, err = m.conn.Read(buf); err != nil {

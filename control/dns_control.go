@@ -953,17 +953,46 @@ func recycleDnsRefreshParam(p *dnsRefreshParam) {
 	dnsRefreshParamPool.Put(p)
 }
 
+// rewriteUpstreamQuery applies the raw-byte rewrites dae performs on a client
+// query before forwarding it upstream: the EDNS0 UDP payload size clamp and
+// the effective ECS policy. The input query may be shared across racing
+// dialers, so a rewrite always produces a fresh buffer and the caller's bytes
+// are never mutated. release is nil when nothing was taken from the pool;
+// otherwise it returns those buffers and must be called once the query is no
+// longer needed.
+func rewriteUpstreamQuery(data []byte, ecsSpec *dialer.EcsSpec) (out []byte, release func()) {
+	out = data
+	var pooled [][]byte
+	if clamped, changed := dnsClampUDPSize(out, dnsUDPPayloadCap); changed {
+		out = clamped
+		pooled = append(pooled, clamped)
+	}
+	if ecsSpec != nil {
+		if rewritten, changed := dnsRewriteEcs(out, ecsSpec); changed {
+			out = rewritten
+			pooled = append(pooled, rewritten)
+		}
+	}
+	if len(pooled) == 0 {
+		return out, nil
+	}
+	return out, func() {
+		for _, b := range pooled {
+			pool.PutBuffer(b)
+		}
+	}
+}
+
 func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
-	// Effective EDNS0 Client Subnet policy (global dns.ecs default,
-	// overridden by the dialer's [ecs: ...] annotation): strip or
-	// rewrite before cache lookup and forwarding. The input query may be
+	// Cap the client's advertised EDNS0 UDP payload size (see
+	// dnsUDPPayloadCap) and apply the effective EDNS0 Client Subnet policy
+	// (global dns.ecs default, overridden by the dialer's [ecs: ...]
+	// annotation) before cache lookup and forwarding. The input query may be
 	// shared across racing dialers, so a rewrite always produces a fresh
 	// buffer; the caller's bytes are never mutated.
-	if spec := c.resolveEcsPolicy(dialArg.Outbound, dialArg.Dialer); spec != nil {
-		if rewritten, changed := dnsRewriteEcs(data, spec); changed {
-			data = rewritten
-			defer pool.PutBuffer(rewritten)
-		}
+	data, releaseQuery := rewriteUpstreamQuery(data, c.resolveEcsPolicy(dialArg.Outbound, dialArg.Dialer))
+	if releaseQuery != nil {
+		defer releaseQuery()
 	}
 	// Lookup Cache
 	if c.enableCache {

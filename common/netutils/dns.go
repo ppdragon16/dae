@@ -240,6 +240,13 @@ func ResolveSOA(d netproxy.Dialer, dns netip.AddrPort, host string, network stri
 }
 
 func DnsCheck(dialer netproxy.Dialer, server string, network string, data []byte) (bool, error) {
+	// Liveness-probe buffer, deliberately MTU-sized rather than
+	// consts.DnsMaxMessageSize: DnsCheck does not parse the answer (it only asks
+	// whether one arrived), and the query it sends carries no EDNS0 OPT, so a
+	// compliant responder stays within 512 bytes — a 2048 bucket is four
+	// times that. Keeping it small matters because this runs up to four times
+	// per dialer per check round across the whole node fleet. The parsed path
+	// (resolve, below) is the one that needs the full-message buffer.
 	resp := pool.GetBuffer(consts.EthernetMtu)
 	defer pool.PutBuffer(resp)
 	_, err := resolveMsg(dialer, server, network, data, resp)
@@ -281,7 +288,9 @@ func resolve(dialer netproxy.Dialer, server netip.AddrPort, host string, typ uin
 		return nil, err
 	}
 
-	respBuf := pool.GetBuffer(consts.EthernetMtu)
+	// Read buffer: see consts.DnsMaxMessageSize. The query buffer above stays
+	// MTU-sized because a query is small by construction.
+	respBuf := pool.GetBuffer(consts.DnsMaxMessageSize)
 	defer pool.PutBuffer(respBuf)
 	resp, err := resolveMsg(dialer, server.String(), network, data, respBuf)
 	if err != nil {

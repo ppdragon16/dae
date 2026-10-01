@@ -30,13 +30,22 @@ const (
 	dnsEcsFamilyV4 = 1
 	dnsEcsFamilyV6 = 2
 
-	// dnsInjectedUdpSize is the UDP payload size advertised by an OPT
-	// record we inject (when the client sent no EDNS0). 1232 is the
-	// DNS flag-day value: large enough for typical answers, small
-	// enough to avoid IPv6/PPPoE fragmentation. Responses oversized
-	// for the *client* are still truncated per its own request via
-	// truncateDNSResponse.
-	dnsInjectedUdpSize = 1232
+	// dnsUDPPayloadCap is the largest UDP payload size dae advertises to an
+	// upstream. 1232 is the DNS flag-day value: large enough for typical
+	// answers, small enough to avoid IP fragmentation on common IPv6/PPPoE
+	// paths (RFC 8467, RFC 8900). It is used in two places:
+	//
+	//   - as the size of the OPT record dae injects when the client sent no
+	//     EDNS0 at all;
+	//   - as the clamp applied to a client that advertises more
+	//     (dnsClampUDPSize), because dae's own UDP read path is deliberately
+	//     MTU-sized: a larger answer must come back over TCP via the TC bit
+	//     instead of as IP fragments, which are droppable and take the whole
+	//     datagram down when a single fragment is lost.
+	//
+	// Responses oversized for the *client* are still truncated per its own
+	// request via truncateDNSResponse.
+	dnsUDPPayloadCap = 1232
 )
 
 // ParseEcsDefault validates the global dns.ecs option: "strip" (the
@@ -203,6 +212,30 @@ func findEcsOption(data []byte, start, rdLen int) (ecsOption, bool) {
 // dnsStripEcs removes the ECS option from the query. When the OPT record
 // is left with no options, the record itself is removed and ARCOUNT is
 // decremented.
+// dnsClampUDPSize lowers the EDNS0 advertised UDP payload size to at most
+// limit. A client that advertises more than dae is willing to read over a
+// plain UDP transport would otherwise receive a large, IP-fragmented answer
+// that dae's MTU-sized read buffer truncates. Clamping instead makes the
+// upstream signal TC when the answer does not fit, so the client retries over
+// TCP (RFC 1035 section 4.2.1) where the message is length-framed and read
+// whole. Returns a fresh pooled buffer the caller owns when the size changed,
+// or the input unchanged with false.
+func dnsClampUDPSize(data []byte, limit int) ([]byte, bool) {
+	rrStart, _, _, ok := dnsFindOpt(data)
+	if !ok || rrStart+5 > len(data) {
+		return data, false
+	}
+	// OPT layout: NAME(1) TYPE(2) CLASS(2, the advertised UDP payload size).
+	if size := int(binary.BigEndian.Uint16(data[rrStart+3 : rrStart+5])); size > limit {
+		// GetBuffer returns a slice whose length is exactly len(data).
+		out := pool.GetBuffer(len(data))
+		copy(out, data)
+		binary.BigEndian.PutUint16(out[rrStart+3:rrStart+5], uint16(limit))
+		return out, true
+	}
+	return data, false
+}
+
 func dnsStripEcs(data []byte) ([]byte, bool) {
 	rrStart, rdStart, rdLen, ok := dnsFindOpt(data)
 	if !ok {
@@ -215,7 +248,7 @@ func dnsStripEcs(data []byte) ([]byte, bool) {
 	if opt.end-opt.start == rdLen {
 		// OPT carried only the ECS option: drop the whole record.
 		recordLen := (rdStart + rdLen) - rrStart
-		out := pool.GetBuffer(len(data) - recordLen)[:len(data)-recordLen]
+		out := pool.GetBuffer(len(data) - recordLen)
 		copy(out, data[:rrStart])
 		copy(out[rrStart:], data[rrStart+recordLen:])
 		decrementArcount(out)
@@ -223,7 +256,7 @@ func dnsStripEcs(data []byte) ([]byte, bool) {
 	}
 	// Drop just the option; shrink RDLENGTH accordingly.
 	removed := opt.end - opt.start
-	out := pool.GetBuffer(len(data) - removed)[:len(data)-removed]
+	out := pool.GetBuffer(len(data) - removed)
 	copy(out, data[:opt.start])
 	copy(out[opt.start:], data[opt.end:])
 	binary.BigEndian.PutUint16(out[rrStart+9:rrStart+11], uint16(rdLen-removed))
@@ -273,12 +306,12 @@ func dnsSetEcs(data []byte, prefix netip.Prefix) ([]byte, bool) {
 		// Append: OPT record + ECS option, then bump ARCOUNT.
 		// Record: root name(1) type(2) class=udpsize(2) ttl(4) rdlen(2).
 		recordLen := 11 + len(newOpt)
-		out := pool.GetBuffer(len(data) + recordLen)[:len(data)+recordLen]
+		out := pool.GetBuffer(len(data) + recordLen)
 		copy(out, data)
 		pos := len(data)
 		out[pos] = 0
 		binary.BigEndian.PutUint16(out[pos+1:pos+3], dnsTypeOPT)
-		binary.BigEndian.PutUint16(out[pos+3:pos+5], dnsInjectedUdpSize)
+		binary.BigEndian.PutUint16(out[pos+3:pos+5], dnsUDPPayloadCap)
 		for i := 0; i < 4; i++ {
 			out[pos+5+i] = 0 // extended rcode / version / flags
 		}
@@ -298,7 +331,7 @@ func dnsSetEcs(data []byte, prefix netip.Prefix) ([]byte, bool) {
 		kept := rdLen - (old.end - old.start)
 		newRdLen := kept + len(newOpt)
 		outLen := len(data) - (old.end - old.start) + len(newOpt)
-		out := pool.GetBuffer(outLen)[:outLen]
+		out := pool.GetBuffer(outLen)
 		copy(out, data[:rdStart])
 		// Copy other options, skipping the old ECS option.
 		copy(out[rdStart:], data[rdStart:old.start])
@@ -312,7 +345,7 @@ func dnsSetEcs(data []byte, prefix netip.Prefix) ([]byte, bool) {
 	// RDATA.
 	newRdLen := rdLen + len(newOpt)
 	outLen := len(data) + len(newOpt)
-	out := pool.GetBuffer(outLen)[:outLen]
+	out := pool.GetBuffer(outLen)
 	copy(out, data[:rdStart+rdLen])
 	copy(out[rdStart+rdLen:], newOpt)
 	binary.BigEndian.PutUint16(out[rrStart+9:rrStart+11], uint16(newRdLen))

@@ -233,8 +233,8 @@ func TestSetEcsInjectsOptWhenMissing(t *testing.T) {
 	}
 	for _, rr := range m.Extra {
 		if opt, ok := rr.(*dnsmessage.OPT); ok {
-			if opt.UDPSize() != dnsInjectedUdpSize {
-				t.Fatalf("injected OPT udp size = %d, want %d", opt.UDPSize(), dnsInjectedUdpSize)
+			if opt.UDPSize() != dnsUDPPayloadCap {
+				t.Fatalf("injected OPT udp size = %d, want %d", opt.UDPSize(), dnsUDPPayloadCap)
 			}
 		}
 	}
