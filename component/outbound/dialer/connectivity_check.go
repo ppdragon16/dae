@@ -302,6 +302,19 @@ func (d *Dialer) ActivateCheck() {
 	go func() {
 		// at startup, check all network types to determine which are supported
 		done := d.checkCtx.Done()
+		d.checkRunning.Store(true)
+		log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check started")
+		// A probe is expected to return: every dialer must honour its context
+		// (netproxy.Dialer's contract). If a round has not finished after three
+		// check intervals, say so instead of going silent — a hung probe is
+		// otherwise indistinguishable from "no check ever ran".
+		slowWarn := time.AfterFunc(3*d.CheckInterval, func() {
+			log.WithFields(log.Fields{
+				"node":   d.Name,
+				"waited": (3 * d.CheckInterval).String(),
+			}).Warnln("Connectivity check is still running: a probe may be stuck ignoring its context")
+		})
+		defer slowWarn.Stop()
 		var checkOpt *CheckOption
 		var checkErr error
 		for range initialCheckRounds {
@@ -311,6 +324,8 @@ func (d *Dialer) ActivateCheck() {
 			}
 			select {
 			case <-done:
+				d.checkRunning.Store(false)
+				log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before it found a network type")
 				return
 			case <-time.After(initialCheckRetryInterval):
 			}
@@ -322,9 +337,15 @@ func (d *Dialer) ActivateCheck() {
 		// after startup, only run check on one network type
 		select {
 		case <-done:
+			d.checkRunning.Store(false)
+			log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before the steady-state loop started")
 			return
 		default:
 		}
+		log.WithFields(log.Fields{
+			"node":    d.Name,
+			"network": checkOpt.networkType.String(),
+		}).Infoln("Connectivity check entering steady state")
 		go d.startCheckTicker()
 		// TODO: 是否应该对所有网络类型进行检查? runInitialCheck 是不是没意义了? udp 53 能通不一定 udp 443 也能通
 		go d.runCheckLoop(checkOpt)
@@ -352,6 +373,11 @@ func (d *Dialer) onInitialCheckUnresolved(checkErr error, checkOpts []*CheckOpti
 		checkErr = common.Errf("no usable network type after %d initial check rounds", initialCheckRounds)
 	}
 	d.Update(false, 0, nil, checkErr)
+	d.checkRunning.Store(true)
+	log.WithFields(log.Fields{
+		"node":  d.Name,
+		"error": checkErr.Error(),
+	}).Warnln("Initial connectivity check found no usable network type; retrying the full discovery on every tick")
 	go d.startCheckTicker()
 	go d.runUnresolvedCheckLoop(checkOpts)
 }
@@ -361,9 +387,13 @@ func (d *Dialer) onInitialCheckUnresolved(checkErr error, checkOpts []*CheckOpti
 // with the network type that finally worked.
 func (d *Dialer) runUnresolvedCheckLoop(checkOpts []*CheckOption) {
 	done := d.checkCtx.Done()
+	defer func() {
+		d.checkRunning.Store(false)
+	}()
 	for {
 		select {
 		case <-done:
+			log.WithFields(log.Fields{"node": d.Name}).Infoln("Unresolved-discovery check loop stopped")
 			return
 		case <-d.checkCh:
 			opt, err := d.runInitialCheck(checkOpts)
@@ -374,6 +404,10 @@ func (d *Dialer) runUnresolvedCheckLoop(checkOpts []*CheckOption) {
 				d.Update(false, 0, nil, err)
 				continue
 			}
+			log.WithFields(log.Fields{
+				"node":    d.Name,
+				"network": opt.networkType.String(),
+			}).Infoln("Connectivity check recovered; entering steady state")
 			go d.runCheckLoop(opt)
 			return
 		}
@@ -427,6 +461,18 @@ func (d *Dialer) startCheckTicker() {
 
 // Manually start check.
 func (d *Dialer) NotifyCheck() {
+	// A dialer whose check chain vanished (never started, or exited without
+	// re-arming) would swallow this nudge into checkCh with nobody reading, so
+	// the dialer stays dead until a reload. Re-arm instead: "activated but not
+	// running" is exactly the stuck state, and ReactivateCheck is safe to call
+	// from a data-path goroutine.
+	if d.checkActivated && !d.checkRunning.Load() {
+		log.WithFields(log.Fields{
+			"node": d.Name,
+		}).Warnln("Connectivity check loop is missing; re-arming it")
+		d.ReactivateCheck()
+		return
+	}
 	select {
 	case <-d.checkCtx.Done():
 		return
@@ -460,9 +506,13 @@ func (d *Dialer) connectOnce() error {
 
 func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 	done := d.checkCtx.Done()
+	defer func() {
+		d.checkRunning.Store(false)
+	}()
 	for {
 		select {
 		case <-done:
+			log.WithFields(log.Fields{"node": d.Name}).Infoln("Steady-state check loop stopped")
 			return
 		case <-d.checkCh:
 			// Phase 1: reconnect. A dialer that is not alive (the previous

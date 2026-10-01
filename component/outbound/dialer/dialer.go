@@ -88,6 +88,12 @@ type Dialer struct {
 	checkCancel context.CancelFunc
 
 	checkActivated bool
+	// checkRunning reports whether a check chain (initial rounds, the
+	// unresolved-discovery loop, or the steady-state loop) currently owns this
+	// dialer's checkCtx. It exists so a chain that vanished can be told apart
+	// from one that is merely between ticks: "activated but not running" is
+	// the stuck state that used to need a reload, and NotifyCheck re-arms it.
+	checkRunning atomic.Bool
 
 	// activeConns maps rConn -> lConn for every connection pair created
 	// by this dialer. AbortConns uses this to close BOTH ends of the relay
@@ -191,6 +197,7 @@ func (d *Dialer) Clone() *Dialer {
 
 func (d *Dialer) stopCheck() {
 	d.checkCancel()
+	d.checkRunning.Store(false)
 	d.tickerMu.Lock()
 	if d.ticker != nil {
 		d.ticker.Stop()

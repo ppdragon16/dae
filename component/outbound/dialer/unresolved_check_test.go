@@ -155,3 +155,75 @@ func TestDialer_InitialCheckReportsProbeError(t *testing.T) {
 		t.Fatalf("err = %v, want the probe error", err)
 	}
 }
+
+// TestNotifyCheckRearmsAMissingCheckLoop pins the watchdog for the class of
+// state this incident exposed: the dialer is marked activated but no check
+// chain owns its context (the chain never started, or exited without
+// re-arming). NotifyCheck used to push a tick into checkCh that nobody read,
+// leaving the dialer dead until a reload; it must re-arm the chain instead.
+func TestNotifyCheckRearmsAMissingCheckLoop(t *testing.T) {
+	oldInterval := initialCheckRetryInterval
+	initialCheckRetryInterval = time.Millisecond
+	t.Cleanup(func() { initialCheckRetryInterval = oldInterval })
+
+	probe := &flakyProbeDialer{}
+	probe.failing.Store(true)
+	d := NewDialer(probe, &GlobalOption{CheckInterval: 5 * time.Millisecond},
+		&Property{Property: D.Property{Name: "missing-loop"}}, true)
+	t.Cleanup(d.stopCheck)
+	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
+
+	// The stuck state: activated, but nothing is running.
+	d.checkActivated = true
+	d.checkRunning.Store(false)
+	before := d.checkCtx
+
+	d.NotifyCheck()
+
+	if d.checkCtx == before {
+		t.Fatal("NotifyCheck did not re-arm the missing check chain")
+	}
+	if !d.checkActivated {
+		t.Fatal("re-arming must leave the dialer activated")
+	}
+}
+
+// TestCheckRunningTracksTheLoop pins the lifecycle flag the watchdog and the
+// logs rely on: the unresolved-discovery loop marks the dialer as running while
+// it owns the context, and the flag drops when stopCheck cancels it.
+func TestCheckRunningTracksTheLoop(t *testing.T) {
+	oldInterval := initialCheckRetryInterval
+	initialCheckRetryInterval = time.Millisecond
+	t.Cleanup(func() { initialCheckRetryInterval = oldInterval })
+
+	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
+		&Property{Property: D.Property{Name: "flag"}}, true)
+	t.Cleanup(d.stopCheck)
+	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
+	d.alive.Store(true)
+
+	var calls atomic.Int32
+	opt := &CheckOption{
+		networkType: testNetType,
+		CheckFunc: func() (bool, error) {
+			calls.Add(1)
+			return false, errors.New("probe: injected failure")
+		},
+	}
+
+	d.onInitialCheckUnresolved(errors.New("no usable network type"), []*CheckOption{opt})
+	if !d.checkRunning.Load() {
+		t.Fatal("the unresolved-discovery loop must mark the dialer as running")
+	}
+
+	d.checkCh <- time.Now()
+	waitForCondition(t, 2*time.Second, func() bool { return calls.Load() > 0 },
+		"the unresolved loop did not run a discovery round")
+	if !d.checkRunning.Load() {
+		t.Fatal("the flag must stay set while the loop keeps retrying")
+	}
+
+	d.stopCheck()
+	waitForCondition(t, 2*time.Second, func() bool { return !d.checkRunning.Load() },
+		"the flag must drop once the loop is cancelled")
+}
