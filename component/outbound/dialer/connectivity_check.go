@@ -34,7 +34,16 @@ import (
 const (
 	RetryCount    = 3
 	RetryInterval = 5 * time.Second
+
+	// initialCheckRounds bounds how many full four-network-type rounds the
+	// first activation runs before it gives up on discovering a usable
+	// network type.
+	initialCheckRounds = 3
 )
+
+// initialCheckRetryInterval is the pause between those rounds. A variable so
+// tests can drive the give-up path without waiting out the real schedule.
+var initialCheckRetryInterval = 5 * time.Second
 
 func (d *Dialer) Alive() bool {
 	return d.Dialer.Alive() && d.alive.Load()
@@ -294,18 +303,20 @@ func (d *Dialer) ActivateCheck() {
 		// at startup, check all network types to determine which are supported
 		done := d.checkCtx.Done()
 		var checkOpt *CheckOption
-		for range 3 {
-			checkOpt = d.runInitialCheck(CheckOpts)
+		var checkErr error
+		for range initialCheckRounds {
+			checkOpt, checkErr = d.runInitialCheck(CheckOpts)
 			if checkOpt != nil {
 				break
 			}
 			select {
 			case <-done:
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(initialCheckRetryInterval):
 			}
 		}
 		if checkOpt == nil {
+			d.onInitialCheckUnresolved(checkErr, CheckOpts)
 			return
 		}
 		// after startup, only run check on one network type
@@ -318,6 +329,55 @@ func (d *Dialer) ActivateCheck() {
 		// TODO: 是否应该对所有网络类型进行检查? runInitialCheck 是不是没意义了? udp 53 能通不一定 udp 443 也能通
 		go d.runCheckLoop(checkOpt)
 	}()
+}
+
+// onInitialCheckUnresolved handles the state where none of the
+// initialCheckRounds full rounds found a usable network type. It corrects the
+// liveness state explicitly — runInitialCheck only calls Update on success, so
+// before this a dialer that was alive at re-activation stayed alive — and then
+// keeps probing: runCheckLoop needs one confirmed checkOpt, which this state
+// does not have yet, so the full discovery is retried on every tick until a
+// round succeeds and hands over to the steady-state loop.
+//
+// Before this, the give-up branch returned with neither a ticker nor a loop
+// running and without ever calling Update(false). A node that was merely
+// unreachable during daemon startup (WAN not up yet, or its check server
+// momentarily blocked) stayed excluded for the rest of the process lifetime:
+// checkActivated stays set so ActivateCheck cannot retry, and
+// ReportUnavailable's NotifyCheck has no consumer. A dialer that had been
+// alive also kept alive=true, which in turn made the recycle path skip its
+// ResetLatency.
+func (d *Dialer) onInitialCheckUnresolved(checkErr error, checkOpts []*CheckOption) {
+	if checkErr == nil {
+		checkErr = common.Errf("no usable network type after %d initial check rounds", initialCheckRounds)
+	}
+	d.Update(false, 0, nil, checkErr)
+	go d.startCheckTicker()
+	go d.runUnresolvedCheckLoop(checkOpts)
+}
+
+// runUnresolvedCheckLoop retries the full initial check on every tick while no
+// network type is usable, then hands the dialer over to the steady-state loop
+// with the network type that finally worked.
+func (d *Dialer) runUnresolvedCheckLoop(checkOpts []*CheckOption) {
+	done := d.checkCtx.Done()
+	for {
+		select {
+		case <-done:
+			return
+		case <-d.checkCh:
+			opt, err := d.runInitialCheck(checkOpts)
+			if opt == nil {
+				// Stay consistently not-alive across rounds; a later
+				// successful round lands Update(true) through
+				// runInitialCheck itself.
+				d.Update(false, 0, nil, err)
+				continue
+			}
+			go d.runCheckLoop(opt)
+			return
+		}
+	}
 }
 
 func (d *Dialer) ReactivateCheck() {
@@ -479,21 +539,26 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 	}
 }
 
-func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
+// runInitialCheck probes every network type once (plus a warm re-check) and
+// returns the first network type that worked. When none works it returns a nil
+// opt and a non-nil error describing why: the caller must correct the dialer's
+// liveness state itself, because this function deliberately does not call
+// Update on the all-probes-failed path.
+func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption, checkErr error) {
 	defer d.NotifyStatusChange()
 
 	d.supported.Store(0)
 
 	var wg sync.WaitGroup
 	var latency [4]time.Duration
-	var err [4]error
+	var errs [4]error
 	if !d.Alive() {
 		if err := d.connectOnce(); err != nil {
 			log.WithFields(log.Fields{
 				"node": d.Name,
 			}).Errorf("Failed to connect: %v", err)
 			d.Update(false, 0, nil, err)
-			return nil
+			return nil, err
 		}
 	}
 	for _, opt := range checkOpts {
@@ -502,7 +567,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 			ok, lat, e := d.Check(opt)
 			d.setSupportedBit(i, ok)
 			latency[i] = lat
-			err[i] = e
+			errs[i] = e
 			if log.IsLevelEnabled(log.InfoLevel) {
 				if ok {
 					log.WithFields(log.Fields{
@@ -514,7 +579,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 					log.WithFields(log.Fields{
 						"network": opt.networkType.String(),
 						"node":    d.Name,
-					}).Infof("Inital Connectivity Check Failed: %v\n", err[i])
+					}).Infof("Inital Connectivity Check Failed: %v\n", errs[i])
 				}
 			}
 		})
@@ -537,7 +602,7 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 			// the dialer's session pool), so the second latency reflects the
 			// steady state and is the right seed for the moving average.
 			// Alive/support state is still taken from the first pass.
-			warmLatency, warmErr := latency[i], err[i]
+			warmLatency, warmErr := latency[i], errs[i]
 			if ok2, lat2, err2 := d.Check(opt); ok2 {
 				warmLatency, warmErr = lat2, err2
 			} else if log.IsLevelEnabled(log.WarnLevel) {
@@ -555,10 +620,17 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption) {
 				}).Debugln("Inital Connectivity Check (warm re-check)")
 			}
 			d.Update(ok, warmLatency, opt.networkType, warmErr)
-			return opt
+			return opt, nil
 		}
 	}
-	return nil
+	// No network type worked. Report why so the caller can correct the
+	// liveness state; prefer a real probe error over a generic one.
+	for _, opt := range checkOpts {
+		if e := errs[common.NetworkTypeToIndex(opt.networkType)]; e != nil {
+			return nil, e
+		}
+	}
+	return nil, common.Errf("no network type passed the initial connectivity check")
 }
 
 func (d *Dialer) RegisterDialerGroup(g DialerGroup) {

@@ -152,7 +152,11 @@ func TestDialer_RunInitialCheck_UsesWarmLatency(t *testing.T) {
 		},
 	}
 
-	if returned := d.runInitialCheck([]*CheckOption{opt}); returned != opt {
+	returned, err := d.runInitialCheck([]*CheckOption{opt})
+	if err != nil {
+		t.Fatalf("runInitialCheck should succeed, got %v", err)
+	}
+	if returned != opt {
 		t.Fatalf("runInitialCheck should return the winning opt, got %v", returned)
 	}
 	if got := calls.Load(); got != 2 {
