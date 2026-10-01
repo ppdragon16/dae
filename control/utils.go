@@ -98,9 +98,6 @@ func (c *ControlPlane) RouteDialOption(
 		}
 	default:
 	}
-	// if mark == 0 {
-	// 	mark = c.soMarkFromDae
-	// }
 	if int(outboundIndex) >= len(c.outbounds) {
 		if len(c.outbounds) == int(consts.OutboundUserDefinedMin) {
 			err = common.Errf("traffic was dropped due to no-load configuration")

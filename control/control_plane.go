@@ -88,7 +88,6 @@ type ControlPlane struct {
 	sniffVerifyMode    consts.SniffVerifyMode
 	udpSniffPorts      []uint16
 	tproxyPortProtect  bool
-	soMarkFromDae      uint32
 
 	trafficLogger *TrafficLogger
 
@@ -226,6 +225,7 @@ func NewControlPlane(
 			PinPath:             pinPath,
 			BigEndianTproxyPort: uint32(common.Htons(global.TproxyPort)),
 			TproxyReuseport:     global.TproxyReuseport,
+			SoMarkFromDae:       global.SoMarkFromDae,
 			CollectionOptions:   collectionOpts,
 			KernelVersion:       &kernelVersion,
 		}); err != nil {
@@ -474,7 +474,6 @@ func NewControlPlane(
 		sniffingTimeout:        sniffingTimeout,
 		udpSniffPorts:          convertUdpSniffPorts(global.UdpSniffPorts),
 		tproxyPortProtect:      global.TproxyPortProtect,
-		soMarkFromDae:          global.SoMarkFromDae,
 		trafficLogger:          trafficLogger,
 
 		dnsRouteCache:         common.NewTimeWheelCache[dnsRouteCacheKey, consts.OutboundIndex](1*time.Hour, 5*time.Second, nil),

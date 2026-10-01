@@ -251,8 +251,65 @@ type loadBpfOptions struct {
 	PinPath             string
 	BigEndianTproxyPort uint32
 	TproxyReuseport     uint8
-	CollectionOptions   *ebpf.CollectionOptions
-	KernelVersion       *internal.Version
+	// SoMarkFromDae is the SO_MARK dae sets on its own sockets (config
+	// global.so_mark_from_dae). It is rewritten into the eBPF program's
+	// PARAM.dae_socket_mark so pid_is_control_plane() can recognise dae's own
+	// traffic on the WAN egress hook and leave it alone. Without it, dae's own
+	// packets (e.g. an outbound tunnel's UDP packets) can be routed back into
+	// the proxy, which feeds the tunnel into itself.
+	SoMarkFromDae     uint32
+	CollectionOptions *ebpf.CollectionOptions
+	KernelVersion     *internal.Version
+}
+
+// daeParamConstant mirrors the layout of PARAM in control/kern/tproxy.c field
+// for field; loadBpfObjectsWithConstants rewrites it into the spec before load.
+// A named type (rather than an anonymous struct at the call site) so the
+// constant can be built and asserted on without loading eBPF.
+type daeParamConstant struct {
+	tproxyPort           uint32
+	controlPlanePid      uint32
+	dae0Ifindex          uint32
+	dae0NetnsId          uint32
+	dae0peerMac          [6]byte
+	paddingAfterMac      [2]byte
+	useRedirectPeer      uint8
+	hasBpfGetCurrentTask uint8
+	tproxyReuseport      uint8
+	padding2             uint8
+	daeSocketMark        uint32
+}
+
+// bpfDaeParamEnv carries the values fullLoadBpfObjects reads from its
+// environment (netns, interfaces, kernel features) into PARAM.
+type bpfDaeParamEnv struct {
+	TproxyPort           uint32
+	ControlPlanePid      uint32
+	Dae0Ifindex          uint32
+	Dae0NetnsId          uint32
+	Dae0PeerMac          [6]byte
+	UseRedirectPeer      uint8
+	HasBpfGetCurrentTask uint8
+	TproxyReuseport      uint8
+}
+
+// bpfConstants builds the constants rewritten into the eBPF spec at load time.
+func bpfConstants(env bpfDaeParamEnv, daeSocketMark uint32) map[string]any {
+	return map[string]any{
+		"PARAM": daeParamConstant{
+			tproxyPort:           env.TproxyPort,
+			controlPlanePid:      env.ControlPlanePid,
+			dae0Ifindex:          env.Dae0Ifindex,
+			dae0NetnsId:          env.Dae0NetnsId,
+			dae0peerMac:          env.Dae0PeerMac,
+			paddingAfterMac:      [2]byte{},
+			useRedirectPeer:      env.UseRedirectPeer,
+			hasBpfGetCurrentTask: env.HasBpfGetCurrentTask,
+			tproxyReuseport:      env.TproxyReuseport,
+			padding2:             0,
+			daeSocketMark:        daeSocketMark,
+		},
+	}
 }
 
 func loadBpfObjectsWithConstants(obj any, opts *ebpf.CollectionOptions, constants map[string]any) error {
@@ -282,38 +339,21 @@ retryLoadBpf:
 	} else {
 		log.Warnf("Kernel does not support bpf_get_current_task helper: %v; process names may be truncated or less accurate (degraded to bpf_get_current_comm)", err)
 	}
-	constants := map[string]any{
-		"PARAM": struct {
-			tproxyPort           uint32
-			controlPlanePid      uint32
-			dae0Ifindex          uint32
-			dae0NetnsId          uint32
-			dae0peerMac          [6]byte
-			paddingAfterMac      [2]byte
-			useRedirectPeer      uint8
-			hasBpfGetCurrentTask uint8
-			tproxyReuseport      uint8
-			padding2             uint8
-			daeSocketMark        uint32
-		}{
-			tproxyPort:      uint32(opts.BigEndianTproxyPort),
-			controlPlanePid: uint32(os.Getpid()),
-			dae0Ifindex:     uint32(GetDaeNetns().Dae0().Attrs().Index),
-			dae0NetnsId:     uint32(netnsID),
-			dae0peerMac:     [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
-			paddingAfterMac: [2]byte{},
-			useRedirectPeer: func() uint8 {
-				if opts.KernelVersion != nil && !opts.KernelVersion.Less(consts.RedirectPeerFeatureVersion) {
-					return 1
-				}
-				return 0
-			}(),
-			hasBpfGetCurrentTask: hasBpfGetCurrentTask,
-			tproxyReuseport:      opts.TproxyReuseport,
-			padding2:             0,
-			daeSocketMark:        0,
-		},
-	}
+	constants := bpfConstants(bpfDaeParamEnv{
+		TproxyPort:      uint32(opts.BigEndianTproxyPort),
+		ControlPlanePid: uint32(os.Getpid()),
+		Dae0Ifindex:     uint32(GetDaeNetns().Dae0().Attrs().Index),
+		Dae0NetnsId:     uint32(netnsID),
+		Dae0PeerMac:     [6]byte(GetDaeNetns().Dae0Peer().Attrs().HardwareAddr),
+		UseRedirectPeer: func() uint8 {
+			if opts.KernelVersion != nil && !opts.KernelVersion.Less(consts.RedirectPeerFeatureVersion) {
+				return 1
+			}
+			return 0
+		}(),
+		HasBpfGetCurrentTask: hasBpfGetCurrentTask,
+		TproxyReuseport:      opts.TproxyReuseport,
+	}, opts.SoMarkFromDae)
 	if err = loadBpfObjectsWithConstants(bpf, opts.CollectionOptions, constants); err != nil {
 		if errors.Is(err, ebpf.ErrMapIncompatible) {
 			// Map property is incompatible. Remove the old map and try again.
