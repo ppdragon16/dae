@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daeuniverse/dae/common"
 	D "github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 )
@@ -187,5 +188,102 @@ func TestDialer_InitialCheckReportsProbeError(t *testing.T) {
 	}
 	if !errors.Is(err, want) {
 		t.Fatalf("err = %v, want the probe error", err)
+	}
+}
+
+// TestDialer_SteadyStateFailureReDiscovers pins the recovery path: when the
+// network type steady state is checking fails for good, the loop re-runs
+// discovery, which refreshes the support matrix and picks a type that still
+// works. Without it the dialer kept re-probing the dead type forever and the
+// node stayed excluded until a reload, even though another type was fine.
+func TestDialer_SteadyStateFailureReDiscovers(t *testing.T) {
+	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
+		&Property{Property: D.Property{Name: "rediscover"}}, true)
+	t.Cleanup(d.stopCheck)
+	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
+	// Drive the retry budget fast: the assertion is about what happens after it
+	// is exhausted, not about the schedule itself.
+	d.checkRetryInterval = time.Millisecond
+
+	var tcpHealthy atomic.Bool
+	tcpHealthy.Store(true)
+	optTCP := &CheckOption{
+		networkType: common.NETWORK_TCP4,
+		CheckFunc: func() (bool, error) {
+			if tcpHealthy.Load() {
+				return true, nil
+			}
+			return false, context.DeadlineExceeded
+		},
+	}
+	optUDP := &CheckOption{
+		networkType: common.NETWORK_UDP4,
+		CheckFunc:   func() (bool, error) { return true, nil },
+	}
+
+	go d.runCheckLoopWith(d.checkCtx, []*CheckOption{optTCP, optUDP}, 3, time.Millisecond)
+	waitForCondition(t, 2*time.Second, func() bool { return d.Alive() },
+		"discovery must mark the dialer alive")
+
+	// The type discovery picked (the first supported one) dies; the other works.
+	tcpHealthy.Store(false)
+	d.checkCh <- time.Now()
+
+	tcpIdx := common.NetworkTypeToIndex(common.NETWORK_TCP4)
+	udpIdx := common.NetworkTypeToIndex(common.NETWORK_UDP4)
+	waitForCondition(t, 3*time.Second, func() bool {
+		return !d.Supported(tcpIdx)
+	}, "the dead type must be dropped from the support matrix after rediscovery")
+	if !d.Supported(udpIdx) {
+		t.Fatal("the type that still works must stay supported")
+	}
+	waitForCondition(t, 3*time.Second, func() bool { return d.Alive() },
+		"the dialer must come back alive on the type that still works")
+}
+
+// TestDialer_TransientProbeFailureIsAbsorbed pins the other half of the
+// contract: a single failed probe inside one cycle must NOT be treated as the
+// type being dead, so no rediscovery happens and the dialer stays alive.
+func TestDialer_TransientProbeFailureIsAbsorbed(t *testing.T) {
+	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
+		&Property{Property: D.Property{Name: "blip"}}, true)
+	t.Cleanup(d.stopCheck)
+	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
+	d.checkRetryInterval = time.Millisecond
+
+	// Calls 1 and 2 are discovery's cold + warm probe; call 3 is the steady
+	// cycle's first probe and fails; call 4 (the retry) succeeds.
+	var calls atomic.Int32
+	optTCP := &CheckOption{
+		networkType: common.NETWORK_TCP4,
+		CheckFunc: func() (bool, error) {
+			if calls.Add(1) == 3 {
+				return false, context.DeadlineExceeded
+			}
+			return true, nil
+		},
+	}
+
+	go d.runCheckLoopWith(d.checkCtx, []*CheckOption{optTCP}, 3, time.Millisecond)
+	waitForCondition(t, 2*time.Second, func() bool { return d.Alive() },
+		"discovery must mark the dialer alive")
+
+	d.checkCh <- time.Now()
+	waitForCondition(t, 2*time.Second, func() bool { return calls.Load() >= 4 },
+		"the steady cycle did not retry after its failed probe")
+	// Settle. Exactly four probes must have happened: two for discovery (cold +
+	// warm) plus the failed probe and its retry. A rediscovery round would add
+	// two more, which is what this assertion rules out — otherwise the test
+	// could not tell "the blip was absorbed" from "the dialer recovered by
+	// re-running discovery".
+	time.Sleep(80 * time.Millisecond)
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("expected 4 probes (discovery cold+warm, one failure, one retry), got %d: the blip triggered a rediscovery round", got)
+	}
+	if !d.Alive() {
+		t.Fatal("a transient probe failure flipped the dialer not-alive")
+	}
+	if !d.Supported(common.NetworkTypeToIndex(common.NETWORK_TCP4)) {
+		t.Fatal("a transient probe failure must not drop the type from the support matrix")
 	}
 }

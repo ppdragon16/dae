@@ -323,143 +323,147 @@ func (d *Dialer) ActivateCheck() {
 // that bookkeeping momentarily disagreed. Here "the chain is running" is
 // simply "this goroutine has not returned".
 func (d *Dialer) runCheckLoop(ctx context.Context, checkOpts []*CheckOption) {
+	d.runCheckLoopWith(ctx, checkOpts, RetryCount, RetryInterval)
+}
+
+// runCheckLoopWith is runCheckLoop with an explicit probe-retry budget: a failed
+// steady-state probe is retried retryCount times, spaced by retryInterval,
+// before the dialer is judged dead for that network type and discovery runs
+// again. Tests pass a short budget instead of waiting out RetryInterval.
+func (d *Dialer) runCheckLoopWith(ctx context.Context, checkOpts []*CheckOption, retryCount int, retryInterval time.Duration) {
 	done := ctx.Done()
 	log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check started")
 
-	// A probe is expected to return: every dialer must honour its context
-	// (netproxy.Dialer's contract). If discovery has not finished after three
-	// check intervals, say so instead of going silent — a hung probe is
-	// otherwise indistinguishable from "no check ever ran".
-	slowWarn := time.AfterFunc(3*d.CheckInterval, func() {
-		log.WithFields(log.Fields{
-			"node":   d.Name,
-			"waited": (3 * d.CheckInterval).String(),
-		}).Warnln("Connectivity check is still running: a probe may be stuck ignoring its context")
-	})
-	// Phase 1: discovery. Probe every network type until one of them passes,
-	// retrying the full round until it does — a dialer that is merely
-	// unreachable while the daemon starts (WAN not up yet, or its probe server
-	// momentarily blocked) therefore recovers on its own instead of staying
-	// excluded. Only cancellation of the dialer's context ends this phase.
-	//
-	// One timer is reused for the whole phase: time.After inside the loop would
-	// allocate a fresh timer on every retry.
+	// One timer is reused by every discovery round: time.After inside the loop
+	// would allocate a fresh timer on every retry.
 	retryTimer := time.NewTimer(d.checkRetryInterval)
 	defer retryTimer.Stop()
-	var checkOpt *CheckOption
-	for {
-		var checkErr error
-		checkOpt, checkErr = d.runInitialCheck(checkOpts)
-		if checkOpt != nil {
-			break
-		}
-		if checkErr == nil {
-			checkErr = common.Errf("no usable network type after %d initial check rounds", initialCheckRounds)
-		}
-		// runInitialCheck only calls Update for a network type that passed, so
-		// correct the liveness state explicitly; a later successful round lands
-		// Update(true) through runInitialCheck itself.
-		d.Update(false, 0, nil, checkErr)
-		log.WithFields(log.Fields{
-			"node":  d.Name,
-			"error": checkErr.Error(),
-		}).Warnln("Initial connectivity check found no usable network type; retrying the full discovery")
-		// Wait out the rest of the retry interval before the next round. The
-		// timer was armed before this round, so a round that already took longer
-		// than the interval returns here immediately instead of adding another
-		// one on top of it.
-		select {
-		case <-done:
-			slowWarn.Stop()
-			log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before it found a network type")
-			return
-		case <-retryTimer.C:
-		}
-		retryTimer.Reset(d.checkRetryInterval)
-	}
-	slowWarn.Stop()
-	log.WithFields(log.Fields{
-		"node":    d.Name,
-		"network": checkOpt.networkType.String(),
-	}).Infoln("Connectivity check entering steady state")
 
-	// Steady state: only the network type that discovery confirmed is checked.
-	// TODO: 是否应该对所有网络类型进行检查? runInitialCheck 是不是没意义了? udp 53 能通不一定 udp 443 也能通
+	// Discovery and steady state alternate: discovery probes every network type
+	// and picks one, steady state checks that one, and a sustained failure of it
+	// sends the loop back to discovery.
 	for {
-		select {
-		case <-done:
-			log.WithFields(log.Fields{"node": d.Name}).Infoln("Steady-state check loop stopped")
-			return
-		case <-d.checkCh:
-			// Reconnect first. A dialer that is not alive (the previous cycle
-			// marked it so) gets its own reconnect budget here, before any
-			// probing — the check-retry loop below is for riding out
-			// transient probe blips, not for rebuilding connections. A
-			// dialer that cannot reconnect is dead for real: land the flip
-			// immediately and wait for the next ticker tick.
-			var lastErr error
-			if !d.Alive() {
-				d.NotifyStatusChange()
-				reconnected := false
-				for i := range RetryCount {
+		// A probe is expected to return: every dialer must honour its context
+		// (netproxy.Dialer's contract). If discovery has not finished after three
+		// check intervals, say so instead of going silent — a hung probe is
+		// otherwise indistinguishable from "no check ever ran".
+		slowWarn := time.AfterFunc(3*d.CheckInterval, func() {
+			log.WithFields(log.Fields{
+				"node":   d.Name,
+				"waited": (3 * d.CheckInterval).String(),
+			}).Warnln("Connectivity check is still running: a probe may be stuck ignoring its context")
+		})
+		// Phase 1: discovery. Probe every network type until one of them passes,
+		// retrying the full round until it does — a dialer that is merely
+		// unreachable while the daemon starts (WAN not up yet, or its probe server
+		// momentarily blocked) therefore recovers on its own instead of staying
+		// excluded. Only cancellation of the dialer's context ends this phase.
+		var checkOpt *CheckOption
+		for {
+			var checkErr error
+			checkOpt, checkErr = d.runInitialCheck(checkOpts)
+			if checkOpt != nil {
+				break
+			}
+			if checkErr == nil {
+				checkErr = common.Errf("no usable network type after %d initial check rounds", initialCheckRounds)
+			}
+			// runInitialCheck only calls Update for a network type that passed, so
+			// correct the liveness state explicitly; a later successful round lands
+			// Update(true) through runInitialCheck itself.
+			d.Update(false, 0, nil, checkErr)
+			log.WithFields(log.Fields{
+				"node":  d.Name,
+				"error": checkErr.Error(),
+			}).Warnln("Initial connectivity check found no usable network type; retrying the full discovery")
+			// Wait out the rest of the retry interval before the next round. The
+			// timer was armed before this round, so a round that already took longer
+			// than the interval returns here immediately instead of adding another
+			// one on top of it.
+			select {
+			case <-done:
+				slowWarn.Stop()
+				log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before it found a network type")
+				return
+			case <-retryTimer.C:
+			}
+			retryTimer.Reset(d.checkRetryInterval)
+		}
+		slowWarn.Stop()
+		log.WithFields(log.Fields{
+			"node":    d.Name,
+			"network": checkOpt.networkType.String(),
+		}).Infoln("Connectivity check entering steady state")
+
+		// Steady state: check the network type that discovery confirmed. If it
+		// stops working, leave the loop and run discovery again — that is the
+		// only way the support matrix (and noIpv6) are refreshed and the only
+		// way the dialer can come back on another network type that still works.
+		//
+		// TODO: 是否应该在每个周期也探测其它 supported 类型？好处是能在 metrics
+		// 中看到未选中类型的延迟，代价是每节点每周期最多 4 次探测。另外，udp 53能通不一定udp 443也能通。
+	steady:
+		for {
+			select {
+			case <-done:
+				log.WithFields(log.Fields{"node": d.Name}).Infoln("Steady-state check loop stopped")
+				return
+			case <-d.checkCh:
+				// Probe retries. A failed attempt must NOT flip the dialer
+				// not-alive while retries remain: the retry loop exists to ride
+				// out transient blips, and an eager flip (the old behavior)
+				// defeated that — a single lost probe flipped the eBPF
+				// connectivity map and downgraded the whole group's flows for
+				// one interval. Failed attempts are therefore only accumulated
+				// here; Update(false) lands once after the loop is exhausted.
+				// Success lands immediately: recovery should propagate ASAP.
+				checkPassed := false
+				var lastErr error
+				for i := range retryCount {
 					if i > 0 {
-						time.Sleep(RetryInterval)
+						time.Sleep(retryInterval)
 					}
-					if lastErr = d.connectOnce(); lastErr == nil {
-						reconnected = true
+					ok, latency, err := d.Check(checkOpt)
+					if ok {
+						d.Update(ok, latency, checkOpt.networkType, err)
+						checkPassed = true
 						break
 					}
-				}
-				if !reconnected {
-					d.Update(false, 0, checkOpt.networkType,
-						common.Errf("reconnect failed after %d retries: %v", RetryCount, lastErr))
-					// Cleanup channel to avoid consecutive checks.
-					select {
-					case <-d.checkCh:
-					default:
+					lastErr = err
+					// A port-hopping link (hysteria2) may have lost its probe on
+					// a port that is blocked or lossy. Re-roll the endpoint port
+					// for the next attempt instead of retrying the same one; the
+					// QUIC connection is kept, so this costs no handshake.
+					if i < retryCount-1 && hopPortOnFailure(d.Dialer) && log.IsLevelEnabled(log.DebugLevel) {
+						log.WithFields(log.Fields{
+							"node": d.Name,
+						}).Debugln("Port hop after a failed check")
 					}
+				}
+				// Cleanup channel to avoid consecutive checks.
+				select {
+				case <-d.checkCh:
+				default:
+				}
+				if checkPassed {
 					continue
 				}
-			}
-			// Check retries: probes only, no reconnecting. A failed
-			// attempt must NOT flip the dialer not-alive while retries
-			// remain: the retry loop exists to ride out transient blips, and
-			// an eager flip (the old behavior) defeated that — a single lost
-			// probe flipped the eBPF connectivity map and downgraded the
-			// whole group's flows for one interval. Failed attempts are
-			// therefore only accumulated here; Update(false) lands once
-			// after the loop is exhausted. Success lands immediately:
-			// recovery should propagate ASAP.
-			checkPassed := false
-			for i := range RetryCount {
-				if i > 0 {
-					time.Sleep(RetryInterval)
-				}
-				ok, latency, err := d.Check(checkOpt)
-				if ok {
-					d.Update(ok, latency, checkOpt.networkType, err)
-					checkPassed = true
-					break
-				}
-				lastErr = err
-				// A port-hopping link (hysteria2) may have lost its probe on
-				// a port that is blocked or lossy. Re-roll the endpoint port
-				// for the next attempt instead of retrying the same one; the
-				// QUIC connection is kept, so this costs no handshake.
-				if i < RetryCount-1 && hopPortOnFailure(d.Dialer) && log.IsLevelEnabled(log.DebugLevel) {
-					log.WithFields(log.Fields{
-						"node": d.Name,
-					}).Debugln("Port hop after a failed check")
-				}
-			}
-			if !checkPassed {
 				d.Update(false, 0, checkOpt.networkType,
-					common.Errf("check failed after %d retries: %v", RetryCount, lastErr))
-			}
-			// Cleanup channel to avoid consecutive checks.
-			select {
-			case <-d.checkCh:
-			default:
+					common.Errf("check failed after %d retries: %v", retryCount, lastErr))
+				// The network type steady state was checking looks dead for
+				// good. Drop the latency history so the group series does not
+				// blend this type's samples with the type discovery picks next
+				// (TCP handshakes and UDP probes differ by an order of
+				// magnitude), then re-run discovery. Recovery from here is
+				// handled by discovery, which reconnects if needed before
+				// probing every network type.
+				d.ResetLatency()
+				log.WithFields(log.Fields{
+					"node":    d.Name,
+					"network": checkOpt.networkType.String(),
+					"error":   lastErr,
+				}).Warnln("Connectivity check failed; re-running discovery to refresh the supported network types")
+				break steady
 			}
 		}
 	}
