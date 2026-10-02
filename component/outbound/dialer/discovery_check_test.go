@@ -66,10 +66,6 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, msg
 // that had been alive kept alive=true (which also skipped the recycle path's
 // ResetLatency).
 func TestDialer_InitialCheckGiveUpKeepsRetrying(t *testing.T) {
-	oldInterval := initialCheckRetryInterval
-	initialCheckRetryInterval = time.Millisecond
-	t.Cleanup(func() { initialCheckRetryInterval = oldInterval })
-
 	probe := &flakyProbeDialer{}
 	probe.failing.Store(true)
 	option := &GlobalOption{
@@ -77,6 +73,7 @@ func TestDialer_InitialCheckGiveUpKeepsRetrying(t *testing.T) {
 		CheckInterval:     5 * time.Millisecond,
 	}
 	d := NewDialer(probe, option, &Property{Property: D.Property{Name: "flaky"}}, true)
+	d.checkRetryInterval = time.Millisecond
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
 	// Reproduce the dangerous case: this dialer was alive before the
@@ -97,13 +94,13 @@ func TestDialer_InitialCheckGiveUpKeepsRetrying(t *testing.T) {
 		"no probe ran after the give-up: the dialer was left without a check loop")
 }
 
-// TestDialer_UnresolvedCheckLoopRecovers drives the unresolved loop directly
-// with injected probe results: a failing round must mark the dialer
-// not-alive, and the next successful round must revive it (and hand over to
-// the steady-state loop).
-func TestDialer_UnresolvedCheckLoopRecovers(t *testing.T) {
+// TestDialer_DiscoveryRecovers drives the merged check loop with injected
+// probe results: a failing round must mark the dialer not-alive, and a later
+// successful round must revive it and enter steady state.
+func TestDialer_DiscoveryRecovers(t *testing.T) {
 	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: 5 * time.Millisecond},
 		&Property{Property: D.Property{Name: "recover"}}, true)
+	d.checkRetryInterval = time.Millisecond
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
 	d.alive.Store(true)
@@ -119,16 +116,53 @@ func TestDialer_UnresolvedCheckLoopRecovers(t *testing.T) {
 		},
 	}
 
-	go d.runUnresolvedCheckLoop([]*CheckOption{opt})
+	go d.runCheckLoop(d.checkCtx, []*CheckOption{opt})
 
-	d.checkCh <- time.Now() // round 1: fails
+	// Discovery keeps failing: the dialer must be corrected to not-alive.
 	waitForCondition(t, 2*time.Second, func() bool { return !d.Alive() },
-		"a failed round must mark the dialer not-alive")
+		"a failed discovery round must mark the dialer not-alive")
 
+	// The same goroutine must pick the network type up once it works.
 	healthy.Store(true)
-	d.checkCh <- time.Now() // round 2: succeeds
 	waitForCondition(t, 2*time.Second, func() bool { return d.Alive() },
-		"a successful round must revive the dialer")
+		"a successful discovery round must revive the dialer")
+}
+
+// TestDialer_DiscoveryRetriesArePaced pins the no-storm property that the old
+// two-loop handover broke: while discovery keeps failing, retries are paced by
+// checkRetryInterval and data-path nudges (NotifyCheck, which fires on
+// every failed relay) cannot accelerate them into a probe storm.
+func TestDialer_DiscoveryRetriesArePaced(t *testing.T) {
+	const interval = 40 * time.Millisecond
+
+	var probes atomic.Int32
+	opt := &CheckOption{
+		networkType: testNetType,
+		CheckFunc: func() (bool, error) {
+			probes.Add(1)
+			return false, errors.New("probe: injected failure")
+		},
+	}
+
+	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
+		&Property{Property: D.Property{Name: "paced"}}, true)
+	d.checkRetryInterval = interval
+	t.Cleanup(d.stopCheck)
+	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
+
+	go d.runCheckLoop(d.checkCtx, []*CheckOption{opt})
+
+	// Hammer the data path the way a burst of failing connections would.
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		d.NotifyCheck()
+		time.Sleep(time.Millisecond)
+	}
+	// ~10 rounds fit in 400ms at 40ms pacing; anything close to the nudge rate
+	// (hundreds) means discovery is spinning on checkCh again.
+	if got := probes.Load(); got > 20 {
+		t.Fatalf("discovery ran %d probes in 400ms with a %v retry interval: retries are not paced", got, interval)
+	}
 }
 
 // TestDialer_InitialCheckReportsProbeError pins the error plumbing the give-up
@@ -154,76 +188,4 @@ func TestDialer_InitialCheckReportsProbeError(t *testing.T) {
 	if !errors.Is(err, want) {
 		t.Fatalf("err = %v, want the probe error", err)
 	}
-}
-
-// TestNotifyCheckRearmsAMissingCheckLoop pins the watchdog for the class of
-// state this incident exposed: the dialer is marked activated but no check
-// chain owns its context (the chain never started, or exited without
-// re-arming). NotifyCheck used to push a tick into checkCh that nobody read,
-// leaving the dialer dead until a reload; it must re-arm the chain instead.
-func TestNotifyCheckRearmsAMissingCheckLoop(t *testing.T) {
-	oldInterval := initialCheckRetryInterval
-	initialCheckRetryInterval = time.Millisecond
-	t.Cleanup(func() { initialCheckRetryInterval = oldInterval })
-
-	probe := &flakyProbeDialer{}
-	probe.failing.Store(true)
-	d := NewDialer(probe, &GlobalOption{CheckInterval: 5 * time.Millisecond},
-		&Property{Property: D.Property{Name: "missing-loop"}}, true)
-	t.Cleanup(d.stopCheck)
-	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
-
-	// The stuck state: activated, but nothing is running.
-	d.checkActivated = true
-	d.checkRunning.Store(false)
-	before := d.checkCtx
-
-	d.NotifyCheck()
-
-	if d.checkCtx == before {
-		t.Fatal("NotifyCheck did not re-arm the missing check chain")
-	}
-	if !d.checkActivated {
-		t.Fatal("re-arming must leave the dialer activated")
-	}
-}
-
-// TestCheckRunningTracksTheLoop pins the lifecycle flag the watchdog and the
-// logs rely on: the unresolved-discovery loop marks the dialer as running while
-// it owns the context, and the flag drops when stopCheck cancels it.
-func TestCheckRunningTracksTheLoop(t *testing.T) {
-	oldInterval := initialCheckRetryInterval
-	initialCheckRetryInterval = time.Millisecond
-	t.Cleanup(func() { initialCheckRetryInterval = oldInterval })
-
-	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
-		&Property{Property: D.Property{Name: "flag"}}, true)
-	t.Cleanup(d.stopCheck)
-	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
-	d.alive.Store(true)
-
-	var calls atomic.Int32
-	opt := &CheckOption{
-		networkType: testNetType,
-		CheckFunc: func() (bool, error) {
-			calls.Add(1)
-			return false, errors.New("probe: injected failure")
-		},
-	}
-
-	d.onInitialCheckUnresolved(errors.New("no usable network type"), []*CheckOption{opt})
-	if !d.checkRunning.Load() {
-		t.Fatal("the unresolved-discovery loop must mark the dialer as running")
-	}
-
-	d.checkCh <- time.Now()
-	waitForCondition(t, 2*time.Second, func() bool { return calls.Load() > 0 },
-		"the unresolved loop did not run a discovery round")
-	if !d.checkRunning.Load() {
-		t.Fatal("the flag must stay set while the loop keeps retrying")
-	}
-
-	d.stopCheck()
-	waitForCondition(t, 2*time.Second, func() bool { return !d.checkRunning.Load() },
-		"the flag must drop once the loop is cancelled")
 }

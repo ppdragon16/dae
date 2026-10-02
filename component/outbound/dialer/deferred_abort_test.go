@@ -14,6 +14,15 @@ func newDeferredAbortDialer(interval time.Duration) *Dialer {
 	return d
 }
 
+// activeConnsLen reads the registry under its mutex: AbortConns runs on the
+// deferred-abort timer goroutine, so an unlocked read here is a real data race
+// (the test, not the dialer, was the unsynchronized side).
+func activeConnsLen(d *Dialer) int {
+	d.activeConnsMu.Lock()
+	defer d.activeConnsMu.Unlock()
+	return len(d.activeConns)
+}
+
 func registerPair(t *testing.T, d *Dialer) (lConn, rConn net.Conn) {
 	t.Helper()
 	lConn, rConn = net.Pipe()
@@ -33,7 +42,7 @@ func TestFlapRecoveryCancelsAbort(t *testing.T) {
 	d.Update(true, 10*time.Millisecond, nil, nil)
 	time.Sleep(200 * time.Millisecond) // > CheckInterval
 
-	if len(d.activeConns) != 1 {
+	if activeConnsLen(d) != 1 {
 		t.Fatalf("connections were aborted despite recovery")
 	}
 }
@@ -51,10 +60,10 @@ func TestSustainedDeathAborts(t *testing.T) {
 	d.Update(false, 0, nil, errTest)
 
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(d.activeConns) > 0 {
+	for time.Now().Before(deadline) && activeConnsLen(d) > 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(d.activeConns) != 0 {
+	if activeConnsLen(d) != 0 {
 		t.Fatal("connections were not aborted after sustained not-alive")
 	}
 	_ = rConn
@@ -67,7 +76,7 @@ func TestZeroIntervalImmediateAbort(t *testing.T) {
 	defer lConn.Close()
 
 	d.Update(false, 0, nil, errTest)
-	if len(d.activeConns) != 0 {
+	if activeConnsLen(d) != 0 {
 		t.Fatal("legacy immediate abort with zero CheckInterval not preserved")
 	}
 	_ = rConn

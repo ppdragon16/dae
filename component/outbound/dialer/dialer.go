@@ -88,13 +88,11 @@ type Dialer struct {
 	checkCancel context.CancelFunc
 
 	checkActivated bool
-	// checkRunning reports whether a check chain (initial rounds, the
-	// unresolved-discovery loop, or the steady-state loop) currently owns this
-	// dialer's checkCtx. It exists so a chain that vanished can be told apart
-	// from one that is merely between ticks: "activated but not running" is
-	// the stuck state that used to need a reload, and NotifyCheck re-arms it.
-	checkRunning atomic.Bool
-
+	// checkRetryInterval is the pause between discovery rounds (see
+	// defaultInitialCheckRetryInterval). A per-dialer field rather than a
+	// package variable so tests can shorten it for their own dialer before the
+	// check goroutine starts, without racing that goroutine's reads.
+	checkRetryInterval time.Duration
 	// activeConns maps rConn -> lConn for every connection pair created
 	// by this dialer. AbortConns uses this to close BOTH ends of the relay
 	// when the dialer transitions alive -> not alive, so a relay goroutine
@@ -170,6 +168,7 @@ func NewDialer(dialer netproxy.Dialer, option *GlobalOption, property *Property,
 		tickerMu:               sync.Mutex{},
 		ticker:                 nil,
 		checkCh:                make(chan time.Time, 1),
+		checkRetryInterval:     defaultInitialCheckRetryInterval,
 		checkCtx:               checkCtx,
 		checkCancel:            checkCancel,
 	}
@@ -197,7 +196,6 @@ func (d *Dialer) Clone() *Dialer {
 
 func (d *Dialer) stopCheck() {
 	d.checkCancel()
-	d.checkRunning.Store(false)
 	d.tickerMu.Lock()
 	if d.ticker != nil {
 		d.ticker.Stop()

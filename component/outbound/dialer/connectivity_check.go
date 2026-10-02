@@ -39,11 +39,13 @@ const (
 	// first activation runs before it gives up on discovering a usable
 	// network type.
 	initialCheckRounds = 3
-)
 
-// initialCheckRetryInterval is the pause between those rounds. A variable so
-// tests can drive the give-up path without waiting out the real schedule.
-var initialCheckRetryInterval = 5 * time.Second
+	// defaultInitialCheckRetryInterval is the pause between discovery rounds. It is
+	// a default, not a package-level knob: tests shorten it per dialer through
+	// Dialer.checkRetryInterval, which is set before the check goroutine starts and
+	// therefore needs no synchronisation.
+	defaultInitialCheckRetryInterval = 5 * time.Second
+)
 
 func (d *Dialer) Alive() bool {
 	return d.Dialer.Alive() && d.alive.Load()
@@ -296,228 +298,102 @@ func (d *Dialer) ActivateCheck() {
 		return
 	}
 	d.checkActivated = true
-
-	CheckOpts := d.createCheckOptions()
-
-	go func() {
-		// at startup, check all network types to determine which are supported
-		done := d.checkCtx.Done()
-		d.checkRunning.Store(true)
-		log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check started")
-		// A probe is expected to return: every dialer must honour its context
-		// (netproxy.Dialer's contract). If a round has not finished after three
-		// check intervals, say so instead of going silent — a hung probe is
-		// otherwise indistinguishable from "no check ever ran".
-		slowWarn := time.AfterFunc(3*d.CheckInterval, func() {
-			log.WithFields(log.Fields{
-				"node":   d.Name,
-				"waited": (3 * d.CheckInterval).String(),
-			}).Warnln("Connectivity check is still running: a probe may be stuck ignoring its context")
-		})
-		defer slowWarn.Stop()
-		var checkOpt *CheckOption
-		var checkErr error
-		for range initialCheckRounds {
-			checkOpt, checkErr = d.runInitialCheck(CheckOpts)
-			if checkOpt != nil {
-				break
-			}
-			select {
-			case <-done:
-				d.checkRunning.Store(false)
-				log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before it found a network type")
-				return
-			case <-time.After(initialCheckRetryInterval):
-			}
-		}
-		if checkOpt == nil {
-			d.onInitialCheckUnresolved(checkErr, CheckOpts)
-			return
-		}
-		// after startup, only run check on one network type
-		select {
-		case <-done:
-			d.checkRunning.Store(false)
-			log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before the steady-state loop started")
-			return
-		default:
-		}
-		log.WithFields(log.Fields{
-			"node":    d.Name,
-			"network": checkOpt.networkType.String(),
-		}).Infoln("Connectivity check entering steady state")
-		go d.startCheckTicker()
-		// TODO: 是否应该对所有网络类型进行检查? runInitialCheck 是不是没意义了? udp 53 能通不一定 udp 443 也能通
-		go d.runCheckLoop(checkOpt)
-	}()
+	// Hand the context to the goroutines instead of letting them re-read the
+	// field: ReactivateCheck swaps it, so a superseded ticker waking from its
+	// jitter sleep would otherwise adopt the new context and install a second
+	// ticker alongside the new chain's.
+	ctx := d.checkCtx
+	go d.startCheckTicker(ctx)
+	go d.runCheckLoop(ctx, d.createCheckOptions())
 }
 
-// onInitialCheckUnresolved handles the state where none of the
-// initialCheckRounds full rounds found a usable network type. It corrects the
-// liveness state explicitly — runInitialCheck only calls Update on success, so
-// before this a dialer that was alive at re-activation stayed alive — and then
-// keeps probing: runCheckLoop needs one confirmed checkOpt, which this state
-// does not have yet, so the full discovery is retried on every tick until a
-// round succeeds and hands over to the steady-state loop.
+// runCheckLoop is the dialer's single check goroutine. It runs two phases and
+// returns only when the dialer's check context is cancelled:
 //
-// Before this, the give-up branch returned with neither a ticker nor a loop
-// running and without ever calling Update(false). A node that was merely
-// unreachable during daemon startup (WAN not up yet, or its check server
-// momentarily blocked) stayed excluded for the rest of the process lifetime:
-// checkActivated stays set so ActivateCheck cannot retry, and
-// ReportUnavailable's NotifyCheck has no consumer. A dialer that had been
-// alive also kept alive=true, which in turn made the recycle path skip its
-// ResetLatency.
-func (d *Dialer) onInitialCheckUnresolved(checkErr error, checkOpts []*CheckOption) {
-	if checkErr == nil {
-		checkErr = common.Errf("no usable network type after %d initial check rounds", initialCheckRounds)
-	}
-	d.Update(false, 0, nil, checkErr)
-	d.checkRunning.Store(true)
-	log.WithFields(log.Fields{
-		"node":  d.Name,
-		"error": checkErr.Error(),
-	}).Warnln("Initial connectivity check found no usable network type; retrying the full discovery on every tick")
-	go d.startCheckTicker()
-	go d.runUnresolvedCheckLoop(checkOpts)
-}
+//  1. Discovery: probe every network type until one of them passes, retrying
+//     the full round until it does. A node that is merely unreachable while the
+//     daemon starts (WAN not up yet, or its probe server momentarily blocked)
+//     therefore recovers on its own instead of staying excluded.
+//  2. Steady state: keep checking the network type that worked.
+//
+// Keeping both phases in one goroutine is what makes the lifecycle simple: an
+// earlier split (one goroutine discovering, then handing over to a second one)
+// needed a running flag, a generation counter and a handover flag to tell a
+// live chain from a vanished one, and NotifyCheck rebuilt the chain whenever
+// that bookkeeping momentarily disagreed. Here "the chain is running" is
+// simply "this goroutine has not returned".
+func (d *Dialer) runCheckLoop(ctx context.Context, checkOpts []*CheckOption) {
+	done := ctx.Done()
+	log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check started")
 
-// runUnresolvedCheckLoop retries the full initial check on every tick while no
-// network type is usable, then hands the dialer over to the steady-state loop
-// with the network type that finally worked.
-func (d *Dialer) runUnresolvedCheckLoop(checkOpts []*CheckOption) {
-	done := d.checkCtx.Done()
-	defer func() {
-		d.checkRunning.Store(false)
-	}()
-	for {
-		select {
-		case <-done:
-			log.WithFields(log.Fields{"node": d.Name}).Infoln("Unresolved-discovery check loop stopped")
-			return
-		case <-d.checkCh:
-			opt, err := d.runInitialCheck(checkOpts)
-			if opt == nil {
-				// Stay consistently not-alive across rounds; a later
-				// successful round lands Update(true) through
-				// runInitialCheck itself.
-				d.Update(false, 0, nil, err)
-				continue
-			}
-			log.WithFields(log.Fields{
-				"node":    d.Name,
-				"network": opt.networkType.String(),
-			}).Infoln("Connectivity check recovered; entering steady state")
-			go d.runCheckLoop(opt)
-			return
-		}
-	}
-}
-
-func (d *Dialer) ReactivateCheck() {
-	if len(d.registeredDialerGroups) == 0 || !d.needAliveState {
-		return
-	}
-	if d.checkActivated {
-		d.stopCheck()
-		d.checkActivated = false
-		d.checkCtx, d.checkCancel = context.WithCancel(context.Background())
-	}
-	d.ActivateCheck()
-}
-
-func (d *Dialer) startCheckTicker() {
-	// Sleep to avoid avalanche.
-	time.Sleep(time.Duration(fastrand.Int63n(int64(d.CheckInterval))))
-	d.tickerMu.Lock()
-	ticker := time.NewTicker(d.CheckInterval)
-	d.ticker = ticker
-	d.tickerMu.Unlock()
-	defer func() {
-		// We own this ticker: on every exit path it must be stopped and, if we
-		// still own the slot, cleared under the mutex so a later stopCheck does
-		// not try to stop a ticker that has already been stopped.
-		ticker.Stop()
-		d.tickerMu.Lock()
-		if d.ticker == ticker {
-			d.ticker = nil
-		}
-		d.tickerMu.Unlock()
-	}()
-	done := d.checkCtx.Done()
-	for {
-		select {
-		case <-done:
-			return
-		case t := <-ticker.C:
-			select {
-			case <-done:
-				return
-			case d.checkCh <- t:
-			}
-		}
-	}
-}
-
-// Manually start check.
-func (d *Dialer) NotifyCheck() {
-	// A dialer whose check chain vanished (never started, or exited without
-	// re-arming) would swallow this nudge into checkCh with nobody reading, so
-	// the dialer stays dead until a reload. Re-arm instead: "activated but not
-	// running" is exactly the stuck state, and ReactivateCheck is safe to call
-	// from a data-path goroutine.
-	if d.checkActivated && !d.checkRunning.Load() {
+	// A probe is expected to return: every dialer must honour its context
+	// (netproxy.Dialer's contract). If discovery has not finished after three
+	// check intervals, say so instead of going silent — a hung probe is
+	// otherwise indistinguishable from "no check ever ran".
+	slowWarn := time.AfterFunc(3*d.CheckInterval, func() {
 		log.WithFields(log.Fields{
-			"node": d.Name,
-		}).Warnln("Connectivity check loop is missing; re-arming it")
-		d.ReactivateCheck()
-		return
-	}
-	select {
-	case <-d.checkCtx.Done():
-		return
-	// If fail to push elem to chan, the check is in process.
-	case d.checkCh <- time.Now():
-	default:
-	}
-}
-
-// connectSingleFlight dedupes concurrent Connect issuers per dialer: a long
-// NOT-ALIVE retry cycle overlapping the next tick, or a manual NotifyCheck,
-// makes several check loops reach Connect for the same dialer at once — they
-// share one in-flight connect instead of stacking handshakes (and, for eager
-// protocols like hysteria2, tearing down the tunnel a sibling just
-// established). The group is global; the key is the dialer itself.
-var connectSingleFlight common.SingleFlight[*Dialer, struct{}, struct{}]
-
-// connectOnce issues Connect at most once per window: concurrent check loops
-// (a long NOT-ALIVE retry cycle overlapping the next tick, or a manual
-// NotifyCheck) share the single in-flight connect instead of each stacking
-// its own handshake — and, for eager protocols like hysteria2, tearing down
-// the tunnel a sibling just established. A plain mutex would NOT do: waiters
-// pass their !Alive test before blocking, so each queued waiter would still
-// issue its own Connect and rebuild in turn.
-func (d *Dialer) connectOnce() error {
-	_, err, _, _ := connectSingleFlight.Do(d, struct{}{}, func(struct{}) (struct{}, error) {
-		return struct{}{}, d.Connect()
+			"node":   d.Name,
+			"waited": (3 * d.CheckInterval).String(),
+		}).Warnln("Connectivity check is still running: a probe may be stuck ignoring its context")
 	})
-	return err
-}
+	// Phase 1: discovery. Probe every network type until one of them passes,
+	// retrying the full round until it does — a dialer that is merely
+	// unreachable while the daemon starts (WAN not up yet, or its probe server
+	// momentarily blocked) therefore recovers on its own instead of staying
+	// excluded. Only cancellation of the dialer's context ends this phase.
+	//
+	// One timer is reused for the whole phase: time.After inside the loop would
+	// allocate a fresh timer on every retry.
+	retryTimer := time.NewTimer(d.checkRetryInterval)
+	defer retryTimer.Stop()
+	var checkOpt *CheckOption
+	for {
+		var checkErr error
+		checkOpt, checkErr = d.runInitialCheck(checkOpts)
+		if checkOpt != nil {
+			break
+		}
+		if checkErr == nil {
+			checkErr = common.Errf("no usable network type after %d initial check rounds", initialCheckRounds)
+		}
+		// runInitialCheck only calls Update for a network type that passed, so
+		// correct the liveness state explicitly; a later successful round lands
+		// Update(true) through runInitialCheck itself.
+		d.Update(false, 0, nil, checkErr)
+		log.WithFields(log.Fields{
+			"node":  d.Name,
+			"error": checkErr.Error(),
+		}).Warnln("Initial connectivity check found no usable network type; retrying the full discovery")
+		// Wait out the rest of the retry interval before the next round. The
+		// timer was armed before this round, so a round that already took longer
+		// than the interval returns here immediately instead of adding another
+		// one on top of it.
+		select {
+		case <-done:
+			slowWarn.Stop()
+			log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before it found a network type")
+			return
+		case <-retryTimer.C:
+		}
+		retryTimer.Reset(d.checkRetryInterval)
+	}
+	slowWarn.Stop()
+	log.WithFields(log.Fields{
+		"node":    d.Name,
+		"network": checkOpt.networkType.String(),
+	}).Infoln("Connectivity check entering steady state")
 
-func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
-	done := d.checkCtx.Done()
-	defer func() {
-		d.checkRunning.Store(false)
-	}()
+	// Steady state: only the network type that discovery confirmed is checked.
+	// TODO: 是否应该对所有网络类型进行检查? runInitialCheck 是不是没意义了? udp 53 能通不一定 udp 443 也能通
 	for {
 		select {
 		case <-done:
 			log.WithFields(log.Fields{"node": d.Name}).Infoln("Steady-state check loop stopped")
 			return
 		case <-d.checkCh:
-			// Phase 1: reconnect. A dialer that is not alive (the previous
-			// cycle marked it so) gets its own reconnect budget here, before
-			// any probing — the check-retry loop below is for riding out
+			// Reconnect first. A dialer that is not alive (the previous cycle
+			// marked it so) gets its own reconnect budget here, before any
+			// probing — the check-retry loop below is for riding out
 			// transient probe blips, not for rebuilding connections. A
 			// dialer that cannot reconnect is dead for real: land the flip
 			// immediately and wait for the next ticker tick.
@@ -545,7 +421,7 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 					continue
 				}
 			}
-			// Phase 2: check retries. Probes only, no reconnecting. A failed
+			// Check retries: probes only, no reconnecting. A failed
 			// attempt must NOT flip the dialer not-alive while retries
 			// remain: the retry loop exists to ride out transient blips, and
 			// an eager flip (the old behavior) defeated that — a single lost
@@ -589,11 +465,6 @@ func (d *Dialer) runCheckLoop(checkOpt *CheckOption) {
 	}
 }
 
-// runInitialCheck probes every network type once (plus a warm re-check) and
-// returns the first network type that worked. When none works it returns a nil
-// opt and a non-nil error describing why: the caller must correct the dialer's
-// liveness state itself, because this function deliberately does not call
-// Update on the all-probes-failed path.
 func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption, checkErr error) {
 	defer d.NotifyStatusChange()
 
@@ -681,6 +552,89 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption, ch
 		}
 	}
 	return nil, common.Errf("no network type passed the initial connectivity check")
+}
+
+func (d *Dialer) ReactivateCheck() {
+	if len(d.registeredDialerGroups) == 0 || !d.needAliveState {
+		return
+	}
+	if d.checkActivated {
+		d.stopCheck()
+		d.checkActivated = false
+		d.checkCtx, d.checkCancel = context.WithCancel(context.Background())
+	}
+	d.ActivateCheck()
+}
+
+func (d *Dialer) startCheckTicker(ctx context.Context) {
+	done := ctx.Done()
+	// Sleep to avoid avalanche, but stay cancellable: a superseded ticker must
+	// not wake up and install itself (and it must not adopt a newer context).
+	select {
+	case <-done:
+		return
+	case <-time.After(time.Duration(fastrand.Int63n(int64(d.CheckInterval)))):
+	}
+	d.tickerMu.Lock()
+	ticker := time.NewTicker(d.CheckInterval)
+	d.ticker = ticker
+	d.tickerMu.Unlock()
+	defer func() {
+		// We own this ticker: on every exit path it must be stopped and, if we
+		// still own the slot, cleared under the mutex so a later stopCheck does
+		// not try to stop a ticker that has already been stopped.
+		ticker.Stop()
+		d.tickerMu.Lock()
+		if d.ticker == ticker {
+			d.ticker = nil
+		}
+		d.tickerMu.Unlock()
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		case t := <-ticker.C:
+			select {
+			case <-done:
+				return
+			case d.checkCh <- t:
+			}
+		}
+	}
+}
+
+// NotifyCheck nudges the check goroutine, e.g. after a relay failed through
+// this dialer. There is nothing to re-arm: runCheckLoop returns only when the
+// dialer is stopped, so an activated dialer always has its goroutine.
+func (d *Dialer) NotifyCheck() {
+	// If fail to push elem to chan, the check is in process.
+	select {
+	case d.checkCh <- time.Now():
+	default:
+	}
+}
+
+// connectSingleFlight dedupes concurrent Connect issuers per dialer: a long
+// NOT-ALIVE retry cycle overlapping the next tick, or a manual NotifyCheck,
+// makes several check loops reach Connect for the same dialer at once — they
+// share one in-flight connect instead of stacking handshakes (and, for eager
+// protocols like hysteria2, tearing down the tunnel a sibling just
+// established). The group is global; the key is the dialer itself.
+var connectSingleFlight common.SingleFlight[*Dialer, struct{}, struct{}]
+
+// connectOnce issues Connect at most once per window: concurrent check loops
+// (a long NOT-ALIVE retry cycle overlapping the next tick, or a manual
+// NotifyCheck) share the single in-flight connect instead of each stacking
+// its own handshake — and, for eager protocols like hysteria2, tearing down
+// the tunnel a sibling just established. A plain mutex would NOT do: waiters
+// pass their !Alive test before blocking, so each queued waiter would still
+// issue its own Connect and rebuild in turn.
+func (d *Dialer) connectOnce() error {
+	_, err, _, _ := connectSingleFlight.Do(d, struct{}{}, func(struct{}) (struct{}, error) {
+		return struct{}{}, d.Connect()
+	})
+	return err
 }
 
 func (d *Dialer) RegisterDialerGroup(g DialerGroup) {
