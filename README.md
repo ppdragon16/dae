@@ -288,6 +288,18 @@ Query multiple upstreams concurrently and use the first response:
 qname(geosite:gfw) -> race(proxy_dns, googledns)
 ```
 
+A trailing `via:` binds every raced upstream to one outbound group — race them
+over the same path while each member still picks the best node inside it:
+
+```shell
+qname(geosite:gfw) -> race(proxy_dns, googledns, via: ai)
+```
+
+`via:` may appear anywhere in the argument list. Internally each member is
+desugared to its virtual upstream `proxy_dns(ai)` / `googledns(ai)` — the same
+instance a standalone `proxy_dns(via: ai)` rule uses — so both forms share one
+upstream entry and one cache identity.
+
 ### `dns/mac` + `dns/sip`
 
 Per-client DNS filtering based on MAC address or source IP:

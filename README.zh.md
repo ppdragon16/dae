@@ -288,6 +288,14 @@ qname(keyword:gemini, keyword:openai) -> proxy_dns(via: ai)
 qname(geosite:gfw) -> race(proxy_dns, googledns)
 ```
 
+可用尾随的 `via:` 把所有参与竞速的上游绑定到同一个 outbound group——在同一条路径上竞速，但各成员仍会在组内选择最优节点：
+
+```shell
+qname(geosite:gfw) -> race(proxy_dns, googledns, via: ai)
+```
+
+`via:` 写在参数列表的任意位置均可。内部会将每个成员脱糖为虚拟上游 `proxy_dns(ai)` / `googledns(ai)`——与单独的 `proxy_dns(via: ai)` 规则共用同一个上游实例和缓存身份。
+
 ### `dns/mac` + `dns/sip`
 
 基于 MAC 地址或源 IP 的客户端级 DNS 过滤：
