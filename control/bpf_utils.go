@@ -193,17 +193,38 @@ func BpfMapBatchDelete(m *ebpf.Map, keys any) (n int, err error) {
 	return vKeys.Len(), nil
 }
 
-// detectCgroupPathCached runs scanCgroupPath once for the lifetime of the
-// process: the cgroup2 mount point does not move under a running dae, and
-// rescanning /proc/mounts on every reload or multiple setups is waste.
-// (Port of kdae 79cb5c07.)
-var detectCgroupPathCached = sync.OnceValues(scanCgroupPath)
+var (
+	// A successful cgroup2 probe is cached for the lifetime of the process:
+	// the cgroup2 mount point does not move under a running dae, and
+	// rescanning /proc/mounts on every reload or multiple setups is waste.
+	// A failed scan is deliberately NOT cached — the probe used to run under
+	// sync.OnceValues, which froze a transient failure (EMFILE, or a container
+	// that mounts cgroup2 slightly after dae starts) into "cgroup2 is not
+	// enabled" until restart, so pname routing could never recover.
+	// (Port of kdae 79cb5c07 and 2e0b3ffc.)
+	detectCgroupPathMu    sync.Mutex
+	detectCgroupPathValue string
+	detectCgroupPathFound bool
+
+	// scanCgroupPathFn is the test seam over the real /proc/mounts scan.
+	scanCgroupPathFn = scanCgroupPath
+)
 
 // detectCgroupPath returns the first-found mount point of type cgroup2
 // and stores it in the cgroupPath global variable.
 // Copied from https://github.com/cilium/ebpf/blob/v0.10.0/examples/cgroup_skb/main.go
 func detectCgroupPath() (string, error) {
-	return detectCgroupPathCached()
+	detectCgroupPathMu.Lock()
+	defer detectCgroupPathMu.Unlock()
+	if detectCgroupPathFound {
+		return detectCgroupPathValue, nil
+	}
+	path, err := scanCgroupPathFn()
+	if err != nil {
+		return "", err
+	}
+	detectCgroupPathValue, detectCgroupPathFound = path, true
+	return path, nil
 }
 
 func scanCgroupPath() (string, error) {
