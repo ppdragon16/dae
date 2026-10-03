@@ -21,6 +21,10 @@ const (
 	dnsRetryInterval = 1 * time.Second
 	dnsRetryCount    = 2
 
+	// maxDnsIdRandomAttempts bounds the random draws used to find a free
+	// transaction id before falling back to a deterministic linear probe.
+	maxDnsIdRandomAttempts = 8
+
 	// defaultDNSAttemptDeadline bounds a single DNS attempt's write
 	// AND read against the upstream. Note: writing the underlying quic
 	// stream could got stuck on not alive dialer's connection.
@@ -211,10 +215,16 @@ func (m *DnsManager) feed(data []byte) {
 		return
 	}
 	id := dnsId(data)
+	// The lookup AND the delivery must happen under m.mu. Resolve removes its
+	// entry, drains the channel and returns it to recvChannelPool under the
+	// same lock; if the send were done after unlocking, a response arriving in
+	// that window would be pushed into a recycled channel and then handed to an
+	// unrelated Resolve call, which would return this foreign response (for a
+	// different question) as its own answer.
 	m.mu.Lock()
 	ch, ok := m.recvMap[id]
-	m.mu.Unlock()
 	if !ok {
+		m.mu.Unlock()
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.Debugf("Unknown dns resp msg, stream: %v, id: %v", m.stream, id)
 		}
@@ -231,6 +241,7 @@ func (m *DnsManager) feed(data []byte) {
 		}
 		// Channel full, drop the message
 	}
+	m.mu.Unlock()
 }
 
 func (m *DnsManager) Close() error {
@@ -269,15 +280,44 @@ var resolveTimerPool = sync.Pool{
 	},
 }
 
+// claimDnsIdLocked returns a transaction id that is not currently registered
+// in recvMap. It must be called with m.mu held. A few random draws find a free
+// slot immediately in practice (recvMap holds only in-flight queries); the
+// linear probe guarantees termination even under pathological density.
+func claimDnsIdLocked(recvMap map[uint16]chan []byte) uint16 {
+	for range maxDnsIdRandomAttempts {
+		id := uint16(fastrand.Intn(math.MaxUint16))
+		if _, dup := recvMap[id]; !dup {
+			return id
+		}
+	}
+	for id := 0; id <= math.MaxUint16; id++ {
+		if _, dup := recvMap[uint16(id)]; !dup {
+			return uint16(id)
+		}
+	}
+	// recvMap is full (65536 in-flight queries on one manager); fall back to a
+	// random id rather than deadlocking.
+	return uint16(fastrand.Intn(math.MaxUint16))
+}
+
 func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
 	origMsgId := dnsId(data)
-	newId := uint16(fastrand.Intn(math.MaxUint16))
-	dnsIdSet(data, newId)
 
 	recvCh := recvChannelPool.Get().(chan []byte)
 	m.mu.Lock()
+	// recvMap keys the demultiplexer, so a duplicate id silently steals the
+	// other in-flight query's channel: both responses for that id are then
+	// delivered to whichever query registered last. That is how a client can
+	// receive a well-formed answer to a *different* question (e.g. an A answer
+	// in reply to its AAAA query). Claim a free id instead of overwriting.
+	newId := claimDnsIdLocked(m.recvMap)
 	m.recvMap[newId] = recvCh
 	m.mu.Unlock()
+
+	// Only stamp the claimed id onto the wire buffer after it is owned, so a
+	// concurrent Resolve on a shared buffer never sees a half-claimed id.
+	dnsIdSet(data, newId)
 
 	var timer *time.Timer
 	defer func() {
