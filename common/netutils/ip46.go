@@ -43,6 +43,26 @@ func ParseOrResolveIp46(host string) (Ip46, error) {
 	return ResolveIp46(host)
 }
 
+// Ip46FromStrings builds an Ip46 from resolved address strings, keeping the
+// first IPv4 and the first IPv6 address. Unparsable entries are skipped.
+func Ip46FromStrings(addrs []string) (ipv46 Ip46) {
+	for _, addr := range addrs {
+		parsed, err := netip.ParseAddr(addr)
+		if err != nil {
+			continue
+		}
+		if ipv46.Ip4.IsValid() && ipv46.Ip6.IsValid() {
+			break
+		}
+		if !ipv46.Ip4.IsValid() && (parsed.Is4() || parsed.Is4In6()) {
+			ipv46.Ip4 = parsed
+		} else if !ipv46.Ip6.IsValid() && parsed.Is6() {
+			ipv46.Ip6 = parsed
+		}
+	}
+	return
+}
+
 func ResolveIp46(host string) (ipv46 Ip46, err error) {
 	addrs, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", host)
 	if err != nil {

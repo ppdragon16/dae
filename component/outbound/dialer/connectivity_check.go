@@ -27,6 +27,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
+	"github.com/daeuniverse/outbound/protocol/direct"
 	dnsmessage "github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
 )
@@ -113,7 +114,7 @@ func ParseTcpCheckOption(rawURL []string, method string) (opt *TcpCheckOption, e
 			return nil, common.Wrap(err, "ParseTcpCheckOption: failed to parse ip from list")
 		}
 	} else {
-		ip46, err = netutils.ParseOrResolveIp46(u.Hostname())
+		ip46, err = resolveCheckHost(u.Hostname())
 		if err != nil {
 			return nil, common.Wrap(err, "ParseTcpCheckOption: failed to resolve ip for %v", u.Hostname())
 		}
@@ -132,6 +133,38 @@ type CheckDnsOption struct {
 	DnsHost string
 	DnsPort uint16
 	netutils.Ip46
+}
+
+// checkHostResolveTimeout bounds a connectivity-check hostname lookup. The
+// lookup happens while the dialer set is being built, so an unreachable DNS
+// server must fail the check options rather than stall the caller. It is a
+// variable only so tests can shorten it.
+var checkHostResolveTimeout = 5 * time.Second
+
+// resolveCheckHost resolves a connectivity-check hostname (udp_check_dns or
+// tcp_check_url). A check address is resolved exactly like a dial to it: the
+// direct dialer's own policy, where the system DNS view is raced against the
+// configured fallback resolver and both legs carry the dae mark.
+func resolveCheckHost(host string) (netutils.Ip46, error) {
+	return resolveCheckHostWith(direct.ResolveHost, host)
+}
+
+// resolveCheckHostWith applies resolve under a bounded deadline, so a resolver
+// that never answers fails the caller that is building the dialer set. resolve
+// is a parameter rather than a package-level hook so a test can pin the
+// deadline and the failure path without mutating process state.
+func resolveCheckHostWith(resolve func(context.Context, string) ([]string, error), host string) (netutils.Ip46, error) {
+	// An address literal never needs a lookup.
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return netutils.FromAddr(addr), nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), checkHostResolveTimeout)
+	defer cancel()
+	addrs, err := resolve(ctx, host)
+	if err != nil {
+		return netutils.Ip46{}, err
+	}
+	return netutils.Ip46FromStrings(addrs), nil
 }
 
 func ParseCheckDnsOption(dnsHostPort []string) (opt *CheckDnsOption, err error) {
@@ -154,7 +187,7 @@ func ParseCheckDnsOption(dnsHostPort []string) (opt *CheckDnsOption, err error) 
 			return nil, common.Wrap(err, "ParseCheckDnsOption: failed to parse ip from list")
 		}
 	} else {
-		ip46, err = netutils.ParseOrResolveIp46(host)
+		ip46, err = resolveCheckHost(host)
 		if err != nil {
 			return nil, common.Wrap(err, "ParseCheckDnsOption: failed to resolve ip for %v", host)
 		}
@@ -201,7 +234,7 @@ func (c *CheckDnsOptionRaw) Option() (opt *CheckDnsOption, err error) {
 	if c.opt == nil {
 		udpCheckOption, err := ParseCheckDnsOption(c.Raw)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse tcp_check_url: %w", err)
+			return nil, fmt.Errorf("failed to parse udp_check_dns: %w", err)
 		}
 		c.opt = udpCheckOption
 	}
@@ -259,7 +292,16 @@ func (d *Dialer) createCheckOptions() []*CheckOption {
 	server4 := ""
 	server6 := ""
 	opt, err := d.CheckDnsOptionRaw.Option()
-	if err == nil {
+	if err != nil {
+		// Do not degrade silently: without an address every check func dials an
+		// empty server, so all four network types report down and the node looks
+		// unreachable instead of misconfigured.
+		log.WithFields(log.Fields{
+			"link":  d.CheckDnsOptionRaw.Raw,
+			"node":  d.Name,
+			"error": err,
+		}).Warnln("Failed to parse udp_check_dns; connectivity checks cannot run")
+	} else {
 		if opt.Ip4.IsValid() {
 			server4 = netip.AddrPortFrom(opt.Ip4, opt.DnsPort).String()
 		}
