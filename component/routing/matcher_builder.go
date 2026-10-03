@@ -128,21 +128,37 @@ func ParseOutbound(rawOutbound *config_parser.Function) (outbound *Outbound, err
 		outbound.Name = rawOutbound.Params[0].Val
 		return outbound, nil
 	}
-	// Handle race() function: race(upstream1, upstream2, ...)
-	// The composite name encodes all sub-upstreams for later resolution.
+	// Handle race() function: race(upstream1, upstream2, ... [via: outbound])
+	// The composite name encodes all sub-upstreams for later resolution. A
+	// trailing "via: <outbound>" desugars each member into its virtual
+	// upstream name "<member>(<outbound>)", exactly the identity dns.New
+	// registers for the race members, so the matcher can resolve the group.
 	if rawOutbound.Name == consts.Function_Race {
 		var subNames []string
+		var viaName string
 		for _, p := range rawOutbound.Params {
-			if p.Key != "" {
-				return nil, fmt.Errorf("race() only accepts bare upstream names, got key=%q", p.Key)
+			switch {
+			case p.Key == "":
+				if p.Val == "" {
+					return nil, fmt.Errorf("race() requires non-empty upstream names")
+				}
+				subNames = append(subNames, p.Val)
+			case p.Key == consts.OutboundParam_Via:
+				if viaName != "" {
+					return nil, fmt.Errorf("race() accepts at most one via:, got %q and %q", viaName, p.Val)
+				}
+				viaName = p.Val
+			default:
+				return nil, fmt.Errorf("race() only accepts bare upstream names and a single via: <outbound>, got key=%q", p.Key)
 			}
-			if p.Val == "" {
-				return nil, fmt.Errorf("race() requires non-empty upstream names")
-			}
-			subNames = append(subNames, p.Val)
 		}
 		if len(subNames) < 2 {
 			return nil, fmt.Errorf("race() requires at least 2 upstreams")
+		}
+		for i, member := range subNames {
+			if viaName != "" {
+				subNames[i] = member + "(" + viaName + ")"
+			}
 		}
 		outbound.Name = consts.Function_Race + "(" + strings.Join(subNames, ",") + ")"
 		return outbound, nil

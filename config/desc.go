@@ -69,7 +69,7 @@ var DnsDesc = Desc{
 	"request": `DNS requests will follow this routing.
 Built-in outbound: asis, reject.
 Available functions: qname, qtype, static.
-Special outbound: race(upstream1, upstream2, ...) races multiple upstreams concurrently and uses the first response.`,
+Special outbound: race(upstream1, upstream2, ... [via: outbound]) races multiple upstreams concurrently and uses the first response. The optional "via: <outbound>" sends every raced upstream through the given outbound group (each member still picks the best node inside the group), e.g. race(cf4_dns, g4_dns, via: ai).`,
 	"response": `DNS responses will follow this routing.
 Built-in outbound: accept, reject.
 Available functions: qname, qtype, ip, upstream`,

@@ -107,6 +107,11 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 			// Virtual upstreams for outbound bindings (e.g., ... -> proxy_dns(via: sg)).
 			// Check if there are params with key "via" (indicates outbound binding like proxy_dns(via: sg))
 			outboundName := rule.Outbound.Params[0].Val
+			if upstreamName == consts.Function_Race {
+				// The race branch below handles via as a group-level binding
+				// applied to members; a via with no member is a config error.
+				return nil, fmt.Errorf("race(via: %v) requires at least one upstream member", outboundName)
+			}
 			// Look up outbound index
 			outboundIdx, ok = outboundName2Id[outboundName]
 			if !ok {
@@ -115,47 +120,78 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 			urlKey = upstreamName
 			upstreamName = upstreamName + "(" + outboundName + ")"
 		} else if upstreamName == consts.Function_Race {
-			// Race multiple upstreams: race(upstream1, upstream2, ...)
-			// Create individual upstreams for each sub-name and a race group entry.
+			// Race multiple upstreams: race(upstream1, upstream2, ... [via: outbound])
+			// A trailing "via: <outbound>" is a group-level binding: every bare
+			// member is desugared into its virtual upstream
+			// "<member>(<outbound>)" - the same identity a standalone
+			// "member(via: <outbound>)" rule would get - so both forms share one
+			// upstream instance and the group keeps a stable cache identity.
 			var subIndices []uint8
 			var subNames []string
+			var viaName string
+			var viaOutbound uint8 = 0xFF
 			for _, p := range rule.Outbound.Params {
-				if p.Key != "" {
-					return nil, fmt.Errorf("race() only accepts bare upstream names, got key=%q", p.Key)
+				if p.Key == "" {
+					if p.Val == "" {
+						return nil, fmt.Errorf("race() requires non-empty upstream names")
+					}
+					subNames = append(subNames, p.Val)
+					continue
 				}
-				subName := p.Val
-				if subName == "" {
-					return nil, fmt.Errorf("race() requires non-empty upstream names")
+				if p.Key != consts.OutboundParam_Via {
+					return nil, fmt.Errorf("race() only accepts bare upstream names and a single via: <outbound>, got key=%q", p.Key)
 				}
-				subNames = append(subNames, subName)
+				if viaName != "" {
+					return nil, fmt.Errorf("race() accepts at most one via:, got %q and %q", viaName, p.Val)
+				}
+				viaOutbound, ok = outboundName2Id[p.Val]
+				if !ok {
+					return nil, fmt.Errorf("outbound %q not found", p.Val)
+				}
+				viaName = p.Val
+			}
+			if len(subNames) == 0 {
+				return nil, fmt.Errorf("race() requires at least one upstream name")
+			}
+			for i, member := range subNames {
+				// Desugar the group-level via into the member's virtual name;
+				// without a via a member keeps its own unbound entry and falls
+				// back to traffic routing, exactly like a bare race member.
+				if viaName != "" {
+					subNames[i] = member + "(" + viaName + ")"
+				}
+				subName := subNames[i]
 				// Look up or create upstream for this sub-name.
 				subIdx, exists := upstreamName2Id[subName]
-				if !exists {
-					if rawURL, ok = predefinedUpstreamNames[subName]; !ok {
-						return nil, fmt.Errorf("undefined upstream name %q in race()", subName)
-					}
-					subIdx = uint8(len(s.upstream))
-					if currentUpstreamIndex := len(s.upstream); currentUpstreamIndex >= int(consts.OutboundUserDefinedMax) {
-						return nil, fmt.Errorf("too many upstreams")
-					}
-					r := &UpstreamResolver{
-						Raw:     rawURL,
-						Network: opt.UpstreamResolverNetwork,
-						FinishInitCallback: func(i int, outbound uint8) func(raw *url.URL, upstream *Upstream) {
-							return func(raw *url.URL, upstream *Upstream) {
-								upstream.Outbound = consts.OutboundIndex(outbound)
-								opt.UpstreamReadyCallback(upstream)
-								s.upstream2IndexMu.Lock()
-								s.upstream2Index[upstream] = i
-								s.upstream2IndexMu.Unlock()
-							}
-						}(len(s.upstream), outboundIdx),
-						mu:       sync.Mutex{},
-						upstream: nil,
-					}
-					upstreamName2Id[subName] = subIdx
-					s.upstream = append(s.upstream, r)
+				if exists {
+					subIndices = append(subIndices, subIdx)
+					continue
 				}
+				if rawURL, ok = predefinedUpstreamNames[member]; !ok {
+					return nil, fmt.Errorf("undefined upstream name %q in race()", member)
+				}
+				subIdx = uint8(len(s.upstream))
+				if currentUpstreamIndex := len(s.upstream); currentUpstreamIndex >= int(consts.OutboundUserDefinedMax) {
+					return nil, fmt.Errorf("too many upstreams")
+				}
+				memberOutbound := viaOutbound
+				r := &UpstreamResolver{
+					Raw:     rawURL,
+					Network: opt.UpstreamResolverNetwork,
+					FinishInitCallback: func(i int, outbound uint8) func(raw *url.URL, upstream *Upstream) {
+						return func(raw *url.URL, upstream *Upstream) {
+							upstream.Outbound = consts.OutboundIndex(outbound)
+							opt.UpstreamReadyCallback(upstream)
+							s.upstream2IndexMu.Lock()
+							s.upstream2Index[upstream] = i
+							s.upstream2IndexMu.Unlock()
+						}
+					}(len(s.upstream), memberOutbound),
+					mu:       sync.Mutex{},
+					upstream: nil,
+				}
+				upstreamName2Id[subName] = subIdx
+				s.upstream = append(s.upstream, r)
 				subIndices = append(subIndices, subIdx)
 			}
 			// Build the composite race upstream name.
