@@ -24,6 +24,13 @@ const (
 	Quic_FrameType_ConnectionClose2 = 0x1d
 )
 
+// quicMaxInitialCryptoOffset bounds a CRYPTO stream offset in a QUIC Initial
+// packet: Initial datagrams cannot exceed 64 KiB, so the ClientHello's crypto
+// stream stays below this bound. Offsets at or above it are attacker garbage
+// and must be rejected before any int conversion (the varint can reach ~2^62,
+// which wraps on 32-bit builds). (Port of kdae ca97821b.)
+const quicMaxInitialCryptoOffset = 1 << 16
+
 type CryptoFrameOffset struct {
 	UpperAppOffset int
 	// Offset of data in quic payload.
@@ -111,6 +118,19 @@ func ExtractCryptoFrameOffset(remainder []byte, transportOffset int) (offset *Cr
 			return nil, 0, err
 		}
 		nextField += n
+
+		// Both varints are attacker-controlled and can reach ~2^62, so every
+		// bound must hold in the uint64 domain: on a 32-bit build an
+		// int(length) of 2^31 wraps negative, slips past this guard, and the
+		// slice below goes out of range. QUIC Initial datagrams cannot exceed
+		// 64 KiB, so a stream offset at or above that bound is garbage here
+		// too (see quicMaxInitialCryptoOffset). (Port of kdae ca97821b.)
+		if length > uint64(len(remainder)-nextField) {
+			return nil, 0, fmt.Errorf("crypto frame data out of range: %w", ErrOutOfRange)
+		}
+		if offset >= quicMaxInitialCryptoOffset {
+			return nil, 0, fmt.Errorf("crypto frame offset out of range: %w", ErrOutOfRange)
+		}
 
 		return &CryptoFrameOffset{
 			UpperAppOffset: int(offset),
