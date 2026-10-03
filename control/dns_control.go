@@ -756,9 +756,33 @@ func (c *DnsController) handleDNSRequestRace(
 	ch := make(chan result, len(raceUpstreams))
 
 	for _, upstream := range raceUpstreams {
-		go func(upstream *dns.Upstream) {
+		// Snapshot the request BEFORE spawning: this function returns as soon as
+		// the first winner is known, but the losing goroutines keep running
+		// until their upstream answers or their attempt deadline expires. As
+		// soon as Handle returns, udpRoutine recycles the request buffer and
+		// the *dnsRequest (pool.PutBuffer / RecycleDnsRequest), and the recycled
+		// memory is immediately handed to the next DNS packet. Taking the copy
+		// inside the goroutine would not be safe: the goroutine may not be
+		// scheduled until after that reuse, so it would still read - and send
+		// upstream - whatever foreign query now occupies the buffer, and its
+		// answer would be filed under this query's cache key. Copying here, in
+		// the synchronously executed loop body, happens-before any recycling.
+		// The copy of the request struct comes from the pool rather than a
+		// local `reqCopy := *req`: handleDNSRequestByUpstream (and the helpers
+		// it passes req to) leak the pointer, so an address-taken local would
+		// be moved to the heap on every race, for every upstream. Pooling keeps
+		// the steady state allocation-free.
+		dataCopy := pool.GetBuffer(len(data))
+		copy(dataCopy, data)
+		reqCopy := ObtainDnsRequest(req.Src, req.Dst, req.routingResult, req.isTcp)
+		go func(upstream *dns.Upstream, dataCopy []byte, reqCopy *dnsRequest) {
+			defer func() {
+				pool.PutBuffer(dataCopy)
+				RecycleDnsRequest(reqCopy)
+			}()
+
 			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
-			err := c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, localResp)
+			err := c.handleDNSRequestByUpstream(dataCopy, reqCopy, queryInfo, upstream, localResp)
 			win := err == nil && winner.CompareAndSwap(false, true)
 			if win {
 				*dnsResp = *localResp
@@ -768,7 +792,7 @@ func (c *DnsController) handleDNSRequestRace(
 			*localResp = dnsResponseData{}
 			dnsResponseDataPool.Put(localResp)
 			ch <- result{err: err, win: win}
-		}(upstream)
+		}(upstream, dataCopy, reqCopy)
 	}
 
 	var firstErr error
