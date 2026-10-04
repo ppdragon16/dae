@@ -287,3 +287,41 @@ func TestDialer_TransientProbeFailureIsAbsorbed(t *testing.T) {
 		t.Fatal("a transient probe failure must not drop the type from the support matrix")
 	}
 }
+
+// deadConnectDialer fails Connect: the discovery round then errors out before
+// any probe runs, which is exactly the path that used to wipe the support
+// matrix via supported.Store(0).
+type deadConnectDialer struct{ mockNetDialer }
+
+func (d *deadConnectDialer) Connect() error    { return errors.New("connection refused") }
+func (d *deadConnectDialer) Disconnect() error { return nil }
+
+// TestDialer_InitialCheckFailureKeepsSupportMatrix pins the in-place support
+// update: a discovery round that fails before probing (connect failure) must
+// keep the previous round's support matrix. Wiping it at entry left the dialer
+// unsupported for every type during re-discovery, so flows of all types lost
+// the node for the whole probing window.
+func TestDialer_InitialCheckFailureKeepsSupportMatrix(t *testing.T) {
+	d := NewDialer(&deadConnectDialer{}, &GlobalOption{CheckInterval: time.Hour},
+		&Property{Property: D.Property{Name: "keep-matrix"}}, true)
+	t.Cleanup(d.stopCheck)
+	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
+
+	tcpIdx := common.NetworkTypeToIndex(testNetType)
+	d.setSupportedBit(tcpIdx, true)
+	d.Update(false, 0, testNetType, nil) // not alive -> the round connects first
+
+	opt := &CheckOption{
+		networkType: testNetType,
+		CheckFunc: func() (bool, error) {
+			t.Fatal("probes must not run when the connect already failed")
+			return false, nil
+		},
+	}
+	if _, err := d.runInitialCheck([]*CheckOption{opt}); err == nil {
+		t.Fatal("expected the discovery round to fail on connect")
+	}
+	if !d.Supported(tcpIdx) {
+		t.Fatal("a failed discovery round wiped the support matrix before probing")
+	}
+}

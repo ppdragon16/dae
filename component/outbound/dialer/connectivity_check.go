@@ -514,7 +514,12 @@ func (d *Dialer) runCheckLoopWith(ctx context.Context, checkOpts []*CheckOption,
 func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption, checkErr error) {
 	defer d.NotifyStatusChange()
 
-	d.supported.Store(0)
+	// The support matrix is NOT reset here: every probe of this round overwrites
+	// its own bit in place as it completes (checkOpts covers every type that has
+	// a check address), so a re-discovery keeps the previous round's matrix while
+	// probing instead of leaving the dialer unsupported for every type during
+	// the window. Bits of types without a check address were never set and stay
+	// zero.
 
 	var wg sync.WaitGroup
 	var latency [4]time.Duration

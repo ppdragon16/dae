@@ -123,6 +123,21 @@ func (g *Gauge) With4(v [4]string) *Series {
 	return g.createSlow(key, v[0], v[1], v[2], v[3])
 }
 
+// Delete4 removes the series with the given labels and reports whether it
+// existed. Deleting (instead of writing 0) keeps a gauge from reporting a stale
+// value after the thing it measured is gone — e.g. a network type that lost
+// support would otherwise sit at the last written sample forever.
+func (g *Gauge) Delete4(v [4]string) bool {
+	var h maphash.Hash
+	h.SetSeed(metricSeed)
+	h.WriteString(v[0])
+	h.WriteString(v[1])
+	h.WriteString(v[2])
+	h.WriteString(v[3])
+	_, existed := g.series.LoadAndDelete(h.Sum64())
+	return existed
+}
+
 // Reset 清空所有 Series，用于重建前清除残余指标
 func (g *Gauge) Reset() {
 	g.series.Range(func(key, _ any) bool {

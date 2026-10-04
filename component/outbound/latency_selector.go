@@ -210,7 +210,16 @@ func (s *LatencyBasedSelector) logDialerSelection(oldBestDialer *dialer.Dialer, 
 }
 
 func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, dialer *dialer.Dialer, networkType *common.NetworkType) {
+	labels := [...]string{s.dialerGroup.Name, dialer.Property.SubscriptionTag, dialer.Name, networkType.String()}
 	if !dialer.Supported(common.NetworkTypeToIndex(networkType)) {
+		// The type lost support (a discovery round probed it down). Delete the
+		// gauges instead of keeping them: the last value written before it died
+		// is usually a timeout-penalty sample that would otherwise sit there
+		// forever as a stale reading — observed as a udp4 gauge stuck at 5s
+		// while the healthy types kept updating.
+		common.Metrics.CheckLatency.Delete4(labels)
+		common.Metrics.CheckMovingLatency.Delete4(labels)
+		common.Metrics.CheckSelectLatency.Delete4(labels)
 		return
 	}
 
@@ -218,7 +227,6 @@ func (s *LatencyBasedSelector) logCheckLatency(aliveDialers []*dialer.Dialer, di
 	if !ok {
 		return
 	}
-	labels := [...]string{s.dialerGroup.Name, dialer.Property.SubscriptionTag, dialer.Name, networkType.String()}
 	common.Metrics.CheckLatency.With4(labels).Set(int64(lastLatency.Milliseconds()))
 
 	movingLatency := dialer.MovingAverage[s.dialerGroup]

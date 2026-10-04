@@ -6,9 +6,11 @@
 package outbound
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -234,6 +236,51 @@ func latenciesCountOf(d *dialer.Dialer, g dialer.DialerGroup) int {
 	// la is *LatenciesN; one Elem() dereferences the pointer.
 	ln := la.Elem().FieldByName("count")
 	return int(ln.Int())
+}
+
+// TestLogCheckLatencyDeletesGaugeForUnsupportedType pins metric hygiene: when a
+// network type loses support (a discovery round probed it down), its gauge must
+// be deleted rather than frozen at the last written sample. The frozen sample
+// was observed in the wild as a udp4 gauge stuck at the 5s timeout penalty
+// while the healthy types kept updating.
+func TestLogCheckLatencyDeletesGaugeForUnsupportedType(t *testing.T) {
+	common.InitMetrics()
+
+	option := &dialer.GlobalOption{
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{testUdpCheckDns}},
+		CheckInterval:     15 * time.Second,
+	}
+	d := newDirectDialer(option, true)
+	g := NewDialerGroup(option, "stale-gauge", []*dialer.Dialer{d},
+		[]*dialer.Annotation{{}},
+		dialer.DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_MinMovingAverageLatencies},
+		func(alive bool, networkType *common.NetworkType) {})
+	selector := g.selector.(*LatencyBasedSelector)
+
+	d.Update(true, 100*time.Millisecond, TestNetworkType, nil)
+	selector.NotifyStatusChange(d)
+
+	gaugeLine := func() string {
+		var buf bytes.Buffer
+		if err := common.Metrics.CheckLatency.GatherTo(&buf, make([]byte, 4096)); err != nil {
+			t.Fatalf("gather: %v", err)
+		}
+		return buf.String()
+	}
+	needle := `dae_check_latency{outbound="stale-gauge",subtag="",dialer="mock",network="tcp4"}`
+	if !strings.Contains(gaugeLine(), needle) {
+		t.Fatalf("the supported type's gauge should be written, got:\n%s", gaugeLine())
+	}
+
+	// Drop the type's support bit and let the selector re-report: the gauge must
+	// be gone, not frozen at 100.
+	supportedField := reflect.ValueOf(d).Elem().FieldByName("supported")
+	*(*uint32)(unsafe.Pointer(supportedField.UnsafeAddr())) &^= 1 << common.NetworkTypeToIndex(TestNetworkType)
+	selector.NotifyStatusChange(d)
+
+	if strings.Contains(gaugeLine(), needle) {
+		t.Fatalf("the unsupported type's gauge must be deleted, not frozen:\n%s", gaugeLine())
+	}
 }
 
 // TestDialerGroup_ReplaceDialers_ResetsLatencyForRecoveredDialer exercises the
