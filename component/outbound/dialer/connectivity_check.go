@@ -560,9 +560,19 @@ func (d *Dialer) runInitialCheck(checkOpts []*CheckOption) (opt *CheckOption, ch
 	// A dialer that fails both IPv6 checks cannot proxy IPv6 traffic at all.
 	// Mark it so DNS AAAA requests through it are rejected, keeping clients
 	// on IPv4 instead of routing IPv6 to a different (IPv6-capable) node.
-	d.noIpv6.Store(
-		!d.Supported(common.NetworkTypeToIndex(common.NETWORK_TCP6)) &&
-			!d.Supported(common.NetworkTypeToIndex(common.NETWORK_UDP6)))
+	noIpv6 := !d.Supported(common.NetworkTypeToIndex(common.NETWORK_TCP6)) &&
+		!d.Supported(common.NetworkTypeToIndex(common.NETWORK_UDP6))
+	// The CAS must stay on the left of &&: the state update has to happen even
+	// when the log level hides the message.
+	if d.noIpv6.CompareAndSwap(!noIpv6, noIpv6) && log.IsLevelEnabled(log.InfoLevel) {
+		// This state gates every AAAA query forwarded through this dialer, and
+		// it only changes here: a boot-time v6 outage frozen into noIpv6=true
+		// used to be invisible while static DNS answers were refused.
+		log.WithFields(log.Fields{
+			"node":   d.Name,
+			"noIpv6": noIpv6,
+		}).Infoln("Dialer IPv6 support state changed")
+	}
 	for _, opt := range checkOpts {
 		i := common.NetworkTypeToIndex(opt.networkType)
 		if ok := d.Supported(i); ok {

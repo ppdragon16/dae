@@ -530,6 +530,25 @@ func (c *DnsController) handleDNSRequest(
 	return c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, dnsResp)
 }
 
+// rejectAAAAQuery reports whether an AAAA query should be answered with a
+// zero-answer response because the dialer that would forward it cannot proxy
+// IPv6. Static upstreams are exempt: their answers are generated in-process
+// and never traverse a dialer, so the dummy dial argument they carry (direct,
+// picked only to keep the plumbing typed) must not gate them. Without the
+// exemption, a direct dialer whose discovery ran before the network's IPv6 came
+// up — and whose tcp4 primary never triggers a re-discovery — froze noIpv6 at
+// true and silently refused every static AAAA answer while all upstream names
+// kept resolving.
+func rejectAAAAQuery(upstream *dns.Upstream, dialer *dialer.Dialer, qtype uint16) bool {
+	if qtype != uint16(dnsmessage.TypeAAAA) || dialer == nil {
+		return false
+	}
+	if upstream.Scheme == dns.UpstreamScheme_Static {
+		return false
+	}
+	return dialer.NoIpv6()
+}
+
 // handleDNSRequestByUpstream selects the best dialer, sends DNS query, handles response
 // routing, logging, and lookup cache update. It manages dialArgument lifecycle internally.
 // Caller provides a pre-allocated dnsResp as the output parameter.
@@ -561,8 +580,7 @@ Dial:
 		// cannot proxy IPv6 (determined by the initial connectivity check).
 		// We build a fresh response buffer instead of mutating `data` in
 		// place because the race path shares `data` across goroutines.
-		if queryInfo.qtype == dnsmessage.TypeAAAA &&
-			dialArgument.Dialer != nil && dialArgument.Dialer.NoIpv6() {
+		if rejectAAAAQuery(upstream, dialArgument.Dialer, queryInfo.qtype) {
 			if log.IsLevelEnabled(log.DebugLevel) {
 				log.WithFields(log.Fields{
 					"qname":    queryInfo.qname,
