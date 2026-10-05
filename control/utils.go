@@ -60,6 +60,9 @@ func GetNetErrorInfo(err error) (isNetError bool, isClosed bool, isTimeout bool,
 	if !ok {
 		return false, false, false, false
 	}
+	//lint:ignore SA1019 Temporary is the upstream classification this helper
+	// has always reported; callers only branch logs/relay behaviour on it, and
+	// replacing it changes semantics rather than fixing anything.
 	return true, errors.Is(err, net.ErrClosed), netErr.Timeout(), netErr.Temporary()
 }
 

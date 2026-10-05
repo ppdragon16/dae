@@ -442,7 +442,8 @@ func startMetricsServer(port uint16) {
 	// 4. 异步启动
 	go func() {
 		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			// 这里可以记录具体的启动错误，比如端口被占用
+			// 端口被占用等启动失败此前被静默吞掉，指标从此缺失且无从排查。
+			log.Warnf("metrics server on :%d stopped: %v", port, err)
 		}
 	}()
 }

@@ -224,20 +224,20 @@ func BenchmarkAhocorasickSlimtrie(b *testing.B) {
 }
 
 func runBenchmark(b *testing.B, matcher routing.DomainMatcher) {
-	rand.Seed(100)
+	rng := rand.New(rand.NewSource(100))
 	for i := 0; i < b.N; i++ {
-		sample := TestSample[rand.Intn(len(TestSample))]
-		choice := rand.Intn(10)
+		sample := TestSample[rng.Intn(len(TestSample))]
+		choice := rng.Intn(10)
 		switch {
 		case choice < 4:
-			addN := rand.Intn(5)
+			addN := rng.Intn(5)
 			buf := make([]byte, addN)
 			for i := range buf {
-				buf[i] = 'a' + byte(rand.Intn('z'-'a'))
+				buf[i] = 'a' + byte(rng.Intn('z'-'a'))
 			}
 			sample = string(buf) + "." + sample
 		case choice >= 4 && choice < 6:
-			k := rand.Intn(len(sample))
+			k := rng.Intn(len(sample))
 			sample = sample[k:]
 		default:
 		}

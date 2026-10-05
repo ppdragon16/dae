@@ -35,20 +35,20 @@ func TestAhocorasickSlimtrie(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rand.Seed(200)
+	rng := rand.New(rand.NewSource(200))
 	for i := range 10000 {
-		sample := TestSample[rand.Intn(len(TestSample))]
-		choice := rand.Intn(10)
+		sample := TestSample[rng.Intn(len(TestSample))]
+		choice := rng.Intn(10)
 		switch {
 		case choice < 4:
-			addN := rand.Intn(5)
+			addN := rng.Intn(5)
 			buf := make([]byte, addN)
 			for i := range buf {
-				buf[i] = 'a' + byte(rand.Intn('z'-'a'))
+				buf[i] = 'a' + byte(rng.Intn('z'-'a'))
 			}
 			sample = string(buf) + "." + sample
 		case choice >= 4 && choice < 6:
-			k := rand.Intn(len(sample))
+			k := rng.Intn(len(sample))
 			sample = sample[k:]
 		default:
 		}

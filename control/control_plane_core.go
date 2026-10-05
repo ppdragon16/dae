@@ -224,27 +224,6 @@ func (c *controlPlaneCore) addQdisc(ifname string) error {
 	return nil
 }
 
-func (c *controlPlaneCore) delQdisc(ifname string) error {
-	link, err := netlink.LinkByName(ifname)
-	if err != nil {
-		return err
-	}
-	qdisc := &netlink.GenericQdisc{
-		QdiscAttrs: netlink.QdiscAttrs{
-			LinkIndex: link.Attrs().Index,
-			Handle:    netlink.MakeHandle(0xffff, 0),
-			Parent:    netlink.HANDLE_CLSACT,
-		},
-		QdiscType: "clsact",
-	}
-	if err := netlink.QdiscDel(qdisc); err != nil {
-		if !os.IsExist(err) {
-			return common.Errf("cannot add clsact qdisc: %w", err)
-		}
-	}
-	return nil
-}
-
 // bindLan automatically configures kernel parameters and bind to lan interface `ifname`.
 // bindLan supports lazy-bind if interface `ifname` is not found.
 // bindLan supports rebinding when the interface `ifname` is detected in the future.

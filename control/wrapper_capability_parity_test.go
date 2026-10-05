@@ -93,10 +93,6 @@ func TestWrapperCapabilityParity(t *testing.T) {
 			stub := &parityStubConn{}
 			wrapped := tc.build(stub)
 
-			if _, ok := wrapped.(net.Conn); !ok {
-				t.Fatalf("%s does not satisfy net.Conn", tc.name)
-			}
-
 			cw, ok := wrapped.(netproxy.CloseWriter)
 			if tc.requireCloseWriter {
 				if !ok {

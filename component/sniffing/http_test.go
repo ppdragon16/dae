@@ -17,12 +17,12 @@ import (
 // across reads, not a final verdict. (Port of kdae ca97821b.)
 func TestSniffHttpNeedsMoreOnSplitRequestLine(t *testing.T) {
 	sniffer := NewPacketSniffer([]byte("GET /path HTTP/1.1\r"), 50*time.Millisecond)
-	d, err := sniffer.SniffHttp()
+	_, err := sniffer.SniffHttp()
 	if !errors.Is(err, ErrNeedMore) {
 		t.Fatalf("err = %v, want ErrNeedMore for a split request line", err)
 	}
 	sniffer.AppendData([]byte("\nHost: example.com\r\n\r\n"))
-	d, err = sniffer.SniffHttp()
+	d, err := sniffer.SniffHttp()
 	if err != nil {
 		t.Fatalf("SniffHttp after the rest arrived: %v", err)
 	}

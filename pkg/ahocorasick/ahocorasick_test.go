@@ -22,20 +22,20 @@ func bruteContains(keywords [][]byte, in []byte) bool {
 }
 
 func TestContainsMatchesBruteForce(t *testing.T) {
-	rand.Seed(200)
+	rng := rand.New(rand.NewSource(200))
 	const valid = "abcdefghijklmnopqrstuvwxyz-.^$0123456789_"
 
 	randKeyword := func() []byte {
-		l := 1 + rand.Intn(12)
+		l := 1 + rng.Intn(12)
 		b := make([]byte, l)
 		for i := range b {
-			b[i] = valid[rand.Intn(len(valid))]
+			b[i] = valid[rng.Intn(len(valid))]
 		}
 		return b
 	}
 
 	for round := range 200 {
-		n := 1 + rand.Intn(30)
+		n := 1 + rng.Intn(30)
 		keywords := make([][]byte, n)
 		for i := range keywords {
 			keywords[i] = randKeyword()
@@ -45,10 +45,10 @@ func TestContainsMatchesBruteForce(t *testing.T) {
 			t.Fatal(err)
 		}
 		for range 1000 {
-			l := rand.Intn(40)
+			l := rng.Intn(40)
 			in := make([]byte, l)
 			for i := range in {
-				in[i] = valid[rand.Intn(len(valid))]
+				in[i] = valid[rng.Intn(len(valid))]
 			}
 			got := m.Contains(in)
 			want := bruteContains(keywords, in)
