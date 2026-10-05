@@ -37,7 +37,7 @@ dae (daeuniverse/dae)          — Original project
 | DNS `static` | User-defined static DNS entries with A, AAAA, TXT records — hot-reloadable via HTTP API |
 | DNS `via` | Route DNS queries through a specific outbound group (e.g. `proxy_dns(via: ai)`) |
 | DNS `race` | Query multiple upstreams concurrently, first response wins — usable in both `request` and `response` routing |
-| DNS `response` routing | Match DNS responses by answering upstream / answer IPs / qtype / client and accept, reject, or re-resolve via another upstream (incl. `race`) |
+| DNS `response` routing | Match DNS responses by answering upstream / response code / answer IPs / qtype / client and accept, reject, or re-resolve via another upstream (incl. `race`) |
 | DNS `mac` + `sip` | Per-client DNS filtering by MAC address or source IP |
 | DNS pool tuning | Configurable `udp_pool_size`, `udp_pool_ttl`, `tcp_pool_size`, `tcp_pool_ttl` |
 | Protocols | Extended support: Trojan, SSR, SS, SS2022, VLESS, VMess, AnyTLS, Tuic (v5), Juicity, Hysteria2 |
@@ -304,31 +304,41 @@ upstream entry and one cache identity.
 ### `dns/response`
 
 The `response` block matches a DNS **response** — by the upstream that answered
-it, the IPs in the answer, the qtype, or the client — and then accepts it,
-rejects it, or re-resolves the query through another upstream. The canonical
-use is anti-poisoning: if a domestic upstream answers a non-CN IP for a foreign
-name, re-query through the race group:
+it, the response code, the IPs in the answer, the qtype, or the client — and
+then accepts it, rejects it, or re-resolves the query through another upstream.
+The canonical use is anti-poisoning: if a domestic upstream answers a non-CN IP
+for a foreign name, re-query through the race group:
 
 ```shell
 response {
-  !upstream(cf_dns, g_dns) && !ip(geoip:cn) -> race(cf_dns, g_dns)
+  rcode(nxdomain) -> accept   # names that don't exist: accept, don't re-resolve
+  !upstream(cf_dns, g_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race(cf_dns, g_dns)
   fallback: accept
 }
 ```
 
 Notes:
 
+- `rcode(...)` matches the response code: `noerror`, `formerr`, `servfail`,
+  `nxdomain`, `notimp`, `refused`, ... (case-insensitive) or the number
+  (`rcode(3)`). An NXDOMAIN carries no answer IPs, so `ip(...)` never matches
+  it — without an rcode rule, every NXDOMAIN from a non-race upstream triggers
+  a re-resolution round-trip. Trade-off: a name its upstream answers with
+  NXDOMAIN is no longer recovered by the race.
 - `upstream(...)` matches the upstream the response came from. A bare name also
   covers the `via:`-desugared virtual entries: a response answered by
-  `race(cf_dns, g_dns, via: ai)` matches `upstream(cf_dns)`, `upstream('cf_dns(ai)')`,
-  or the group as a whole.
+  `race(cf_dns, g_dns, via: ai)` matches `upstream(cf_dns)`,
+  `upstream('cf_dns(ai)')`, or the group as a whole.
 - Excluding the re-resolution target with `!upstream(...)` is required: it stops
   the re-resolved answer from matching the same rule again and exhausting the
   lookup-depth bound (3), which would turn the query into SERVFAIL.
+- `!ip(geoip:private)` keeps LAN/static answers out of the re-resolution: they
+  are intentional answers, and public upstreams would only replace them with
+  NXDOMAIN.
 - Re-resolved answers are cached like ordinary ones, so subsequent queries hit
   the cache and only re-run the (cheap) response matching.
 - `!` negation, multiple values (`upstream(a, b)` = a OR b), and `&&` chaining
-  with the other matchers (`qtype`, `ip`, `mac`, `sip`, `qname`) all work.
+  with the other matchers (`qtype`, `rcode`, `ip`, `mac`, `sip`, `qname`) all work.
 - Everything else falls back to `fallback:` (`accept` or `reject`).
 
 ### `dns/mac` + `dns/sip`

@@ -37,7 +37,7 @@ dae (daeuniverse/dae)          — 原始项目
 | DNS `static` | 用户自定义静态 DNS 条目，支持 A、AAAA、TXT 记录，可通过 HTTP API 热更新 |
 | DNS `via` | DNS 查询通过指定 outbound 组发出（如 `proxy_dns(via: ai)`） |
 | DNS `race` | 并发查询多个上游，取最快响应——`request` 与 `response` 路由均可使用 |
-| DNS `response` 路由 | 按"应答来自哪个上游 / 应答 IP / qtype / 客户端"匹配 DNS 应答，然后 accept、reject 或换 upstream（含 `race`）重新解析 |
+| DNS `response` 路由 | 按"应答来自哪个上游 / 应答码 / 应答 IP / qtype / 客户端"匹配 DNS 应答，然后 accept、reject 或换 upstream（含 `race`）重新解析 |
 | DNS `mac` + `sip` | 基于 MAC 地址或源 IP 的客户端级 DNS 过滤 |
 | DNS pool 调优 | 可配置 `udp_pool_size`、`udp_pool_ttl`、`tcp_pool_size`、`tcp_pool_ttl` |
 | 协议 | 扩展支持：Trojan、SSR、SS、SS2022、VLESS、VMess、AnyTLS、Tuic (v5)、Juicity、Hysteria2 |
@@ -299,27 +299,34 @@ qname(geosite:gfw) -> race(proxy_dns, googledns, via: ai)
 
 ### `dns/response`
 
-`response` 块匹配 DNS **应答**——按"应答来自哪个 upstream / 应答中的 IP / qtype / 客户端"——然后
+`response` 块匹配 DNS **应答**——按"应答来自哪个 upstream / 应答码 / 应答中的 IP / qtype / 客户端"——然后
 accept、reject，或换一个 upstream 重新解析。典型用途是防污染：国内上游对国外域名答出了非 CN IP，
 就用 race 组重查：
 
 ```shell
 response {
-  !upstream(cf_dns, g_dns) && !ip(geoip:cn) -> race(cf_dns, g_dns)
+  rcode(nxdomain) -> accept   # 不存在的名字：直接接受，不重查
+  !upstream(cf_dns, g_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race(cf_dns, g_dns)
   fallback: accept
 }
 ```
 
 要点：
 
+- `rcode(...)` 匹配应答码：`noerror`、`formerr`、`servfail`、`nxdomain`、`notimp`、`refused`、...
+  （大小写不敏感）或数字（`rcode(3)`）。NXDOMAIN 没有任何应答 IP，`ip(...)` 永远匹配不上它——
+  没有 rcode 规则时，非 race 成员的每个 NXDOMAIN 都会触发一轮重解析。代价：被上游以 NXDOMAIN
+  形式污染的域名不会再被 race 找回。
 - `upstream(...)` 匹配"应答来自哪个 upstream"。裸名同时覆盖 `via:` 脱糖出的虚拟条目：
   `race(cf_dns, g_dns, via: ai)` 的应答会被 `upstream(cf_dns)`、`upstream('cf_dns(ai)')`
   或组名整体命中。
 - 必须用 `!upstream(...)` 排除重解析目标本身：否则重解析得到的应答会再次命中同一条规则，
   耗尽查找深度上限（3），查询变成 SERVFAIL。
+- `!ip(geoip:private)` 把局域网/静态条目应答排除出重解析：它们本就是有意的应答，公网上游只会
+  用 NXDOMAIN 覆盖它们。
 - 重解析得到的应答与普通应答一样写入缓存，后续相同查询直接命中缓存，只重跑（廉价的）response 匹配。
-- 支持 `!` 取反、多值（`upstream(a, b)` = a 或 b）、以及与其它匹配器（`qtype`、`ip`、`mac`、
-  `sip`、`qname`）的 `&&` 组合。
+- 支持 `!` 取反、多值（`upstream(a, b)` = a 或 b）、以及与其它匹配器（`qtype`、`rcode`、`ip`、
+  `mac`、`sip`、`qname`）的 `&&` 组合。
 - 未命中的应答按 `fallback:` 处理（`accept` 或 `reject`）。
 
 ### `dns/mac` + `dns/sip`
