@@ -7,6 +7,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"slices"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/component/sniffing"
+	"github.com/daeuniverse/outbound/netproxy"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -211,6 +213,23 @@ func (c *ControlPlane) handlePkt(data []byte, src, dst netip.AddrPort) (err erro
 	// Try to write data
 	_, err = ue.WriteTo(data, dst)
 	if err != nil {
+		// A datagram-dropped rejection is a per-datagram event: the outbound
+		// refused this one datagram (e.g. it cannot be serialized into the
+		// protocol's length field) and the session stays usable, so the
+		// endpoint must NOT be retired for it. (Contract ported from
+		// olicesx/outbound 7f939b6.)
+		var dropped *netproxy.ErrDatagramDropped
+		if errors.As(err, &dropped) {
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"src":    RefineSourceToShow(src, dst.Addr()),
+					"dst":    dst,
+					"dialer": ue.dialer.Name,
+					"error":  err,
+				}).Debugln("Datagram dropped by the outbound; endpoint kept")
+			}
+			return nil
+		}
 		DefaultUdpEndpointPool.Remove(ueKey)
 		isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
 		if isClosed {
