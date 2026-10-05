@@ -37,6 +37,10 @@ const (
 	upstreamScheme_H3_Alias      UpstreamScheme = "http3"
 	UpstreamScheme_H3            UpstreamScheme = "h3"
 	UpstreamScheme_Static        UpstreamScheme = "static"
+	// UpstreamScheme_Race marks a race-group placeholder. It never dials: the
+	// placeholder stands for the group's member upstreams and is resolved by
+	// Dns.RaceGroupMembers before any forwarder is created.
+	UpstreamScheme_Race UpstreamScheme = "race"
 )
 
 func ParseRawUpstream(raw *url.URL) (scheme UpstreamScheme, hostname string, port uint16, path string, err error) {
@@ -91,6 +95,12 @@ type Upstream struct {
 	netutils.Ip46
 	IsAsIs   bool
 	Outbound consts.OutboundIndex // 0xFF = unspecified (use traffic routing)
+}
+
+// IsRacePlaceholder reports whether u is a race-group placeholder rather than a
+// dialable upstream.
+func (u *Upstream) IsRacePlaceholder() bool {
+	return u != nil && u.Scheme == UpstreamScheme_Race
 }
 
 func NewUpstream(ctx context.Context, upstream *url.URL, resolverNetwork string) (up *Upstream, err error) {

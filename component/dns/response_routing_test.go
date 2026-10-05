@@ -6,7 +6,9 @@
 package dns
 
 import (
+	"context"
 	"net/netip"
+	"net/url"
 	"slices"
 	"testing"
 
@@ -297,4 +299,68 @@ func TestResponseMatcherUnknownUpstreamName(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected not-found error, got %v", err)
 	}
+}
+
+// TestResponseSelectRaceTargetYieldsPlaceholder pins the contract the control
+// plane relies on when a response rule re-resolves through a race group: the
+// placeholder is handed back untouched (GetUpstream would fail on its dummy
+// race:// URL) and the members stay resolvable via RaceGroupMembers.
+func TestResponseSelectRaceTargetYieldsPlaceholder(t *testing.T) {
+	memberCf, err := NewUpstream(context.Background(), mustURL(t, "udp://1.1.1.1:53"), "")
+	if err != nil {
+		t.Fatalf("member cf: %v", err)
+	}
+	memberG, err := NewUpstream(context.Background(), mustURL(t, "udp://8.8.8.8:53"), "")
+	if err != nil {
+		t.Fatalf("member g: %v", err)
+	}
+	s := &Dns{
+		upstream: []*UpstreamResolver{
+			{Raw: mustURL(t, "udp://1.1.1.1:53"), upstream: memberCf, init: 1},
+			{Raw: mustURL(t, "udp://8.8.8.8:53"), upstream: memberG, init: 1},
+			{Raw: mustURL(t, "race://cf_dns,g_dns")}, // placeholder: never dialable
+		},
+		raceGroupIndices: map[uint8][]uint8{2: {0, 1}},
+	}
+	rules := []*config_parser.RoutingRule{
+		testResponseRule("race(cf_dns,g_dns)", testResponseFunction("upstream", "cf_dns")),
+	}
+	b, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 0, "g_dns": 1, "race(cf_dns,g_dns)": 2}, "reject")
+	if err != nil {
+		t.Fatalf("NewResponseMatcherBuilder: %v", err)
+	}
+	s.respMatcher, err = b.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ips := []netip.Addr{netip.MustParseAddr("1.2.3.4")}
+	idx, upstream, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), ips, memberCf, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
+	if err != nil {
+		t.Fatalf("ResponseSelect must not fail on a race target: %v", err)
+	}
+	if !upstream.IsRacePlaceholder() {
+		t.Fatalf("expected a race placeholder, got scheme %q", upstream.Scheme)
+	}
+
+	members, ok := s.RaceGroupMembers(idx)
+	if !ok || len(members) != 2 {
+		t.Fatalf("RaceGroupMembers: ok=%v len=%d, want true/2", ok, len(members))
+	}
+	if members[0] != memberCf || members[1] != memberG {
+		t.Fatal("members resolved in the wrong order")
+	}
+
+	// Regression: before the placeholder short-circuit, ResponseSelect failed
+	// here with "unexpected scheme: race" (surfaced as "failed to init dns
+	// upstream") the moment a response rule re-resolved through a race group.
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }

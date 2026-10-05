@@ -393,6 +393,25 @@ func (s *Dns) GetStaticEntry(name string) (*config.DnsStaticEntry, bool) {
 	return entry, ok
 }
 
+// RaceGroupMembers resolves the member upstreams of the race group identified
+// by a response-routing target index, reporting whether that index denotes a
+// race group at all. Members may be dialed: unlike the group placeholder, they
+// carry real URLs.
+func (s *Dns) RaceGroupMembers(responseIndex consts.DnsResponseOutboundIndex) (members []*Upstream, ok bool) {
+	subIdxs, isRace := s.raceGroupIndices[uint8(responseIndex)]
+	if !isRace {
+		return nil, false
+	}
+	for _, subIdx := range subIdxs {
+		up, err := s.upstream[subIdx].GetUpstream()
+		if err != nil {
+			return nil, false
+		}
+		members = append(members, up)
+	}
+	return members, true
+}
+
 func (s *Dns) RequestSelect(qname string, qtype uint16, srcMac [6]byte, srcIp netip.Addr) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {
 	// Route.
 	upstreamIndex, err = s.reqMatcher.Match(qname, qtype, srcMac, srcIp)
@@ -429,6 +448,13 @@ func (s *Dns) ResponseSelect(qname string, qtype uint16, ips []netip.Addr, fromU
 	if !upstreamIndex.IsReserved() {
 		if int(upstreamIndex) >= len(s.upstream) {
 			return 0, nil, fmt.Errorf("bad upstream index: %v not in [0, %v]", upstreamIndex, len(s.upstream)-1)
+		}
+		if _, isRace := s.raceGroupIndices[uint8(upstreamIndex)]; isRace {
+			// The target is a race group: its placeholder carries a dummy
+			// "race://" URL that GetUpstream cannot parse. Hand the caller a
+			// placeholder marker and let it re-run the race via
+			// RaceGroupMembers, which resolves the real member upstreams.
+			return upstreamIndex, &Upstream{Scheme: UpstreamScheme_Race}, nil
 		}
 		upstream, err = s.upstream[upstreamIndex].GetUpstream()
 		if err != nil {
