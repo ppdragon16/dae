@@ -18,6 +18,7 @@ import (
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/component/outbound/dialer"
 	"github.com/daeuniverse/dae/pkg/logger/fastlog"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	log "github.com/sirupsen/logrus"
 )
@@ -91,6 +92,15 @@ func (ue *UdpEndpoint) run() {
 	for {
 		n, from, e := readFunc(buf)
 		if e != nil {
+			// A datagram-dropped rejection is a per-datagram event: the
+			// outbound consumed and discarded exactly one datagram (e.g. one
+			// larger than the caller's buffer) and the session stays usable,
+			// so keep reading instead of retiring the endpoint.
+			// (Contract ported from olicesx/outbound 7f939b6.)
+			var dropped *netproxy.ErrDatagramDropped
+			if errors.As(e, &dropped) && !ue.IsClosed() {
+				continue
+			}
 			if ue.IsClosed() {
 				break
 			}
