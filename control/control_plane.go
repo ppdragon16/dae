@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -1113,6 +1114,17 @@ func ParseFixedDomainTtl(ks []config.KeyableString) (map[string]int, error) {
 			// Name the entry: with several fixed_domain_ttl lines the bare
 			// parser error does not tell the user which one is broken.
 			return nil, common.Errf("failed to parse ttl of entry %q: %v", string(k), err)
+		}
+		// The TTL becomes a cache deadline via time.Duration(ttl) *
+		// time.Second. Zero or negative values expire the entry immediately
+		// (nonsense for a "fixed TTL"), and values beyond MaxInt32 seconds
+		// overflow the Duration on 64-bit builds to a deadline in the past,
+		// silently un-caching the domain the operator pinned. Reject both at
+		// parse time: MaxInt32 seconds (~68 years) is beyond any sane fixed
+		// TTL while staying Duration-safe on every build.
+		// (Port of kdae 21aad88a, upstream #1124.)
+		if ttl <= 0 || ttl > math.MaxInt32 {
+			return nil, common.Errf("invalid ttl %d of entry %q: must be 1..%d seconds", ttl, string(k), int64(math.MaxInt32))
 		}
 		m[key] = int(ttl)
 	}
