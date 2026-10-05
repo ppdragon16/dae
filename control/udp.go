@@ -83,7 +83,17 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 
 	dst := ueKey.Dst
 	if err := c.core.RetrieveUDPRoutingResult(src, dst, routingResult); err != nil {
-		return nil, common.Wrap(err, "No AddrPort presented")
+		// The dataplane keys DNS tuples with sport=0 (all queries from one IP
+		// share the routing decision — see the fast-path in tproxy.c), so the
+		// full-5-tuple lookup misses for relayed DNS: must_rules clients skip
+		// the hijack above and reach exactly this path. Mirror the
+		// normalization instead of dropping the packet.
+		if dst.Port() != 53 {
+			return nil, common.Wrap(err, "No AddrPort presented")
+		}
+		if err = c.core.RetrieveUDPRoutingResult(netip.AddrPortFrom(src.Addr(), 0), dst, routingResult); err != nil {
+			return nil, common.Wrap(err, "No AddrPort presented")
+		}
 	}
 
 	// Route
