@@ -36,7 +36,8 @@ dae (daeuniverse/dae)          — Original project
 | DNS `ecs` | EDNS0 Client Subnet control: global `dns.ecs` default (`strip`) plus per-dialer `[ecs: ...]` annotation (`strip`/`<cidr>`/`pass`) — stops client-subnet leaks and CDN region mismatch through proxies |
 | DNS `static` | User-defined static DNS entries with A, AAAA, TXT records — hot-reloadable via HTTP API |
 | DNS `via` | Route DNS queries through a specific outbound group (e.g. `proxy_dns(via: ai)`) |
-| DNS `race` | Query multiple upstreams concurrently, first response wins |
+| DNS `race` | Query multiple upstreams concurrently, first response wins — usable in both `request` and `response` routing |
+| DNS `response` routing | Match DNS responses by answering upstream / answer IPs / qtype / client and accept, reject, or re-resolve via another upstream (incl. `race`) |
 | DNS `mac` + `sip` | Per-client DNS filtering by MAC address or source IP |
 | DNS pool tuning | Configurable `udp_pool_size`, `udp_pool_ttl`, `tcp_pool_size`, `tcp_pool_ttl` |
 | Protocols | Extended support: Trojan, SSR, SS, SS2022, VLESS, VMess, AnyTLS, Tuic (v5), Juicity, Hysteria2 |
@@ -299,6 +300,36 @@ qname(geosite:gfw) -> race(proxy_dns, googledns, via: ai)
 desugared to its virtual upstream `proxy_dns(ai)` / `googledns(ai)` — the same
 instance a standalone `proxy_dns(via: ai)` rule uses — so both forms share one
 upstream entry and one cache identity.
+
+### `dns/response`
+
+The `response` block matches a DNS **response** — by the upstream that answered
+it, the IPs in the answer, the qtype, or the client — and then accepts it,
+rejects it, or re-resolves the query through another upstream. The canonical
+use is anti-poisoning: if a domestic upstream answers a non-CN IP for a foreign
+name, re-query through the race group:
+
+```shell
+response {
+  !upstream(cf_dns, g_dns) && !ip(geoip:cn) -> race(cf_dns, g_dns)
+  fallback: accept
+}
+```
+
+Notes:
+
+- `upstream(...)` matches the upstream the response came from. A bare name also
+  covers the `via:`-desugared virtual entries: a response answered by
+  `race(cf_dns, g_dns, via: ai)` matches `upstream(cf_dns)`, `upstream('cf_dns(ai)')`,
+  or the group as a whole.
+- Excluding the re-resolution target with `!upstream(...)` is required: it stops
+  the re-resolved answer from matching the same rule again and exhausting the
+  lookup-depth bound (3), which would turn the query into SERVFAIL.
+- Re-resolved answers are cached like ordinary ones, so subsequent queries hit
+  the cache and only re-run the (cheap) response matching.
+- `!` negation, multiple values (`upstream(a, b)` = a OR b), and `&&` chaining
+  with the other matchers (`qtype`, `ip`, `mac`, `sip`, `qname`) all work.
+- Everything else falls back to `fallback:` (`accept` or `reject`).
 
 ### `dns/mac` + `dns/sip`
 
