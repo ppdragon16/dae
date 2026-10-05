@@ -70,7 +70,7 @@ func TestResponseMatcherMacAndSip(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := m.Match("", 1, nil, consts.DnsRequestOutboundIndex_AsIs, tc.srcMac, tc.srcIp)
+			got, err := m.Match("", 1, nil, consts.DnsRequestOutboundIndex_AsIs, tc.srcMac, tc.srcIp, uint16(dnsmessage.RcodeSuccess))
 			if err != nil {
 				t.Fatalf("Match() error = %v", err)
 			}
@@ -86,7 +86,7 @@ func TestResponseMatcherSipIPv6(t *testing.T) {
 		testResponseRule("reject", testResponseFunction("sip", "2001:db8::/32")),
 	}, "accept")
 
-	got, err := m.Match("", 1, nil, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.MustParseAddr("2001:db8::1"))
+	got, err := m.Match("", 1, nil, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.MustParseAddr("2001:db8::1"), uint16(dnsmessage.RcodeSuccess))
 	if err != nil {
 		t.Fatalf("Match() error = %v", err)
 	}
@@ -95,7 +95,7 @@ func TestResponseMatcherSipIPv6(t *testing.T) {
 	}
 
 	// A source IP outside the prefix must fall through to the fallback.
-	got, err = m.Match("", 1, nil, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.MustParseAddr("2001:db9::1"))
+	got, err = m.Match("", 1, nil, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.MustParseAddr("2001:db9::1"), uint16(dnsmessage.RcodeSuccess))
 	if err != nil {
 		t.Fatalf("Match() error = %v", err)
 	}
@@ -115,7 +115,7 @@ func TestResponseSelectPassesClientIdentity(t *testing.T) {
 	}
 
 	macMatch := [6]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
-	idx, up, err := s.ResponseSelect("example.com", 1, nil, nil, macMatch, netip.MustParseAddr("10.0.0.1"))
+	idx, up, err := s.ResponseSelect("example.com", 1, nil, 0, nil, macMatch, netip.MustParseAddr("10.0.0.1"))
 	if err != nil {
 		t.Fatalf("ResponseSelect() error = %v", err)
 	}
@@ -226,7 +226,7 @@ func TestResponseMatcherIpSetEndToEnd(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := m.Match("", 1, tc.ips, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.Addr{})
+			got, err := m.Match("", 1, tc.ips, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.Addr{}, uint16(dnsmessage.RcodeSuccess))
 			if err != nil {
 				t.Fatalf("Match() error = %v", err)
 			}
@@ -263,7 +263,7 @@ func TestResponseMatcherUpstreamCoversViaDesugaredNames(t *testing.T) {
 
 	match := func(from uint8) consts.DnsResponseOutboundIndex {
 		t.Helper()
-		idx, err := m.Match("x.example.com.", uint16(dnsmessage.TypeA), nil, consts.DnsRequestOutboundIndex(from), [6]byte{}, netip.Addr{})
+		idx, err := m.Match("x.example.com.", uint16(dnsmessage.TypeA), nil, consts.DnsRequestOutboundIndex(from), [6]byte{}, netip.Addr{}, uint16(dnsmessage.RcodeSuccess))
 		if err != nil {
 			t.Fatalf("Match(from=%d): %v", from, err)
 		}
@@ -335,7 +335,7 @@ func TestResponseSelectRaceTargetYieldsPlaceholder(t *testing.T) {
 	}
 
 	ips := []netip.Addr{netip.MustParseAddr("1.2.3.4")}
-	idx, upstream, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), ips, memberCf, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
+	idx, upstream, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), ips, uint16(dnsmessage.RcodeSuccess), memberCf, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
 	if err != nil {
 		t.Fatalf("ResponseSelect must not fail on a race target: %v", err)
 	}
@@ -363,4 +363,93 @@ func mustURL(t *testing.T, raw string) *url.URL {
 		t.Fatalf("parse %q: %v", raw, err)
 	}
 	return u
+}
+
+// TestResponseMatcherRCode pins rcode matching: a rule keyed on the response
+// code fires only for that code, regardless of the answer IPs — this is how
+// NXDOMAIN (rcode 3) can be accepted without triggering a re-resolution.
+func TestResponseMatcherRCode(t *testing.T) {
+	rules := []*config_parser.RoutingRule{
+		testResponseRule("accept", testResponseFunction("rcode", "nxdomain", "servfail")),
+	}
+	b, err := NewResponseMatcherBuilder(rules, nil, "reject")
+	if err != nil {
+		t.Fatalf("NewResponseMatcherBuilder() error = %v", err)
+	}
+	m, err := b.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	cases := []struct {
+		name  string
+		rcode uint16
+		want  consts.DnsResponseOutboundIndex
+	}{
+		{"nxdomain", uint16(dnsmessage.RcodeNameError), consts.DnsResponseOutboundIndex_Accept},
+		{"servfail", uint16(dnsmessage.RcodeServerFailure), consts.DnsResponseOutboundIndex_Accept},
+		{"noerror", uint16(dnsmessage.RcodeSuccess), consts.DnsResponseOutboundIndex_Reject},
+		{"refused", uint16(dnsmessage.RcodeRefused), consts.DnsResponseOutboundIndex_Reject},
+	}
+	for _, tc := range cases {
+		idx, err := m.Match("x.example.com.", uint16(dnsmessage.TypeA), nil, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.Addr{}, tc.rcode)
+		if err != nil {
+			t.Fatalf("%s: Match: %v", tc.name, err)
+		}
+		if idx != tc.want {
+			t.Fatalf("%s: got %v, want %v", tc.name, idx, tc.want)
+		}
+	}
+}
+
+// TestResponseSelectRCodeNxdomainAccept pins the end-to-end contract through
+// ResponseSelect: an NXDOMAIN from a non-race upstream is accepted (not
+// re-resolved) when an rcode rule says so, while a NOERROR response from the
+// same upstream still falls to the fallback.
+func TestResponseSelectRCodeNxdomainAccept(t *testing.T) {
+	member, err := NewUpstream(context.Background(), mustURL(t, "udp://1.1.1.1:53"), "")
+	if err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	s := &Dns{
+		upstream: []*UpstreamResolver{
+			{Raw: mustURL(t, "udp://1.1.1.1:53"), upstream: member, init: 1},
+			{Raw: mustURL(t, "race://cf_dns")}, // race placeholder at index 1
+		},
+		raceGroupIndices: map[uint8][]uint8{1: {0}},
+	}
+	rules := []*config_parser.RoutingRule{
+		testResponseRule("accept", testResponseFunction("rcode", "nxdomain")),
+		testResponseRule("race(cf_dns)", testResponseFunction("upstream", "cf_dns")),
+	}
+	b, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 0, "race(cf_dns)": 1}, "reject")
+	if err != nil {
+		t.Fatalf("NewResponseMatcherBuilder: %v", err)
+	}
+	s.respMatcher, err = b.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// NXDOMAIN from the member upstream: the rcode rule accepts it before the
+	// race rule can send it around again.
+	idx, _, err := s.ResponseSelect("gone.example.com.", uint16(dnsmessage.TypeA), nil, uint16(dnsmessage.RcodeNameError), member, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
+	if err != nil {
+		t.Fatalf("ResponseSelect(nxdomain): %v", err)
+	}
+	if idx != consts.DnsResponseOutboundIndex_Accept {
+		t.Fatalf("nxdomain: got %v, want accept", idx)
+	}
+
+	// NOERROR with answers from the same member: the race rule matches and
+	// hands back the race placeholder for re-resolution.
+	idx, up, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), []netip.Addr{netip.MustParseAddr("1.2.3.4")}, uint16(dnsmessage.RcodeSuccess), member, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
+	if err != nil {
+		t.Fatalf("ResponseSelect(noerror): %v", err)
+	}
+	if !up.IsRacePlaceholder() {
+		t.Fatalf("noerror: expected the race placeholder, got scheme %q", up.Scheme)
+	}
+	if idx != consts.DnsResponseOutboundIndex(1) {
+		t.Fatalf("noerror: got race index %d, want 1", idx)
+	}
 }

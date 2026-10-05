@@ -28,6 +28,7 @@ const (
 
 	Function_QName    = "qname"
 	Function_QType    = "qtype"
+	Function_RCode    = "rcode"
 	Function_Upstream = "upstream"
 	Function_Static   = "static"
 	Function_Race     = "race"

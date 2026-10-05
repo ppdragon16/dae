@@ -61,6 +61,7 @@ const (
 	MatchType_Upstream
 	MatchType_QType
 	MatchType_Static
+	MatchType_RCode
 )
 
 type OutboundIndex uint8

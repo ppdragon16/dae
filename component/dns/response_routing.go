@@ -35,6 +35,7 @@ func NewResponseMatcherBuilder(rules []*config_parser.RoutingRule, upstreamName2
 	rulesBuilder := routing.NewRulesBuilder()
 	rulesBuilder.RegisterFunctionParser(consts.Function_QName, routing.PlainParserFactory(b.addQName))
 	rulesBuilder.RegisterFunctionParser(consts.Function_QType, TypeParserFactory(b.addQType))
+	rulesBuilder.RegisterFunctionParser(consts.Function_RCode, RCodeParserFactory(b.addRCode))
 	rulesBuilder.RegisterFunctionParser(consts.Function_Ip, routing.IpParserFactory(b.addIp))
 	rulesBuilder.RegisterFunctionParser(consts.Function_Upstream, routing.EmptyKeyPlainParserFactory(b.addUpstream))
 	rulesBuilder.RegisterFunctionParser(consts.Function_Mac, routing.MacParserFactory(b.addSourceMac))
@@ -233,6 +234,26 @@ func (b *ResponseMatcherBuilder) addQType(f *config_parser.Function, values []ui
 	return nil
 }
 
+func (b *ResponseMatcherBuilder) addRCode(f *config_parser.Function, values []uint16, upstream *routing.Outbound) (err error) {
+	for i, value := range values {
+		upstreamName := consts.OutboundLogicalOr.String()
+		if i == len(values)-1 {
+			upstreamName = upstream.Name
+		}
+		upstreamId, err := b.upstreamToId(upstreamName)
+		if err != nil {
+			return err
+		}
+		b.rules = append(b.rules, responseMatchSet{
+			Type:     consts.MatchType_RCode,
+			Value:    value,
+			Not:      f.Not,
+			Upstream: uint8(upstreamId),
+		})
+	}
+	return nil
+}
+
 func (b *ResponseMatcherBuilder) addFallback(fallbackOutbound config.FunctionOrString) (err error) {
 	upstream, err := routing.ParseOutbound(config.FunctionOrStringToFunction(fallbackOutbound))
 	if err != nil {
@@ -331,6 +352,7 @@ func (m *ResponseMatcher) Match(
 	upstream consts.DnsRequestOutboundIndex,
 	srcMac [6]byte,
 	srcIp netip.Addr,
+	rcode uint16,
 ) (upstreamIndex consts.DnsResponseOutboundIndex, err error) {
 	domainMatchBitmap := common.ObtainDomainBitmap()
 	defer common.RecycleDomainBitmap(domainMatchBitmap)
@@ -354,6 +376,10 @@ func (m *ResponseMatcher) Match(
 			}
 		case consts.MatchType_QType:
 			if qType == uint16(match.Value) {
+				goodSubrule = true
+			}
+		case consts.MatchType_RCode:
+			if rcode == uint16(match.Value) {
 				goodSubrule = true
 			}
 		case consts.MatchType_Upstream:
