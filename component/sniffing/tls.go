@@ -138,6 +138,15 @@ func findSniExtension(search quicutils.Locator, base, length int) (d string, err
 			return "", ErrNotApplicable
 		}
 		if typ == TlsExtension_ServerName {
+			if extLength < 2 {
+				// A server_name extension shorter than its own SNI-list
+				// length field cannot carry a name. Reject before reading
+				// that field: when the extension sits at the end of the
+				// buffer, the read would slice past it (BuiltinBytesLocator
+				// does raw slicing, so this is a panic, not an error).
+				// (Port of kdae 24487b43.)
+				return "", ErrNotApplicable
+			}
 			b, err = search.Range(base+i+4, base+i+6)
 			if err != nil {
 				return "", err
