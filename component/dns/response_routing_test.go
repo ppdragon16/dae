@@ -13,6 +13,9 @@ import (
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/pkg/config_parser"
 	"github.com/daeuniverse/dae/pkg/trie"
+
+	dnsmessage "github.com/miekg/dns"
+	"strings"
 )
 
 func testResponseRule(outbound string, andFunctions ...*config_parser.Function) *config_parser.RoutingRule {
@@ -229,5 +232,69 @@ func TestResponseMatcherIpSetEndToEnd(t *testing.T) {
 				t.Fatalf("Match() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResponseMatcherUpstreamCoversViaDesugaredNames pins that a response rule
+// written with the bare upstream name also matches responses attributed to the
+// via-desugared virtual entries: race(cf_dns, g_dns, via: us) answers carry
+// cf_dns(us)/g_dns(us), not cf_dns/g_dns. Without the expansion the bare-name
+// rule silently never matched race responses.
+func TestResponseMatcherUpstreamCoversViaDesugaredNames(t *testing.T) {
+	upstreamName2Id := map[string]uint8{
+		"cf_dns":     5,
+		"cf_dns(us)": 7,
+		"g_dns":      6,
+		"g_dns(us)":  8,
+	}
+	rules := []*config_parser.RoutingRule{
+		testResponseRule("accept", testResponseFunction("upstream", "cf_dns", "g_dns")),
+	}
+	b, err := NewResponseMatcherBuilder(rules, upstreamName2Id, "reject")
+	if err != nil {
+		t.Fatalf("NewResponseMatcherBuilder() error = %v", err)
+	}
+	m, err := b.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	match := func(from uint8) consts.DnsResponseOutboundIndex {
+		t.Helper()
+		idx, err := m.Match("x.example.com.", uint16(dnsmessage.TypeA), nil, consts.DnsRequestOutboundIndex(from), [6]byte{}, netip.Addr{})
+		if err != nil {
+			t.Fatalf("Match(from=%d): %v", from, err)
+		}
+		return idx
+	}
+
+	// Responses from both via-desugared virtual entries hit the rule (accept).
+	if idx := match(7); idx != consts.DnsResponseOutboundIndex_Accept {
+		t.Fatalf("from cf_dns(us): got %v, want accept", idx)
+	}
+	if idx := match(8); idx != consts.DnsResponseOutboundIndex_Accept {
+		t.Fatalf("from g_dns(us): got %v, want accept", idx)
+	}
+	// The bare entry is covered too.
+	if idx := match(5); idx != consts.DnsResponseOutboundIndex_Accept {
+		t.Fatalf("from cf_dns: got %v, want accept", idx)
+	}
+	// An unrelated upstream falls through to the fallback (reject), proving the
+	// rule matched on upstream identity rather than accepting everything.
+	if idx := match(9); idx != consts.DnsResponseOutboundIndex_Reject {
+		t.Fatalf("from other: got %v, want reject (fallback)", idx)
+	}
+}
+
+// TestResponseMatcherUnknownUpstreamName pins the error surface of the
+// upstream() matcher: a name that is neither defined nor a via-desugared base
+// must fail the build instead of silently matching nothing.
+func TestResponseMatcherUnknownUpstreamName(t *testing.T) {
+	rules := []*config_parser.RoutingRule{
+		testResponseRule("accept", testResponseFunction("upstream", "nope")),
+	}
+	_, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 5}, "reject")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not-found error, got %v", err)
 	}
 }

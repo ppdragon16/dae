@@ -8,7 +8,9 @@ package dns
 import (
 	"fmt"
 	"net/netip"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/daeuniverse/dae/common"
 	"github.com/daeuniverse/dae/common/consts"
@@ -66,6 +68,29 @@ func (b *ResponseMatcherBuilder) upstreamToId(upstream string) (upstreamId const
 		upstreamId = consts.DnsResponseOutboundIndex(_upstreamId)
 	}
 	return upstreamId, nil
+}
+
+// idsForName resolves an upstream reference to every concrete upstream id it
+// denotes: the exact name if defined, plus any via-desugared virtual name
+// "name(<outbound>)" that dns.New registers for race targets. A response rule
+// written with the bare upstream name therefore also covers the virtual entries
+// that race(via:) responses are attributed to. Unknown names keep the
+// "not found" error.
+func (b *ResponseMatcherBuilder) idsForName(name string) (ids []consts.DnsResponseOutboundIndex, err error) {
+	if id, err := b.upstreamToId(name); err == nil {
+		ids = append(ids, id)
+	}
+	prefix := name + "("
+	for key, id := range b.upstreamName2Id {
+		if key != name && strings.HasPrefix(key, prefix) && strings.HasSuffix(key, ")") {
+			ids = append(ids, consts.DnsResponseOutboundIndex(id))
+		}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("upstream %v not found; please define it in \"dns.upstream\"", strconv.Quote(name))
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
 }
 
 func (b *ResponseMatcherBuilder) addIp(f *config_parser.Function, cidrs []netip.Prefix, upstream *routing.Outbound) (err error) {
@@ -162,24 +187,28 @@ func (b *ResponseMatcherBuilder) addQName(f *config_parser.Function, key string,
 
 func (b *ResponseMatcherBuilder) addUpstream(f *config_parser.Function, values []string, upstream *routing.Outbound) (err error) {
 	for i, value := range values {
-		upstreamName := consts.OutboundLogicalOr.String()
-		if i == len(values)-1 {
-			upstreamName = upstream.Name
-		}
-		upstreamId, err := b.upstreamToId(upstreamName)
+		ids, err := b.idsForName(value)
 		if err != nil {
 			return err
 		}
-		lastUpstreamId, err := b.upstreamToId(value)
-		if err != nil {
-			return err
+		for j, id := range ids {
+			// Sets of one value chain with OR; only the very last set of the
+			// rule carries its target.
+			upstreamName := consts.OutboundLogicalOr.String()
+			if i == len(values)-1 && j == len(ids)-1 {
+				upstreamName = upstream.Name
+			}
+			upstreamId, err := b.upstreamToId(upstreamName)
+			if err != nil {
+				return err
+			}
+			b.rules = append(b.rules, responseMatchSet{
+				Type:     consts.MatchType_Upstream,
+				Value:    uint16(id),
+				Not:      f.Not,
+				Upstream: uint8(upstreamId),
+			})
 		}
-		b.rules = append(b.rules, responseMatchSet{
-			Type:     consts.MatchType_Upstream,
-			Value:    uint16(lastUpstreamId),
-			Not:      f.Not,
-			Upstream: uint8(upstreamId),
-		})
 	}
 	return nil
 }
