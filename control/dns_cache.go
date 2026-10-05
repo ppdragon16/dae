@@ -61,6 +61,11 @@ func NewCommonDnsCache() *commonDnsCache {
 	return c
 }
 
+func (c *commonDnsCache) Has(key HashKey) bool {
+	_, ok := c.cache.Get(key)
+	return ok
+}
+
 func (c *commonDnsCache) Get(key HashKey) (resp []byte, expired bool, isNew bool) {
 	cache, ok := c.cache.Get(key)
 	if !ok {

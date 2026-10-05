@@ -779,6 +779,21 @@ func (c *DnsController) handleDNSRequestRace(
 	dnsResp *dnsResponseData,
 	raceUpstreams []*dns.Upstream,
 ) error {
+	dialArg := dialArgumentPool.Get().(*dialArgument)
+	defer dialArgumentPool.Put(dialArg)
+	for _, upstream := range raceUpstreams {
+		if err := c.bestDialerChooser(req, upstream, dialArg); err != nil {
+			// A member that cannot pick a dialer simply loses the race, like
+			// any other failure below — it must not abort the query when
+			// another member can still answer.
+			continue
+		}
+		hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)
+		if c.dnsCache.Has(hashKey) {
+			return c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, dnsResp)
+		}
+	}
+
 	var winner atomic.Bool
 	type result struct {
 		err error
