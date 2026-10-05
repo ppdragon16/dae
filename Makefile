@@ -132,3 +132,15 @@ ebpf-test: submodule clean-ebpf
     go test -v ./control/kern/tests/...
 
 ## End Ebpf
+
+LINT_GO_PKGS := $(shell go list ./... 2>/dev/null | grep -vE 'control/kern/tests|config_dist|pkg/geodata')
+STATICCHECK_VERSION := 2026.2.1
+
+# Go lint gate: gofmt, go vet and staticcheck (see staticcheck.conf for the
+# deliberate exclusions). Out of scope: generated code (config_dist,
+# pkg/geodata) and control/kern/tests, whose test binary needs the eBPF
+# objects from `make ebpf`.
+lint-go:
+	@files="$$(gofmt -l .)"; if [ -n "$$files" ]; then echo "gofmt needed on:"; echo "$$files"; exit 1; fi
+	go vet $(LINT_GO_PKGS)
+	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) $(LINT_GO_PKGS)

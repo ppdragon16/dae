@@ -1,0 +1,19 @@
+name: Lint Go
+
+on:
+  pull_request:
+  push:
+    branches:
+      - next
+      - main
+
+jobs:
+  lint-go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run Go lint (gofmt, go vet, staticcheck)
+        run: make lint-go
