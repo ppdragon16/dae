@@ -69,7 +69,7 @@ var DnsDesc = Desc{
 	"request": `DNS requests will follow this routing.
 Built-in outbound: asis, reject.
 Available functions: qname, qtype, static.
-Race groups are defined in the "upstream" section, e.g. race_dns: 'race(udp://1.1.1.1:53,udp://8.8.8.8:53)', and referenced from routing by tag (-> race_dns). A race group queries its upstreams concurrently and uses the first response. Optionally bind it to an outbound at the reference site: -> race_dns(via: ai). The background refresh of an expired entry races the whole group too.`,
+Race groups are defined in the "upstream" section, e.g. race_dns: 'race(udp://1.1.1.1:53,udp://8.8.8.8:53)', and referenced from routing by tag (-> race_dns). A race group queries its upstreams concurrently and uses the first response. Optionally bind it to an outbound at the reference site: -> race_dns(via: ai). A cached answer comes from the first member holding a fresh entry; expired entries are served stale while every member holding one is refreshed in the background. AAAA queries skip members that cannot proxy IPv6, and the tag must be unique.`,
 	"response": `DNS responses will follow this routing.
 Built-in outbound: accept, reject.
 Available functions: qname, qtype, ip, upstream.

@@ -306,7 +306,15 @@ through that group while still picking the best node inside it:
 qname(geosite:gfw) -> race_dns(via: ai)
 ```
 
-The background refresh of an expired entry races the whole group too.
+Cached answers are picked in config order: the first member with a fresh entry
+answers without dialing. Otherwise the first expired entry is served as a stale
+answer while every member holding one is refreshed in the background — one
+flight per member, so that refresh races the group as well.
+
+`AAAA` queries skip members whose dialer cannot proxy IPv6 and are answered
+empty only when no member can. The race covers the forwarding step: response
+rules run on the winning answer, and a rule that sends the query back to the
+group starts another round against its members. Tags must be unique.
 
 ### `dns/response`
 
