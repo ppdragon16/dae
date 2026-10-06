@@ -652,31 +652,14 @@ Dial:
 	return err
 }
 
-// cachedAnswer is one cache probe outcome for an (upstream, dialer) pair. It is
-// a value type on purpose: the common single-upstream path must not allocate.
-type cachedAnswer struct {
-	key      HashKey
-	respData []byte
-	isNew    bool
-	expired  bool
-	found    bool
-}
-
 // probeCachedAnswer looks the pair up in the DNS cache.
-func (c *DnsController) probeCachedAnswer(queryInfo queryInfo, dialArg *dialArgument) cachedAnswer {
+func (c *DnsController) probeCachedAnswer(queryInfo queryInfo, dialArg *dialArgument) (key HashKey, respData []byte, expired bool, isNew bool) {
 	if !c.enableCache {
-		return cachedAnswer{}
+		return
 	}
-	a := cachedAnswer{
-		key: c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer),
-	}
-	var isNew bool
-	a.respData, a.expired, isNew = c.dnsCache.Get(a.key)
-	if a.respData == nil {
-		return cachedAnswer{}
-	}
-	a.found, a.isNew = true, isNew
-	return a
+	key = c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)
+	respData, expired, isNew = c.dnsCache.Get(key)
+	return
 }
 
 // rejectAAAA answers an AAAA query with an empty response when the dialer that
@@ -737,14 +720,14 @@ func (c *DnsController) forwardDNSSingle(
 		c.rejectAAAA(queryInfo, data, dnsResp)
 		return nil, nil
 	}
-	if a := c.probeCachedAnswer(queryInfo, dialArg); a.found {
-		if a.expired && !c.dnsCache.RefreshDelayed(a.key, time.Now()) {
+	if key, respData, expired, isNew := c.probeCachedAnswer(queryInfo, dialArg); respData != nil {
+		if expired && !c.dnsCache.RefreshDelayed(key, time.Now()) {
 			// Refresh asynchronously. A failed refresh backs the next one off
 			// exponentially: while an upstream is down, every query on the
 			// expired entry would otherwise spawn one doomed dial apiece.
-			c.refreshDNSInBackground(data, queryInfo, upstream, dialArg, a.key)
+			c.refreshDNSInBackground(data, queryInfo, upstream, dialArg, key)
 		}
-		c.useCachedResponse(queryInfo, data, dnsResp, upstream, a.respData, a.isNew)
+		c.useCachedResponse(queryInfo, data, dnsResp, upstream, respData, isNew)
 		return upstream, nil
 	}
 	if err := c.dialSend(data, upstream, dialArg, queryInfo, dnsResp); err != nil {
@@ -765,7 +748,6 @@ type dnsForwardCandidate struct {
 	// noIpv6 marks a candidate whose dialer cannot proxy IPv6. AAAA queries
 	// skip such candidates unless every candidate is one.
 	noIpv6 bool
-	answer cachedAnswer
 }
 
 // dnsForwardResult is what a member of a concurrent round reports back.
@@ -839,39 +821,36 @@ func (c *DnsController) forwardDNSRaceGroup(
 		usable = append(usable, candidates[i])
 	}
 
-	// Cache probe in config order: the first member with a fresh entry answers;
-	// otherwise the first expired entry is served stale while every member's own
-	// entry is refreshed in the background (their flight keys include the
-	// upstream, so that refresh races the whole group).
-	var fresh, stale *dnsForwardCandidate
-	for i := range usable {
-		cand := &usable[i]
-		if cand.answer = c.probeCachedAnswer(queryInfo, &cand.dialArg); !cand.answer.found {
+	// Probe every member in config order. The first fresh entry answers;
+	// failing that, the first expired entry is served stale. Expired entries
+	// are refreshed in the background as they are seen - one flight per member,
+	// and the flight key includes the upstream, so that refresh races the
+	// whole group. Probing on past a fresh hit keeps the others' caches warm.
+	var chosenUpstream *dns.Upstream
+	chosenFresh := false
+	for _, cand := range usable {
+		key, respData, expired, isNew := c.probeCachedAnswer(queryInfo, &cand.dialArg)
+		if respData == nil {
 			continue
 		}
-		if !cand.answer.expired {
-			fresh = cand
-			break
+		if expired && !c.dnsCache.RefreshDelayed(key, time.Now()) {
+			// A failed refresh backs the next one off exponentially; without
+			// this gate a downed member is redialed once per query.
+			c.refreshDNSInBackground(data, queryInfo, cand.upstream, &cand.dialArg, key)
 		}
-		if stale == nil {
-			stale = cand
+		// The first FRESH entry in config order answers, and a stale answer is
+		// only used while no fresh one has been seen - a later fresh entry
+		// still takes over. Every expired entry is refreshed above regardless
+		// of which one answers, so the group's caches stay warm.
+		if chosenUpstream != nil && (chosenFresh || expired) {
+			continue
 		}
+		*out = cand.dialArg
+		c.useCachedResponse(queryInfo, data, dnsResp, cand.upstream, respData, isNew)
+		chosenUpstream, chosenFresh = cand.upstream, !expired
 	}
-	if fresh != nil {
-		*out = fresh.dialArg
-		c.useCachedResponse(queryInfo, data, dnsResp, fresh.upstream, fresh.answer.respData, fresh.answer.isNew)
-		return fresh.upstream, nil
-	}
-	if stale != nil {
-		*out = stale.dialArg
-		for i := range usable {
-			cand := &usable[i]
-			if cand.answer.found && cand.answer.expired && !c.dnsCache.RefreshDelayed(cand.answer.key, time.Now()) {
-				c.refreshDNSInBackground(data, queryInfo, cand.upstream, &cand.dialArg, cand.answer.key)
-			}
-		}
-		c.useCachedResponse(queryInfo, data, dnsResp, stale.upstream, stale.answer.respData, stale.answer.isNew)
-		return stale.upstream, nil
+	if chosenUpstream != nil {
+		return chosenUpstream, nil
 	}
 
 	// Miss: forward. A single candidate sends directly; a race group's members
