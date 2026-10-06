@@ -1120,9 +1120,26 @@ func (c *DnsController) dialSend(data []byte, upstream *dns.Upstream, dialArg *d
 	return err
 }
 
+// singleFlightKey returns the singleflight dedup key for one upstream
+// exchange. Unlike the response cache key it includes the upstream identity:
+// race() members that resolve to the same outbound group must fly separately,
+// otherwise the singleflight would collapse them into one upstream query - the
+// first registrant's upstream - and a down upstream would fail the whole race
+// instead of failing over to the next member. The upstream pointer is folded
+// in the same way GetHashKey folds the outbound pointer: it is stable for the
+// lifetime of a controller generation, and the dedup it buys (concurrent
+// identical lookups for the same upstream still merge) is worth the pointer
+// identity. Note this makes ad-hoc asis upstreams (built per query) never
+// merge - arguably more correct, since merging answers across different
+// destinations was questionable to begin with.
+func (c *DnsController) singleFlightKey(qi queryInfo, upstream *dns.Upstream, dialArgument *dialArgument) HashKey {
+	key := c.GetHashKey(qi.qname, qi.qtype, dialArgument.Outbound, dialArgument.Dialer)
+	return key ^ HashKey(uintptr(unsafe.Pointer(upstream)))
+}
+
 func (c *DnsController) singleFlightForwardDNS(
 	qi queryInfo, data []byte, upstream *dns.Upstream, dialArgument *dialArgument, isBackground bool) (r []byte, leader bool, shared bool, err error) {
-	hashKey := c.GetHashKey(qi.qname, qi.qtype, dialArgument.Outbound, dialArgument.Dialer)
+	hashKey := c.singleFlightKey(qi, upstream, dialArgument)
 	param := singleFlightParam{
 		dnsForwarderKey: dnsForwarderKey{upstream: *upstream, dialArgument: *dialArgument},
 		c:               c,
