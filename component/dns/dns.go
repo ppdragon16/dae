@@ -31,24 +31,26 @@ type Dns struct {
 	reqMatcher       *RequestMatcher
 	respMatcher      *ResponseMatcher
 	hasResponseRules bool
-	// raceGroupIndices maps from a race placeholder upstream index to its sub-upstream indices.
-	raceGroupIndices map[uint8][]uint8
-	// raceUpstreams caches resolved sub-upstreams, populated lazily on first use.
-	raceUpstreams map[uint8][]*Upstream
-	raceCacheMu   sync.RWMutex
-	// raceTag2GroupIdx maps an upstream-section race group tag ("race_dns") to
-	// its placeholder upstream index.
-	raceTag2GroupIdx map[string]uint8
-	// raceTag2Members maps a race group tag to its member specs (raw links or
-	// plain upstream tags), kept so via-bound shadow groups can be built.
-	raceTag2Members map[string][]string
-	// raceTag2MemberIds maps a race group tag (base or via-bound shadow) to its
-	// members' upstream indices, so response rules can expand upstream(<tag>)
-	// into "answered by any member".
-	raceTag2MemberIds map[string][]uint8
-	// raceGroupUpstreams holds the synthetic group upstream per placeholder
-	// index. Members are filled lazily on first use.
-	raceGroupUpstreams map[uint8]*Upstream
+	// raceGroups maps a race placeholder upstream index to its compiled group.
+	// Entries are created while compiling the config; Members and the synthetic
+	// Upstream are filled lazily on first use under raceMu.
+	raceGroups map[uint8]*raceGroup
+	raceMu     sync.RWMutex
+}
+
+// raceGroup is one compiled race group. Tag is the declared name (also the
+// identity of the synthetic upstream, and the base for via-bound shadow group
+// names). Specs keeps the members exactly as written - raw links or plain
+// upstream tags - so a shadow group can rebuild the same "member(outbound)"
+// identity the equivalent "member(via: outbound)" rule would get. Indices are
+// the members' resolver indices, used for dialing and for response-rule
+// matching. Members/Upstream are the lazily resolved views.
+type raceGroup struct {
+	Tag      string
+	Specs    []string
+	Indices  []uint8
+	Members  []*Upstream
+	Upstream *Upstream
 }
 
 // Release frees shared interned structures held by the request/response
@@ -163,19 +165,19 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 		if urlKey == "asis" || urlKey == "reject" {
 			continue
 		}
-		if groupIdx, ok := s.raceTag2GroupIdx[urlKey]; ok {
+		if baseIdx, ok := upstreamName2Id[urlKey]; ok && s.raceGroups[baseIdx] != nil {
 			// Reference to a race group defined in the upstream section,
 			// optionally bound to an outbound at the reference site
 			// (race_dns / race_dns(via: ai)).
 			if upstreamName == urlKey {
-				upstreamName2Id[upstreamName] = groupIdx
+				upstreamName2Id[upstreamName] = baseIdx
 				continue
 			}
-			groupIdx, err = s.shadowRaceGroup(urlKey, upstreamName, viaOutboundName, outboundIdx, predefinedUpstreamNames, upstreamName2Id, opt)
+			shadowIdx, err := s.shadowRaceGroup(baseIdx, upstreamName, viaOutboundName, outboundIdx, predefinedUpstreamNames, upstreamName2Id, opt)
 			if err != nil {
 				return nil, err
 			}
-			upstreamName2Id[upstreamName] = groupIdx
+			upstreamName2Id[upstreamName] = shadowIdx
 			continue
 		}
 		if rawURL, ok = predefinedUpstreamNames[urlKey]; !ok {
@@ -231,7 +233,15 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 	}
 	// Parse response routing.
 	s.hasResponseRules = len(dns.Routing.Response.Rules) > 0
-	respMatcherBuilder, err := NewResponseMatcherBuilder(dns.Routing.Response.Rules, upstreamName2Id, dns.Routing.Response.Fallback, s.raceTag2MemberIds)
+	// Response rules may match upstream(<race tag>): expand the tag to the
+	// group's member ids, because responses are attributed to the member that
+	// answered. Derived here instead of stored: the groups are all compiled by
+	// now (base groups in pass two, via-bound shadows while processing rules).
+	raceMemberIds := make(map[string][]uint8, len(s.raceGroups))
+	for _, g := range s.raceGroups {
+		raceMemberIds[g.Tag] = g.Indices
+	}
+	respMatcherBuilder, err := NewResponseMatcherBuilder(dns.Routing.Response.Rules, upstreamName2Id, dns.Routing.Response.Fallback, raceMemberIds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build DNS response routing: %w", err)
 	}
@@ -248,6 +258,9 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 // rejected. The group placeholder is registered under tag so dns routing
 // rules can reference the whole group by name.
 func (s *Dns) addRaceGroup(tag, link string, predefined map[string]*url.URL, upstreamName2Id map[string]uint8, opt *NewOption) error {
+	if idx, ok := upstreamName2Id[tag]; ok && s.raceGroups[idx] != nil {
+		return fmt.Errorf("duplicate race group tag %q", tag)
+	}
 	body := strings.TrimSuffix(strings.TrimPrefix(link, consts.Function_Race+"("), ")")
 	var specs []string
 	var memberIndices []uint8
@@ -259,11 +272,11 @@ func (s *Dns) addRaceGroup(tag, link string, predefined map[string]*url.URL, ups
 		case strings.HasPrefix(spec, consts.Function_Race+"("):
 			return fmt.Errorf("nested race groups are not supported (member %q of race group %q)", spec, tag)
 		case !strings.Contains(spec, "://"):
+			if idx, ok := upstreamName2Id[spec]; ok && s.raceGroups[idx] != nil {
+				return fmt.Errorf("race group %q cannot contain another race group (member %q)", tag, spec)
+			}
 			if _, ok := predefined[spec]; !ok {
 				return fmt.Errorf("undefined upstream %q in race group %q", spec, tag)
-			}
-			if _, isGroup := s.raceTag2GroupIdx[spec]; isGroup {
-				return fmt.Errorf("race group %q cannot contain another race group (member %q)", tag, spec)
 			}
 		}
 		specs = append(specs, spec)
@@ -303,15 +316,7 @@ func (s *Dns) addRaceGroup(tag, link string, predefined map[string]*url.URL, ups
 		upstreamName2Id[spec] = idx
 		memberIndices = append(memberIndices, idx)
 	}
-	if s.raceTag2Members == nil {
-		s.raceTag2Members = map[string][]string{}
-	}
-	s.raceTag2Members[tag] = specs
-	if s.raceTag2MemberIds == nil {
-		s.raceTag2MemberIds = map[string][]uint8{}
-	}
-	s.raceTag2MemberIds[tag] = memberIndices
-	placeholder := s.registerRaceGroup(tag, memberIndices, opt)
+	placeholder := s.registerRaceGroup(tag, specs, memberIndices, opt)
 	// Pre-register under the tag so response rules can reference the group by
 	// name even when no request rule does.
 	upstreamName2Id[tag] = placeholder
@@ -322,12 +327,16 @@ func (s *Dns) addRaceGroup(tag, link string, predefined map[string]*url.URL, ups
 // same members, each resolved through the given outbound. The shadow is
 // registered under shadowName (e.g. race_dns(ai)) so repeated references
 // reuse it.
-func (s *Dns) shadowRaceGroup(baseTag, shadowName, outboundName string, viaOutbound uint8, predefined map[string]*url.URL, upstreamName2Id map[string]uint8, opt *NewOption) (uint8, error) {
-	if idx, ok := s.raceTag2GroupIdx[shadowName]; ok {
+func (s *Dns) shadowRaceGroup(baseIdx uint8, shadowName, outboundName string, viaOutbound uint8, predefined map[string]*url.URL, upstreamName2Id map[string]uint8, opt *NewOption) (uint8, error) {
+	if idx, ok := upstreamName2Id[shadowName]; ok && s.raceGroups[idx] != nil {
 		return idx, nil
 	}
+	base := s.raceGroups[baseIdx]
+	if base == nil {
+		return 0, fmt.Errorf("race group at index %d not found", baseIdx)
+	}
 	var memberIndices []uint8
-	for _, spec := range s.raceTag2Members[baseTag] {
+	for _, spec := range base.Specs {
 		eff := spec + "(" + outboundName + ")"
 		subIdx, exists := upstreamName2Id[eff]
 		if !exists {
@@ -340,7 +349,7 @@ func (s *Dns) shadowRaceGroup(baseTag, shadowName, outboundName string, viaOutbo
 			} else {
 				var ok bool
 				if raw, ok = predefined[spec]; !ok {
-					return 0, fmt.Errorf("undefined upstream %q in race group %q", spec, baseTag)
+					return 0, fmt.Errorf("undefined upstream %q in race group %q", spec, base.Tag)
 				}
 			}
 			idx := uint8(len(s.upstream))
@@ -367,16 +376,12 @@ func (s *Dns) shadowRaceGroup(baseTag, shadowName, outboundName string, viaOutbo
 		}
 		memberIndices = append(memberIndices, subIdx)
 	}
-	if s.raceTag2MemberIds == nil {
-		s.raceTag2MemberIds = map[string][]uint8{}
-	}
-	s.raceTag2MemberIds[shadowName] = memberIndices
-	return s.registerRaceGroup(shadowName, memberIndices, opt), nil
+	return s.registerRaceGroup(shadowName, base.Specs, memberIndices, opt), nil
 }
 
 // registerRaceGroup appends the group placeholder upstream and wires the
 // tag/group mappings. Returns the placeholder index.
-func (s *Dns) registerRaceGroup(tag string, memberIndices []uint8, opt *NewOption) uint8 {
+func (s *Dns) registerRaceGroup(tag string, specs []string, memberIndices []uint8, opt *NewOption) uint8 {
 	placeholder := uint8(len(s.upstream))
 	dummy, err := url.Parse("race://" + tag)
 	if err != nil {
@@ -387,20 +392,14 @@ func (s *Dns) registerRaceGroup(tag string, memberIndices []uint8, opt *NewOptio
 		Network: opt.UpstreamResolverNetwork,
 		mu:      sync.Mutex{},
 	})
-	if s.raceGroupIndices == nil {
-		s.raceGroupIndices = map[uint8][]uint8{}
+	if s.raceGroups == nil {
+		s.raceGroups = map[uint8]*raceGroup{}
 	}
-	s.raceGroupIndices[placeholder] = memberIndices
-	if s.raceTag2GroupIdx == nil {
-		s.raceTag2GroupIdx = map[string]uint8{}
-	}
-	s.raceTag2GroupIdx[tag] = placeholder
-	if s.raceGroupUpstreams == nil {
-		s.raceGroupUpstreams = map[uint8]*Upstream{}
-	}
-	s.raceGroupUpstreams[placeholder] = &Upstream{
-		Scheme:   UpstreamScheme_Race,
-		Hostname: tag,
+	s.raceGroups[placeholder] = &raceGroup{
+		Tag:      tag,
+		Specs:    specs,
+		Indices:  memberIndices,
+		Upstream: &Upstream{Scheme: UpstreamScheme_Race, Hostname: tag},
 	}
 	return placeholder
 }
@@ -409,7 +408,7 @@ func (s *Dns) CheckUpstreamsFormat() error {
 	for i, upstream := range s.upstream {
 		// Skip race placeholder upstreams; they use a synthetic "race://" URL
 		// and are never resolved directly.
-		if _, isRace := s.raceGroupIndices[uint8(i)]; isRace {
+		if s.raceGroups[uint8(i)] != nil {
 			continue
 		}
 		_, _, _, _, err := ParseRawUpstream(upstream.Raw)
@@ -429,7 +428,7 @@ func (s *Dns) GetUpstream(upstreamIndex consts.DnsRequestOutboundIndex) (upstrea
 // placeholder resolver itself must never be resolved, its dummy "race://" URL
 // has no scheme any forwarder understands.
 func (s *Dns) upstreamOrRaceGroup(idx uint8) (upstream *Upstream, err error) {
-	if _, isRace := s.raceGroupIndices[idx]; isRace {
+	if s.raceGroups[idx] != nil {
 		if upstream = s.raceGroupUpstream(idx); upstream == nil {
 			return nil, fmt.Errorf("race group at index %d has no usable member", idx)
 		}
@@ -441,72 +440,69 @@ func (s *Dns) upstreamOrRaceGroup(idx uint8) (upstream *Upstream, err error) {
 	return s.upstream[idx].GetUpstream()
 }
 
-// raceGroupUpstream returns the synthetic group upstream for a race placeholder
-// index, resolving and caching its members on first use.
-func (s *Dns) raceGroupUpstream(idx uint8) *Upstream {
-	s.raceCacheMu.RLock()
-	u := s.raceGroupUpstreams[idx]
-	ready := u != nil && u.RaceGroup != nil && u.RaceGroup.Members != nil
-	tag := ""
-	if u != nil {
-		tag = u.Hostname
-	}
-	s.raceCacheMu.RUnlock()
-	if ready {
-		return u
-	}
-	members := s.GetRaceUpstreams(consts.DnsRequestOutboundIndex(idx))
-	if u == nil || len(members) == 0 {
+// raceGroupMembers resolves a race group's members once and caches them.
+// Returns nil when the index is not a race group or a member fails to resolve.
+func (s *Dns) raceGroupMembers(idx uint8) []*Upstream {
+	s.raceMu.RLock()
+	g := s.raceGroups[idx]
+	if g == nil {
+		s.raceMu.RUnlock()
 		return nil
 	}
-	s.raceCacheMu.Lock()
-	if u.RaceGroup == nil || u.RaceGroup.Members == nil {
-		u.RaceGroup = &RaceGroup{Tag: tag, Members: members}
+	members := g.Members
+	s.raceMu.RUnlock()
+	if members != nil {
+		return members
 	}
-	s.raceCacheMu.Unlock()
-	return u
-}
-
-// GetRaceUpstreams returns resolved upstreams for a race group.
-// Resolution happens lazily on first call and is cached thereafter.
-// Returns nil if this index is not a race group.
-func (s *Dns) GetRaceUpstreams(upstreamIndex consts.DnsRequestOutboundIndex) []*Upstream {
-	idx := uint8(upstreamIndex)
-	indices := s.raceGroupIndices[idx]
-	if indices == nil {
-		return nil
-	}
-
-	// Fast path: read lock, cache hit.
-	s.raceCacheMu.RLock()
-	if cached := s.raceUpstreams[idx]; cached != nil {
-		s.raceCacheMu.RUnlock()
-		return cached
-	}
-	s.raceCacheMu.RUnlock()
-
-	// Slow path: write lock, resolve and cache.
-	s.raceCacheMu.Lock()
-	// Double-check: another goroutine may have populated it while we waited.
-	if cached := s.raceUpstreams[idx]; cached != nil {
-		s.raceCacheMu.Unlock()
-		return cached
-	}
-	upstreams := make([]*Upstream, len(indices))
-	for i, subIdx := range indices {
+	// Indices are written at config load and never mutated, so they are safe to
+	// read without the lock. Resolution itself can block on the network, so it
+	// happens outside the lock; concurrent resolvers duplicate the work and
+	// agree on the result.
+	resolved := make([]*Upstream, 0, len(g.Indices))
+	for _, subIdx := range g.Indices {
 		up, err := s.upstream[subIdx].GetUpstream()
 		if err != nil {
-			s.raceCacheMu.Unlock()
 			return nil
 		}
-		upstreams[i] = up
+		resolved = append(resolved, up)
 	}
-	if s.raceUpstreams == nil {
-		s.raceUpstreams = make(map[uint8][]*Upstream)
+	s.raceMu.Lock()
+	if g.Members == nil {
+		g.Members = resolved
+		if g.Upstream != nil {
+			g.Upstream.RaceGroup = &RaceGroup{Tag: g.Tag, Members: resolved}
+		}
 	}
-	s.raceUpstreams[idx] = upstreams
-	s.raceCacheMu.Unlock()
-	return upstreams
+	s.raceMu.Unlock()
+	return resolved
+}
+
+// raceGroupUpstream returns the synthetic group upstream for a race placeholder
+// index, with its members attached, or nil when the index is not a race group
+// or its members cannot be resolved.
+func (s *Dns) raceGroupUpstream(idx uint8) *Upstream {
+	s.raceMu.RLock()
+	g := s.raceGroups[idx]
+	if g == nil || g.Upstream == nil {
+		s.raceMu.RUnlock()
+		return nil
+	}
+	up, ready := g.Upstream, g.Members != nil
+	s.raceMu.RUnlock()
+	if ready {
+		return up
+	}
+	if len(s.raceGroupMembers(idx)) == 0 {
+		return nil
+	}
+	return up
+}
+
+// GetRaceUpstreams returns the resolved member upstreams of a race group,
+// resolving them lazily on first call. Returns nil if this index is not a race
+// group.
+func (s *Dns) GetRaceUpstreams(upstreamIndex consts.DnsRequestOutboundIndex) []*Upstream {
+	return s.raceGroupMembers(uint8(upstreamIndex))
 }
 
 func (s *Dns) HasResponseRules() bool {

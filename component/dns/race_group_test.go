@@ -52,14 +52,26 @@ func newForRaceTest(t *testing.T, rules ...*config_parser.RoutingRule) *Dns {
 
 func soleRaceGroup(t *testing.T, s *Dns) (placeholder uint8, members []uint8) {
 	t.Helper()
-	if len(s.raceGroupIndices) != 1 {
-		t.Fatalf("got %d race groups, want 1", len(s.raceGroupIndices))
+	if len(s.raceGroups) != 1 {
+		t.Fatalf("got %d race groups, want 1", len(s.raceGroups))
 	}
-	for idx, m := range s.raceGroupIndices {
+	for idx, g := range s.raceGroups {
 		placeholder = idx
-		members = m
+		members = g.Indices
 	}
 	return placeholder, members
+}
+
+// raceGroupIdxByTag finds a compiled race group by its tag.
+func raceGroupIdxByTag(t *testing.T, s *Dns, tag string) uint8 {
+	t.Helper()
+	for idx, g := range s.raceGroups {
+		if g.Tag == tag {
+			return idx
+		}
+	}
+	t.Fatalf("race group %q not registered", tag)
+	return 0
 }
 
 func outboundRule(name string, params ...*config_parser.Param) *config_parser.RoutingRule {
@@ -130,13 +142,10 @@ func TestUpstreamRaceGroupViaReference(t *testing.T) {
 	)
 
 	// Two groups now exist: the unbound one and the ai-bound shadow.
-	if len(s.raceTag2GroupIdx) != 2 {
-		t.Fatalf("got %d registered groups, want 2", len(s.raceTag2GroupIdx))
+	if len(s.raceGroups) != 2 {
+		t.Fatalf("got %d registered groups, want 2", len(s.raceGroups))
 	}
-	shadow, ok := s.raceTag2GroupIdx["race_dns(ai)"]
-	if !ok {
-		t.Fatalf("via-bound shadow group race_dns(ai) not registered")
-	}
+	shadow := raceGroupIdxByTag(t, s, "race_dns(ai)")
 	ups := s.GetRaceUpstreams(consts.DnsRequestOutboundIndex(shadow))
 	if len(ups) != 2 {
 		t.Fatalf("shadow group has %d members, want 2", len(ups))
@@ -147,7 +156,7 @@ func TestUpstreamRaceGroupViaReference(t *testing.T) {
 		}
 	}
 	// The unbound group's members stay unbound.
-	plain := s.raceTag2GroupIdx["race_dns"]
+	plain := raceGroupIdxByTag(t, s, "race_dns")
 	for i, up := range s.GetRaceUpstreams(consts.DnsRequestOutboundIndex(plain)) {
 		if up.Outbound != consts.OutboundIndex(0xFF) {
 			t.Errorf("plain member %d bound to outbound %v, want unspecified (0xFF)", i, up.Outbound)
@@ -207,10 +216,7 @@ func contains(haystack, needle string) bool {
 func TestRaceGroupUpstreamCarriesMembers(t *testing.T) {
 	s := newForRaceTest(t, outboundRule("race_dns"))
 
-	idx, ok := s.raceTag2GroupIdx["race_dns"]
-	if !ok {
-		t.Fatalf("race group tag not registered")
-	}
+	idx := raceGroupIdxByTag(t, s, "race_dns")
 	up, err := s.GetUpstream(consts.DnsRequestOutboundIndex(idx))
 	if err != nil {
 		t.Fatalf("GetUpstream(race): %v", err)
@@ -251,9 +257,12 @@ func TestResponseSelectRaceTargetYieldsGroupUpstream(t *testing.T) {
 			{Raw: mustURL(t, "udp://8.8.8.8:53"), upstream: memberG, init: 1},  // 1: g_dns
 			{Raw: mustURL(t, "race://race_dns")},                               // 2: placeholder
 		},
-		raceGroupIndices: map[uint8][]uint8{2: {0, 1}},
-		raceGroupUpstreams: map[uint8]*Upstream{
-			2: {Scheme: UpstreamScheme_Race, Hostname: "race_dns"},
+		raceGroups: map[uint8]*raceGroup{
+			2: {
+				Tag:      "race_dns",
+				Indices:  []uint8{0, 1},
+				Upstream: &Upstream{Scheme: UpstreamScheme_Race, Hostname: "race_dns"},
+			},
 		},
 		upstream2Index: map[*Upstream]int{memberCf: 0, memberG: 1},
 	}
@@ -285,5 +294,20 @@ func TestResponseSelectRaceTargetYieldsGroupUpstream(t *testing.T) {
 	}
 	if up.RaceGroup.Members[0] != memberCf || up.RaceGroup.Members[1] != memberG {
 		t.Fatal("members resolved in the wrong order")
+	}
+}
+
+// TestDuplicateRaceGroupTagRejected pins that two race groups cannot share a
+// tag: the second registration would otherwise silently orphan the first
+// group's placeholder and shadow the name in the upstream index.
+func TestDuplicateRaceGroupTagRejected(t *testing.T) {
+	_, err := New(&config.Dns{
+		Upstream: []config.KeyableString{
+			"race_dns:race(udp://1.1.1.1:53)",
+			"race_dns:race(udp://8.8.8.8:53)",
+		},
+	}, &NewOption{UpstreamReadyCallback: func(*Upstream) {}}, map[string]uint8{})
+	if err == nil || !contains(err.Error(), "duplicate race group tag") {
+		t.Fatalf("error = %v, want a duplicate-tag error", err)
 	}
 }

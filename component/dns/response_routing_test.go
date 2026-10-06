@@ -423,8 +423,14 @@ func TestResponseMatcherExpandsRaceGroupTag(t *testing.T) {
 			{Raw: mustURL(t, "race://race_dns")},                               // 2: placeholder
 			{Raw: mustURL(t, "udp://223.5.5.5:53"), upstream: other, init: 1},  // 3: cn_dns
 		},
-		raceGroupIndices: map[uint8][]uint8{2: {0, 1}},
-		upstream2Index:   map[*Upstream]int{memberCf: 0, memberG: 1, other: 3},
+		raceGroups: map[uint8]*raceGroup{
+			2: {
+				Tag:      "race_dns",
+				Indices:  []uint8{0, 1},
+				Upstream: &Upstream{Scheme: UpstreamScheme_Race, Hostname: "race_dns"},
+			},
+		},
+		upstream2Index: map[*Upstream]int{memberCf: 0, memberG: 1, other: 3},
 	}
 	rules := []*config_parser.RoutingRule{
 		testResponseRule("reject", testResponseFunction("upstream", "race_dns")),
