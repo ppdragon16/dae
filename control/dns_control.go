@@ -745,9 +745,6 @@ type dnsForwardCandidate struct {
 	// the heap, and owning the argument outright removes every get/put pairing
 	// question (and the chance of copying it after it went back to the pool).
 	dialArg dialArgument
-	// noIpv6 marks a candidate whose dialer cannot proxy IPv6. AAAA queries
-	// skip such candidates unless every candidate is one.
-	noIpv6 bool
 }
 
 // dnsForwardResult is what a member of a concurrent round reports back.
@@ -772,53 +769,51 @@ func (c *DnsController) forwardDNSRaceGroup(
 	// the forwarding route, and keeping the choice out of the spawned
 	// goroutines means they never touch the caller's *dnsRequest, which Handle
 	// recycles as soon as the query is answered.
-	// A value slice, not a slice of pointers: the candidates are inline in one
-	// backing array, so a fan-out costs one allocation rather than one per
-	// member. The array cannot stay on the stack because the element addresses
-	// escape into bestDialerChooser, a func-typed field whose callee is unknown.
-	// The capacity is exact, so the element pointers stay valid while building.
-	candidates := make([]dnsForwardCandidate, len(members))
+	// One pass over the members builds usable directly: choose a dialer for
+	// each, keep the ones that can carry this query, and note whether any of
+	// them can proxy IPv6. A value slice, not a slice of pointers, keeps the
+	// whole fan-out in one backing array; the capacity is exact, so element
+	// pointers stay valid while building, and writing through a slot (rather
+	// than a local) keeps each dial argument inside the array instead of
+	// escaping into its own heap object. The array itself cannot stay on the
+	// stack: element addresses escape into bestDialerChooser, a func-typed
+	// field whose callee is unknown.
+	usable := make([]dnsForwardCandidate, len(members))
 	n := 0
+	chosen := 0
+	canProxyIpv6 := false
 	var chooserErr error
 	for _, member := range members {
-		cand := &candidates[n]
+		cand := &usable[n]
 		cand.upstream = member
 		if err := c.bestDialerChooser(req, member, &cand.dialArg); err != nil {
 			chooserErr = err
 			continue
 		}
-		cand.noIpv6 = rejectAAAAQuery(member, cand.dialArg.Dialer, queryInfo.qtype)
+		chosen++
+		// AAAA queries are rejected only when NO member can proxy IPv6: a group
+		// may well contain one that can (race(cf4_dns, cf6_dns)), and rejecting
+		// on the first member that cannot would answer an empty AAAA even
+		// though another member could have resolved it. The slot is reused by
+		// the next member when this one is dropped.
+		if rejectAAAAQuery(member, cand.dialArg.Dialer, queryInfo.qtype) {
+			continue
+		}
+		canProxyIpv6 = true
 		n++
 	}
-	candidates = candidates[:n]
-	if len(candidates) == 0 {
+	usable = usable[:n]
+	switch {
+	case chosen == 0:
+		// Every member failed to choose a dialer; reporting the AAAA reject
+		// here would hide that.
 		if chooserErr != nil {
 			return nil, chooserErr
 		}
 		return nil, common.Errf("no usable upstream for %q", queryInfo.qname)
-	}
-
-	// AAAA queries are rejected only when NO member can proxy IPv6: a group may
-	// well contain one that can (race(cf4_dns, cf6_dns)), and rejecting on the
-	// first member that cannot would answer an empty AAAA even though another
-	// member could have resolved it.
-	canProxyIpv6 := false
-	for i := range candidates {
-		if !candidates[i].noIpv6 {
-			canProxyIpv6 = true
-			break
-		}
-	}
-	if !canProxyIpv6 {
+	case !canProxyIpv6:
 		c.rejectAAAA(queryInfo, data, dnsResp)
 		return nil, nil
-	}
-	usable := candidates[:0]
-	for i := range candidates {
-		if candidates[i].noIpv6 {
-			continue
-		}
-		usable = append(usable, candidates[i])
 	}
 
 	// Probe every member in config order. The first fresh entry answers;
