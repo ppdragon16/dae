@@ -656,7 +656,10 @@ Dial:
 // plain upstream, or one member of a race group.
 type dnsForwardCandidate struct {
 	upstream *dns.Upstream
-	dialArg  *dialArgument
+	// dialArg is a value, not a pooled pointer: the candidate already lives on
+	// the heap, and owning the argument outright removes every get/put pairing
+	// question (and the chance of copying it after it went back to the pool).
+	dialArg dialArgument
 	// noIpv6 marks a candidate whose dialer cannot proxy IPv6. AAAA queries
 	// skip such candidates unless every candidate is one.
 	noIpv6 bool
@@ -703,17 +706,13 @@ func (c *DnsController) forwardDNSRequest(
 	candidates := make([]*dnsForwardCandidate, 0, len(members))
 	var chooserErr error
 	for _, member := range members {
-		dialArg := dialArgumentPool.Get().(*dialArgument)
-		if err := c.bestDialerChooser(req, member, dialArg); err != nil {
-			dialArgumentPool.Put(dialArg)
+		cand := &dnsForwardCandidate{upstream: member}
+		if err := c.bestDialerChooser(req, member, &cand.dialArg); err != nil {
 			chooserErr = err
 			continue
 		}
-		candidates = append(candidates, &dnsForwardCandidate{
-			upstream: member,
-			dialArg:  dialArg,
-			noIpv6:   rejectAAAAQuery(member, dialArg.Dialer, queryInfo.qtype),
-		})
+		cand.noIpv6 = rejectAAAAQuery(member, cand.dialArg.Dialer, queryInfo.qtype)
+		candidates = append(candidates, cand)
 	}
 	if len(candidates) == 0 {
 		if chooserErr != nil {
@@ -734,9 +733,6 @@ func (c *DnsController) forwardDNSRequest(
 		}
 	}
 	if !canProxyIpv6 {
-		for _, cand := range candidates {
-			dialArgumentPool.Put(cand.dialArg)
-		}
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"qname": queryInfo.qname,
@@ -754,7 +750,6 @@ func (c *DnsController) forwardDNSRequest(
 	usable := candidates[:0]
 	for _, cand := range candidates {
 		if cand.noIpv6 {
-			dialArgumentPool.Put(cand.dialArg)
 			continue
 		}
 		usable = append(usable, cand)
@@ -783,25 +778,16 @@ func (c *DnsController) forwardDNSRequest(
 		}
 	}
 	if fresh != nil {
-		for _, cand := range usable {
-			if cand != fresh {
-				dialArgumentPool.Put(cand.dialArg)
-			}
-		}
-		*out = *fresh.dialArg
-		dialArgumentPool.Put(fresh.dialArg)
+		*out = fresh.dialArg
 		c.useCachedResponse(queryInfo, data, dnsResp, fresh.upstream, fresh.respData, fresh.isNew)
 		return fresh, nil
 	}
 	if stale != nil {
-		// Snapshot the dial labels before any candidate goes back to the pool.
-		*out = *stale.dialArg
+		*out = stale.dialArg
 		for _, cand := range usable {
 			if cand.respData != nil && cand.expired && !c.dnsCache.RefreshDelayed(cand.key, time.Now()) {
 				c.refreshDNSInBackground(data, queryInfo, cand)
-				continue
 			}
-			dialArgumentPool.Put(cand.dialArg)
 		}
 		c.useCachedResponse(queryInfo, data, dnsResp, stale.upstream, stale.respData, stale.isNew)
 		return stale, nil
@@ -811,12 +797,11 @@ func (c *DnsController) forwardDNSRequest(
 	// send concurrently and the first success wins.
 	if len(usable) == 1 {
 		cand := usable[0]
-		err := c.dialSend(data, cand.upstream, cand.dialArg, queryInfo, dnsResp)
+		err := c.dialSend(data, cand.upstream, &cand.dialArg, queryInfo, dnsResp)
 		if err != nil {
 			err = c.forwardError(err, cand, queryInfo, dnsResp)
 		}
-		*out = *cand.dialArg
-		dialArgumentPool.Put(cand.dialArg)
+		*out = cand.dialArg
 		if err != nil {
 			return nil, err
 		}
@@ -834,18 +819,15 @@ func (c *DnsController) forwardDNSRequest(
 		dataCopy := pool.GetBuffer(len(data))
 		copy(dataCopy, data)
 		go func(cand *dnsForwardCandidate, dataCopy []byte) {
-			defer func() {
-				pool.PutBuffer(dataCopy)
-				dialArgumentPool.Put(cand.dialArg)
-			}()
+			defer pool.PutBuffer(dataCopy)
 			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
-			err := c.dialSend(dataCopy, cand.upstream, cand.dialArg, queryInfo, localResp)
+			err := c.dialSend(dataCopy, cand.upstream, &cand.dialArg, queryInfo, localResp)
 			if err != nil {
 				err = c.forwardError(err, cand, queryInfo, localResp)
 			}
 			win := err == nil && winnerFlag.CompareAndSwap(false, true)
 			if win {
-				*out = *cand.dialArg
+				*out = cand.dialArg
 				*dnsResp = *localResp
 			} else if localResp.respData != nil && localResp.fromPool {
 				pool.PutBuffer(localResp.respData)
@@ -900,11 +882,10 @@ func (c *DnsController) useCachedResponse(
 // rewritten message the entry was built from.
 func (c *DnsController) refreshDNSInBackground(data []byte, queryInfo queryInfo, cand *dnsForwardCandidate) {
 	rewritten, release := rewriteUpstreamQuery(data, c.resolveEcsPolicy(cand.dialArg.Outbound, cand.dialArg.Dialer))
-	p := obtainDnsRefreshParam(rewritten, queryInfo, cand.upstream, cand.dialArg)
+	p := obtainDnsRefreshParam(rewritten, queryInfo, cand.upstream, &cand.dialArg)
 	if release != nil {
 		release()
 	}
-	dialArgumentPool.Put(cand.dialArg)
 	go func(c *DnsController, p *dnsRefreshParam, hashKey HashKey) {
 		defer recycleDnsRefreshParam(p)
 		_, leader, _, err := c.singleFlightForwardDNS(p.qi, p.data, p.upstream, &p.dialArg, true)
