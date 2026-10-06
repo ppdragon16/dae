@@ -790,17 +790,25 @@ func (c *DnsController) forwardDNSRaceGroup(
 	// the forwarding route, and keeping the choice out of the spawned
 	// goroutines means they never touch the caller's *dnsRequest, which Handle
 	// recycles as soon as the query is answered.
-	candidates := make([]*dnsForwardCandidate, 0, len(members))
+	// A value slice, not a slice of pointers: the candidates are inline in one
+	// backing array, so a fan-out costs one allocation rather than one per
+	// member. The array cannot stay on the stack because the element addresses
+	// escape into bestDialerChooser, a func-typed field whose callee is unknown.
+	// The capacity is exact, so the element pointers stay valid while building.
+	candidates := make([]dnsForwardCandidate, len(members))
+	n := 0
 	var chooserErr error
 	for _, member := range members {
-		cand := &dnsForwardCandidate{upstream: member}
+		cand := &candidates[n]
+		cand.upstream = member
 		if err := c.bestDialerChooser(req, member, &cand.dialArg); err != nil {
 			chooserErr = err
 			continue
 		}
 		cand.noIpv6 = rejectAAAAQuery(member, cand.dialArg.Dialer, queryInfo.qtype)
-		candidates = append(candidates, cand)
+		n++
 	}
+	candidates = candidates[:n]
 	if len(candidates) == 0 {
 		if chooserErr != nil {
 			return nil, chooserErr
@@ -813,8 +821,8 @@ func (c *DnsController) forwardDNSRaceGroup(
 	// first member that cannot would answer an empty AAAA even though another
 	// member could have resolved it.
 	canProxyIpv6 := false
-	for _, cand := range candidates {
-		if !cand.noIpv6 {
+	for i := range candidates {
+		if !candidates[i].noIpv6 {
 			canProxyIpv6 = true
 			break
 		}
@@ -824,11 +832,11 @@ func (c *DnsController) forwardDNSRaceGroup(
 		return nil, nil
 	}
 	usable := candidates[:0]
-	for _, cand := range candidates {
-		if cand.noIpv6 {
+	for i := range candidates {
+		if candidates[i].noIpv6 {
 			continue
 		}
-		usable = append(usable, cand)
+		usable = append(usable, candidates[i])
 	}
 
 	// Cache probe in config order: the first member with a fresh entry answers;
@@ -836,7 +844,8 @@ func (c *DnsController) forwardDNSRaceGroup(
 	// entry is refreshed in the background (their flight keys include the
 	// upstream, so that refresh races the whole group).
 	var fresh, stale *dnsForwardCandidate
-	for _, cand := range usable {
+	for i := range usable {
+		cand := &usable[i]
 		if cand.answer = c.probeCachedAnswer(queryInfo, &cand.dialArg); !cand.answer.found {
 			continue
 		}
@@ -855,7 +864,8 @@ func (c *DnsController) forwardDNSRaceGroup(
 	}
 	if stale != nil {
 		*out = stale.dialArg
-		for _, cand := range usable {
+		for i := range usable {
+			cand := &usable[i]
 			if cand.answer.found && cand.answer.expired && !c.dnsCache.RefreshDelayed(cand.answer.key, time.Now()) {
 				c.refreshDNSInBackground(data, queryInfo, cand.upstream, &cand.dialArg, cand.answer.key)
 			}
@@ -867,7 +877,7 @@ func (c *DnsController) forwardDNSRaceGroup(
 	// Miss: forward. A single candidate sends directly; a race group's members
 	// send concurrently and the first success wins.
 	if len(usable) == 1 {
-		cand := usable[0]
+		cand := &usable[0]
 		if err := c.dialSend(data, cand.upstream, &cand.dialArg, queryInfo, dnsResp); err != nil {
 			if err = c.forwardError(err, &cand.dialArg, queryInfo, dnsResp); err != nil {
 				return nil, err
@@ -879,7 +889,8 @@ func (c *DnsController) forwardDNSRaceGroup(
 
 	var winnerFlag atomic.Bool
 	results := make(chan dnsForwardResult, len(usable))
-	for _, cand := range usable {
+	for i := range usable {
+		cand := &usable[i]
 		// Snapshot the query BEFORE spawning: this function returns as soon as a
 		// winner is known, but losing goroutines keep running, and Handle
 		// recycles the request buffer the moment it returns. Taking the copy in

@@ -80,3 +80,72 @@ func BenchmarkDNSRequestSingleCacheHit(b *testing.B) {
 		*dnsResp = dnsResponseData{}
 	}
 }
+
+// BenchmarkDNSRequestRaceGroupCacheHit pins the per-query cost of a race group
+// whose first member holds a fresh cache entry: no dialing and no goroutines,
+// just the candidate setup and the probe.
+func BenchmarkDNSRequestRaceGroupCacheHit(b *testing.B) {
+	common.InitMetrics()
+	option := &dialer.GlobalOption{
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{"1.1.1.1:53"}},
+		CheckInterval:     time.Hour,
+	}
+	proxy := &raceStubProxy{}
+	dA := dialer.NewDialer(proxy, option, &dialer.Property{Property: D.Property{Name: "a"}}, false)
+	dB := dialer.NewDialer(proxy, option, &dialer.Property{Property: D.Property{Name: "b"}}, false)
+	newGroup := func(name string, d *dialer.Dialer) *outbound.DialerGroup {
+		return outbound.NewDialerGroup(option, name, []*dialer.Dialer{d}, []*dialer.Annotation{{}},
+			dialer.DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_Fixed, FixedIndex: 0},
+			func(alive bool, networkType *common.NetworkType) {})
+	}
+	groupA := newGroup("grp-a", dA)
+	groupB := newGroup("grp-b", dB)
+	upA := raceTestUpstream("1.1.1.1")
+	upB := raceTestUpstream("8.8.8.8")
+	c := &DnsController{
+		enableCache:      true,
+		dnsCache:         NewCommonDnsCache(),
+		dnsCacheHashSeed: maphash.MakeSeed(),
+		routing:          &dns.Dns{},
+		matchBitmap:      func(string, []uint32) {},
+		bestDialerChooser: func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error {
+			if upstream == upA {
+				outArg.Outbound, outArg.Dialer = groupA, dA
+			} else {
+				outArg.Outbound, outArg.Dialer = groupB, dB
+			}
+			outArg.networkType = common.NETWORK_UDP4
+			return nil
+		},
+	}
+	const qname = "bench-race.example.com"
+	keyA := c.GetHashKey(qname, uint16(dnsmessage.TypeA), groupA, dA)
+	c.dnsCache.Save(keyA, raceTestAnswer(b, qname, netip.MustParseAddr("198.51.100.1")), 600, false)
+	c.dnsCache.Get(keyA) // consume IsNew
+
+	req := ObtainDnsRequest(
+		netip.MustParseAddrPort("192.168.16.129:44081"),
+		netip.MustParseAddrPort("8.8.8.8:53"),
+		&bpfRoutingResult{}, false)
+	defer RecycleDnsRequest(req)
+	data := raceTestAnswer(b, qname, netip.IPv4Unspecified())
+	qi := queryInfo{qname: qname, qtype: uint16(dnsmessage.TypeA)}
+	groupUpstream := &dns.Upstream{
+		Scheme:    dns.UpstreamScheme_Race,
+		Hostname:  "race_dns",
+		RaceGroup: &dns.RaceGroup{Tag: "race_dns", Members: []*dns.Upstream{upA, upB}},
+	}
+
+	dnsResp := &dnsResponseData{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := c.handleDNSRequestByUpstream(data, req, qi, groupUpstream, dnsResp); err != nil {
+			b.Fatal(err)
+		}
+		if dnsResp.respData != nil && dnsResp.fromPool {
+			pool.PutBuffer(dnsResp.respData)
+		}
+		*dnsResp = dnsResponseData{}
+	}
+}
