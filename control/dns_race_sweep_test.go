@@ -38,7 +38,7 @@ func (s *raceStubProxy) ListenPacket(ctx context.Context, address string) (net.P
 }
 
 // raceTestAnswer builds a NOERROR response whose single A record answers ip.
-func raceTestAnswer(t *testing.T, name string, ip netip.Addr) []byte {
+func raceTestAnswer(t testing.TB, name string, ip netip.Addr) []byte {
 	t.Helper()
 	msg := &dnsmessage.Msg{}
 	msg.SetQuestion(name+".", dnsmessage.TypeA)

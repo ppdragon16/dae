@@ -577,7 +577,7 @@ Dial:
 			// bypasses response routing and the lookup-cache update.
 			return nil
 		}
-		upstream = winner.upstream
+		upstream = winner
 		// ---- response phase ----
 		if !c.routing.HasResponseRules() {
 			if dnsResp.isNew {
@@ -652,8 +652,110 @@ Dial:
 	return err
 }
 
-// dnsForwardCandidate is one upstream a single lookup round may send to: a
-// plain upstream, or one member of a race group.
+// cachedAnswer is one cache probe outcome for an (upstream, dialer) pair. It is
+// a value type on purpose: the common single-upstream path must not allocate.
+type cachedAnswer struct {
+	key      HashKey
+	respData []byte
+	isNew    bool
+	expired  bool
+	found    bool
+}
+
+// probeCachedAnswer looks the pair up in the DNS cache.
+func (c *DnsController) probeCachedAnswer(queryInfo queryInfo, dialArg *dialArgument) cachedAnswer {
+	if !c.enableCache {
+		return cachedAnswer{}
+	}
+	a := cachedAnswer{
+		key: c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer),
+	}
+	var isNew bool
+	a.respData, a.expired, isNew = c.dnsCache.Get(a.key)
+	if a.respData == nil {
+		return cachedAnswer{}
+	}
+	a.found, a.isNew = true, isNew
+	return a
+}
+
+// rejectAAAA answers an AAAA query with an empty response when the dialer that
+// would carry it cannot proxy IPv6. It uses a fresh buffer because the query
+// bytes may be shared across racing dialers.
+func (c *DnsController) rejectAAAA(queryInfo queryInfo, data []byte, dnsResp *dnsResponseData) {
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.WithFields(log.Fields{
+			"qname": queryInfo.qname,
+		}).Debugln("Reject AAAA query: no dialer can proxy IPv6")
+	}
+	respData := pool.GetBuffer(len(data))
+	copy(respData, data)
+	c.reject(respData)
+	dnsResp.respData = respData
+	dnsResp.fromPool = true
+	dnsResp.isNew = false
+}
+
+// forwardDNSRequest is the request phase of one lookup round: it resolves
+// upstream (a race group fans out to its members, anything else is sent
+// directly), probes the cache in config order and, on a miss, forwards - racing
+// the members when there is more than one. It reuses out for the answering
+// candidate's dial argument and returns the upstream that answered, or nil when
+// the round was answered without forwarding.
+func (c *DnsController) forwardDNSRequest(
+	data []byte,
+	req *dnsRequest,
+	queryInfo queryInfo,
+	upstream *dns.Upstream,
+	dnsResp *dnsResponseData,
+	out *dialArgument,
+) (*dns.Upstream, error) {
+	if !upstream.IsRaceGroup() {
+		return c.forwardDNSSingle(data, req, queryInfo, upstream, dnsResp, out)
+	}
+	if upstream.RaceGroup == nil || len(upstream.RaceGroup.Members) == 0 {
+		return nil, common.Errf("race group %s has no usable member", upstream.String())
+	}
+	return c.forwardDNSRaceGroup(data, req, queryInfo, upstream.RaceGroup.Members, dnsResp, out)
+}
+
+// forwardDNSSingle is the request phase for the common case: exactly one
+// upstream and no group. It works straight on the round's pooled dial argument,
+// so a cache hit allocates nothing here at all.
+func (c *DnsController) forwardDNSSingle(
+	data []byte,
+	req *dnsRequest,
+	queryInfo queryInfo,
+	upstream *dns.Upstream,
+	dnsResp *dnsResponseData,
+	dialArg *dialArgument,
+) (*dns.Upstream, error) {
+	if err := c.bestDialerChooser(req, upstream, dialArg); err != nil {
+		return nil, err
+	}
+	if rejectAAAAQuery(upstream, dialArg.Dialer, queryInfo.qtype) {
+		c.rejectAAAA(queryInfo, data, dnsResp)
+		return nil, nil
+	}
+	if a := c.probeCachedAnswer(queryInfo, dialArg); a.found {
+		if a.expired && !c.dnsCache.RefreshDelayed(a.key, time.Now()) {
+			// Refresh asynchronously. A failed refresh backs the next one off
+			// exponentially: while an upstream is down, every query on the
+			// expired entry would otherwise spawn one doomed dial apiece.
+			c.refreshDNSInBackground(data, queryInfo, upstream, dialArg, a.key)
+		}
+		c.useCachedResponse(queryInfo, data, dnsResp, upstream, a.respData, a.isNew)
+		return upstream, nil
+	}
+	if err := c.dialSend(data, upstream, dialArg, queryInfo, dnsResp); err != nil {
+		if err = c.forwardError(err, dialArg, queryInfo, dnsResp); err != nil {
+			return nil, err
+		}
+	}
+	return upstream, nil
+}
+
+// dnsForwardCandidate is one member of a race group in a single lookup round.
 type dnsForwardCandidate struct {
 	upstream *dns.Upstream
 	// dialArg is a value, not a pooled pointer: the candidate already lives on
@@ -663,11 +765,7 @@ type dnsForwardCandidate struct {
 	// noIpv6 marks a candidate whose dialer cannot proxy IPv6. AAAA queries
 	// skip such candidates unless every candidate is one.
 	noIpv6 bool
-	// Cache probe outcome; key is set for every probed candidate.
-	key      HashKey
-	respData []byte
-	expired  bool
-	isNew    bool
+	answer cachedAnswer
 }
 
 // dnsForwardResult is what a member of a concurrent round reports back.
@@ -677,28 +775,17 @@ type dnsForwardResult struct {
 	err       error
 }
 
-// forwardDNSRequest is the request phase of one lookup round: expand the
-// upstream into candidate members, choose a dialer for each, probe the cache in
-// config order, and on a miss forward - racing the members when the upstream is
-// a race group. It fills out with the answering candidate's dial argument for
-// the caller's logging, and returns (nil, nil) when the round was answered
-// without forwarding.
-func (c *DnsController) forwardDNSRequest(
+// forwardDNSRaceGroup is the request phase for a race group: every member is a
+// candidate, the cache is probed in config order, and a miss forwards on all
+// of them concurrently.
+func (c *DnsController) forwardDNSRaceGroup(
 	data []byte,
 	req *dnsRequest,
 	queryInfo queryInfo,
-	upstream *dns.Upstream,
+	members []*dns.Upstream,
 	dnsResp *dnsResponseData,
 	out *dialArgument,
-) (*dnsForwardCandidate, error) {
-	members := []*dns.Upstream{upstream}
-	if upstream.IsRaceGroup() {
-		if upstream.RaceGroup == nil || len(upstream.RaceGroup.Members) == 0 {
-			return nil, common.Errf("race group %s has no usable member", upstream.String())
-		}
-		members = upstream.RaceGroup.Members
-	}
-
+) (*dns.Upstream, error) {
 	// Choose a dialer per member up front: it decides both the cache key and
 	// the forwarding route, and keeping the choice out of the spawned
 	// goroutines means they never touch the caller's *dnsRequest, which Handle
@@ -733,18 +820,7 @@ func (c *DnsController) forwardDNSRequest(
 		}
 	}
 	if !canProxyIpv6 {
-		if log.IsLevelEnabled(log.DebugLevel) {
-			log.WithFields(log.Fields{
-				"qname": queryInfo.qname,
-			}).Debugln("Reject AAAA query: no dialer can proxy IPv6")
-		}
-		// Fresh buffer: the query bytes may be shared across racing dialers.
-		respData := pool.GetBuffer(len(data))
-		copy(respData, data)
-		c.reject(respData)
-		dnsResp.respData = respData
-		dnsResp.fromPool = true
-		dnsResp.isNew = false
+		c.rejectAAAA(queryInfo, data, dnsResp)
 		return nil, nil
 	}
 	usable := candidates[:0]
@@ -760,52 +836,45 @@ func (c *DnsController) forwardDNSRequest(
 	// entry is refreshed in the background (their flight keys include the
 	// upstream, so that refresh races the whole group).
 	var fresh, stale *dnsForwardCandidate
-	if c.enableCache {
-		for _, cand := range usable {
-			cand.key = c.GetHashKey(queryInfo.qname, queryInfo.qtype, cand.dialArg.Outbound, cand.dialArg.Dialer)
-			respData, expired, isNew := c.dnsCache.Get(cand.key)
-			if respData == nil {
-				continue
-			}
-			cand.respData, cand.expired, cand.isNew = respData, expired, isNew
-			if !expired {
-				fresh = cand
-				break
-			}
-			if stale == nil {
-				stale = cand
-			}
+	for _, cand := range usable {
+		if cand.answer = c.probeCachedAnswer(queryInfo, &cand.dialArg); !cand.answer.found {
+			continue
+		}
+		if !cand.answer.expired {
+			fresh = cand
+			break
+		}
+		if stale == nil {
+			stale = cand
 		}
 	}
 	if fresh != nil {
 		*out = fresh.dialArg
-		c.useCachedResponse(queryInfo, data, dnsResp, fresh.upstream, fresh.respData, fresh.isNew)
-		return fresh, nil
+		c.useCachedResponse(queryInfo, data, dnsResp, fresh.upstream, fresh.answer.respData, fresh.answer.isNew)
+		return fresh.upstream, nil
 	}
 	if stale != nil {
 		*out = stale.dialArg
 		for _, cand := range usable {
-			if cand.respData != nil && cand.expired && !c.dnsCache.RefreshDelayed(cand.key, time.Now()) {
-				c.refreshDNSInBackground(data, queryInfo, cand)
+			if cand.answer.found && cand.answer.expired && !c.dnsCache.RefreshDelayed(cand.answer.key, time.Now()) {
+				c.refreshDNSInBackground(data, queryInfo, cand.upstream, &cand.dialArg, cand.answer.key)
 			}
 		}
-		c.useCachedResponse(queryInfo, data, dnsResp, stale.upstream, stale.respData, stale.isNew)
-		return stale, nil
+		c.useCachedResponse(queryInfo, data, dnsResp, stale.upstream, stale.answer.respData, stale.answer.isNew)
+		return stale.upstream, nil
 	}
 
 	// Miss: forward. A single candidate sends directly; a race group's members
 	// send concurrently and the first success wins.
 	if len(usable) == 1 {
 		cand := usable[0]
-		err := c.dialSend(data, cand.upstream, &cand.dialArg, queryInfo, dnsResp)
-		if err != nil {
-			err = c.forwardError(err, cand, queryInfo, dnsResp)
+		if err := c.dialSend(data, cand.upstream, &cand.dialArg, queryInfo, dnsResp); err != nil {
+			if err = c.forwardError(err, &cand.dialArg, queryInfo, dnsResp); err != nil {
+				return nil, err
+			}
 		}
 		*out = cand.dialArg
-		if err != nil {
-			return nil, err
-		}
-		return cand, nil
+		return cand.upstream, nil
 	}
 
 	var winnerFlag atomic.Bool
@@ -823,7 +892,7 @@ func (c *DnsController) forwardDNSRequest(
 			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
 			err := c.dialSend(dataCopy, cand.upstream, &cand.dialArg, queryInfo, localResp)
 			if err != nil {
-				err = c.forwardError(err, cand, queryInfo, localResp)
+				err = c.forwardError(err, &cand.dialArg, queryInfo, localResp)
 			}
 			win := err == nil && winnerFlag.CompareAndSwap(false, true)
 			if win {
@@ -841,7 +910,7 @@ func (c *DnsController) forwardDNSRequest(
 	for range len(usable) {
 		res := <-results
 		if res.win {
-			return res.candidate, nil
+			return res.candidate.upstream, nil
 		}
 		if firstErr == nil && res.err != nil {
 			firstErr = res.err
@@ -876,13 +945,13 @@ func (c *DnsController) useCachedResponse(
 	dnsIdSet(dnsResp.respData, dnsId(data))
 }
 
-// refreshDNSInBackground refreshes one candidate's expired cache entry without
-// blocking the query. The rewrite (payload clamp, ECS policy) happens here, as
-// it would on the forwarding path: the refresh must query with the same
-// rewritten message the entry was built from.
-func (c *DnsController) refreshDNSInBackground(data []byte, queryInfo queryInfo, cand *dnsForwardCandidate) {
-	rewritten, release := rewriteUpstreamQuery(data, c.resolveEcsPolicy(cand.dialArg.Outbound, cand.dialArg.Dialer))
-	p := obtainDnsRefreshParam(rewritten, queryInfo, cand.upstream, &cand.dialArg)
+// refreshDNSInBackground refreshes an expired cache entry without blocking the
+// query. The rewrite (payload clamp, ECS policy) happens here, as it would on
+// the forwarding path: the refresh must query with the same rewritten message
+// the entry was built from. The pooled dial argument stays with the caller.
+func (c *DnsController) refreshDNSInBackground(data []byte, queryInfo queryInfo, upstream *dns.Upstream, dialArg *dialArgument, key HashKey) {
+	rewritten, release := rewriteUpstreamQuery(data, c.resolveEcsPolicy(dialArg.Outbound, dialArg.Dialer))
+	p := obtainDnsRefreshParam(rewritten, queryInfo, upstream, dialArg)
 	if release != nil {
 		release()
 	}
@@ -897,16 +966,16 @@ func (c *DnsController) refreshDNSInBackground(data []byte, queryInfo queryInfo,
 			}
 			log.Warnf("failed to refresh dns cache for %v: %+v", p.qi, err)
 		}
-	}(c, p, cand.key)
+	}(c, p, key)
 }
 
 // forwardError applies the forwarding-failure policy: wrap the error with its
 // routing context, count it, and mark the dialer unavailable when the failure
 // says something about the route. It returns nil when the error came with a
 // usable response, in which case the caller carries on with that response.
-func (c *DnsController) forwardError(err error, cand *dnsForwardCandidate, queryInfo queryInfo, dnsResp *dnsResponseData) error {
+func (c *DnsController) forwardError(err error, dialArg *dialArgument, queryInfo queryInfo, dnsResp *dnsResponseData) error {
 	isNetError, isClosed, isTimeout, isTemporary := GetNetErrorInfo(err)
-	if !isNetError || isClosed || !dnsResponse(dnsResp.respData) || (!isTimeout && cand.dialArg.Dialer.NeedAliveState()) {
+	if !isNetError || isClosed || !dnsResponse(dnsResp.respData) || (!isTimeout && dialArg.Dialer.NeedAliveState()) {
 		err = common.
 			In("DialContext").
 			With("Is NetError", isNetError).
@@ -914,14 +983,14 @@ func (c *DnsController) forwardError(err error, cand *dnsForwardCandidate, query
 			With("Is Timeout", isTimeout).
 			With("qname", queryInfo.qname).
 			With("qtype", queryInfo.qtype).
-			With("Outbound", cand.dialArg.Outbound.Name).
-			With("Dialer", cand.dialArg.Dialer.Name).
+			With("Outbound", dialArg.Outbound.Name).
+			With("Dialer", dialArg.Dialer.Name).
 			Wrapf(err, "DNS dialSend error")
 		labels := [...]string{
-			cand.dialArg.Outbound.Name,
-			cand.dialArg.Dialer.Property.SubscriptionTag,
-			cand.dialArg.Dialer.Name,
-			cand.dialArg.networkType.String(),
+			dialArg.Outbound.Name,
+			dialArg.Dialer.Property.SubscriptionTag,
+			dialArg.Dialer.Name,
+			dialArg.networkType.String(),
 		}
 		common.Metrics.ErrorCount.With4(labels).Inc()
 
@@ -929,7 +998,7 @@ func (c *DnsController) forwardError(err error, cand *dnsForwardCandidate, query
 			return err
 		}
 		// !isTimeout && dialArgument.Dialer.NeedAliveState()
-		cand.dialArg.Dialer.ReportUnavailable()
+		dialArg.Dialer.ReportUnavailable()
 		return err
 	}
 	return nil
