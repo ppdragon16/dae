@@ -22,7 +22,12 @@ import (
 )
 
 type ResponseMatcherBuilder struct {
-	upstreamName2Id    map[string]uint8
+	upstreamName2Id map[string]uint8
+	// raceMemberIds maps a race group tag (base or via-bound shadow) to the
+	// upstream indices of its members. Responses are attributed to the member
+	// that answered, never to the group placeholder, so upstream(<tag>) must
+	// expand to these ids to be matchable.
+	raceMemberIds      map[string][]uint8
 	simulatedDomainSet []routing.DomainSet
 	ipSet              []*trie.Trie
 	macSet             []*trie.Trie
@@ -30,8 +35,8 @@ type ResponseMatcherBuilder struct {
 	rules              []responseMatchSet
 }
 
-func NewResponseMatcherBuilder(rules []*config_parser.RoutingRule, upstreamName2Id map[string]uint8, fallback config.FunctionOrString) (b *ResponseMatcherBuilder, err error) {
-	b = &ResponseMatcherBuilder{upstreamName2Id: upstreamName2Id}
+func NewResponseMatcherBuilder(rules []*config_parser.RoutingRule, upstreamName2Id map[string]uint8, fallback config.FunctionOrString, raceMemberIds map[string][]uint8) (b *ResponseMatcherBuilder, err error) {
+	b = &ResponseMatcherBuilder{upstreamName2Id: upstreamName2Id, raceMemberIds: raceMemberIds}
 	rulesBuilder := routing.NewRulesBuilder()
 	rulesBuilder.RegisterFunctionParser(consts.Function_QName, routing.PlainParserFactory(b.addQName))
 	rulesBuilder.RegisterFunctionParser(consts.Function_QType, TypeParserFactory(b.addQType))
@@ -78,14 +83,31 @@ func (b *ResponseMatcherBuilder) upstreamToId(upstream string) (upstreamId const
 // that race(via:) responses are attributed to. Unknown names keep the
 // "not found" error.
 func (b *ResponseMatcherBuilder) idsForName(name string) (ids []consts.DnsResponseOutboundIndex, err error) {
-	if id, err := b.upstreamToId(name); err == nil {
+	// A race group is never the answering upstream: upstream2Index reports the
+	// member that answered. Expand the tag to its member ids so that
+	// upstream(race_dns) means "answered by any member of the group" - the
+	// group placeholder id itself would never match at query time.
+	if memberIds, isRace := b.raceMemberIds[name]; isRace {
+		for _, id := range memberIds {
+			ids = append(ids, consts.DnsResponseOutboundIndex(id))
+		}
+	} else if id, err := b.upstreamToId(name); err == nil {
 		ids = append(ids, id)
 	}
 	prefix := name + "("
 	for key, id := range b.upstreamName2Id {
-		if key != name && strings.HasPrefix(key, prefix) && strings.HasSuffix(key, ")") {
-			ids = append(ids, consts.DnsResponseOutboundIndex(id))
+		if key == name || !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, ")") {
+			continue
 		}
+		// via-bound shadow of the named upstream: a shadow race group expands
+		// to its members, a shadow upstream contributes its own id.
+		if memberIds, isRace := b.raceMemberIds[key]; isRace {
+			for _, memberId := range memberIds {
+				ids = append(ids, consts.DnsResponseOutboundIndex(memberId))
+			}
+			continue
+		}
+		ids = append(ids, consts.DnsResponseOutboundIndex(id))
 	}
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("upstream %v not found; please define it in \"dns.upstream\"", strconv.Quote(name))

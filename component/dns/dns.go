@@ -42,6 +42,10 @@ type Dns struct {
 	// raceTag2Members maps a race group tag to its member specs (raw links or
 	// plain upstream tags), kept so via-bound shadow groups can be built.
 	raceTag2Members map[string][]string
+	// raceTag2MemberIds maps a race group tag (base or via-bound shadow) to its
+	// members' upstream indices, so response rules can expand upstream(<tag>)
+	// into "answered by any member".
+	raceTag2MemberIds map[string][]uint8
 }
 
 // Release frees shared interned structures held by the request/response
@@ -232,7 +236,7 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 	}
 	// Parse response routing.
 	s.hasResponseRules = len(dns.Routing.Response.Rules) > 0
-	respMatcherBuilder, err := NewResponseMatcherBuilder(dns.Routing.Response.Rules, upstreamName2Id, dns.Routing.Response.Fallback)
+	respMatcherBuilder, err := NewResponseMatcherBuilder(dns.Routing.Response.Rules, upstreamName2Id, dns.Routing.Response.Fallback, s.raceTag2MemberIds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build DNS response routing: %w", err)
 	}
@@ -308,6 +312,10 @@ func (s *Dns) addRaceGroup(tag, link string, predefined map[string]*url.URL, ups
 		s.raceTag2Members = map[string][]string{}
 	}
 	s.raceTag2Members[tag] = specs
+	if s.raceTag2MemberIds == nil {
+		s.raceTag2MemberIds = map[string][]uint8{}
+	}
+	s.raceTag2MemberIds[tag] = memberIndices
 	placeholder := s.registerRaceGroup(tag, memberIndices, opt)
 	// Pre-register under the tag so response rules can reference the group by
 	// name even when no request rule does.
@@ -364,6 +372,10 @@ func (s *Dns) shadowRaceGroup(baseTag, shadowName, outboundName string, viaOutbo
 		}
 		memberIndices = append(memberIndices, subIdx)
 	}
+	if s.raceTag2MemberIds == nil {
+		s.raceTag2MemberIds = map[string][]uint8{}
+	}
+	s.raceTag2MemberIds[shadowName] = memberIndices
 	return s.registerRaceGroup(shadowName, memberIndices, opt), nil
 }
 

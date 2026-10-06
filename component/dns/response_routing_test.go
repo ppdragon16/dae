@@ -37,7 +37,7 @@ func testResponseFunction(name string, values ...string) *config_parser.Function
 
 func buildTestResponseMatcher(t *testing.T, rules []*config_parser.RoutingRule, fallback string) *ResponseMatcher {
 	t.Helper()
-	b, err := NewResponseMatcherBuilder(rules, nil, fallback)
+	b, err := NewResponseMatcherBuilder(rules, nil, fallback, nil)
 	if err != nil {
 		t.Fatalf("NewResponseMatcherBuilder() error = %v", err)
 	}
@@ -252,7 +252,7 @@ func TestResponseMatcherUpstreamCoversViaDesugaredNames(t *testing.T) {
 	rules := []*config_parser.RoutingRule{
 		testResponseRule("accept", testResponseFunction("upstream", "cf_dns", "g_dns")),
 	}
-	b, err := NewResponseMatcherBuilder(rules, upstreamName2Id, "reject")
+	b, err := NewResponseMatcherBuilder(rules, upstreamName2Id, "reject", nil)
 	if err != nil {
 		t.Fatalf("NewResponseMatcherBuilder() error = %v", err)
 	}
@@ -295,7 +295,7 @@ func TestResponseMatcherUnknownUpstreamName(t *testing.T) {
 	rules := []*config_parser.RoutingRule{
 		testResponseRule("accept", testResponseFunction("upstream", "nope")),
 	}
-	_, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 5}, "reject")
+	_, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 5}, "reject", nil)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected not-found error, got %v", err)
 	}
@@ -313,7 +313,7 @@ func TestResponseMatcherRCode(t *testing.T) {
 	rules := []*config_parser.RoutingRule{
 		testResponseRule("accept", testResponseFunction("rcode", "nxdomain", "servfail")),
 	}
-	b, err := NewResponseMatcherBuilder(rules, nil, "reject")
+	b, err := NewResponseMatcherBuilder(rules, nil, "reject", nil)
 	if err != nil {
 		t.Fatalf("NewResponseMatcherBuilder() error = %v", err)
 	}
@@ -365,7 +365,7 @@ func TestResponseSelectRCodeNxdomainAccept(t *testing.T) {
 		testResponseRule("accept", testResponseFunction("rcode", "nxdomain")),
 		testResponseRule("g_dns", testResponseFunction("upstream", "cf_dns")),
 	}
-	b, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 0, "g_dns": 1}, "reject")
+	b, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 0, "g_dns": 1}, "reject", nil)
 	if err != nil {
 		t.Fatalf("NewResponseMatcherBuilder: %v", err)
 	}
@@ -395,5 +395,69 @@ func TestResponseSelectRCodeNxdomainAccept(t *testing.T) {
 	}
 	if idx != consts.DnsResponseOutboundIndex(1) {
 		t.Fatalf("noerror: got index %d, want 1", idx)
+	}
+}
+
+// TestResponseMatcherExpandsRaceGroupTag pins that upstream(<race tag>) expands
+// to the group's member ids. Responses are attributed to the answering member
+// (upstream2Index), never to the group placeholder, so without the expansion the
+// rule compiles but can never fire - and its negation would always fire.
+func TestResponseMatcherExpandsRaceGroupTag(t *testing.T) {
+	ctx := context.Background()
+	memberCf, err := NewUpstream(ctx, mustURL(t, "udp://1.1.1.1:53"), "")
+	if err != nil {
+		t.Fatalf("member cf: %v", err)
+	}
+	memberG, err := NewUpstream(ctx, mustURL(t, "udp://8.8.8.8:53"), "")
+	if err != nil {
+		t.Fatalf("member g: %v", err)
+	}
+	other, err := NewUpstream(ctx, mustURL(t, "udp://223.5.5.5:53"), "")
+	if err != nil {
+		t.Fatalf("other: %v", err)
+	}
+	s := &Dns{
+		upstream: []*UpstreamResolver{
+			{Raw: mustURL(t, "udp://1.1.1.1:53"), upstream: memberCf, init: 1}, // 0: cf_dns
+			{Raw: mustURL(t, "udp://8.8.8.8:53"), upstream: memberG, init: 1},  // 1: g_dns
+			{Raw: mustURL(t, "race://race_dns")},                               // 2: placeholder
+			{Raw: mustURL(t, "udp://223.5.5.5:53"), upstream: other, init: 1},  // 3: cn_dns
+		},
+		raceGroupIndices: map[uint8][]uint8{2: {0, 1}},
+		upstream2Index:   map[*Upstream]int{memberCf: 0, memberG: 1, other: 3},
+	}
+	rules := []*config_parser.RoutingRule{
+		testResponseRule("reject", testResponseFunction("upstream", "race_dns")),
+	}
+	b, err := NewResponseMatcherBuilder(rules,
+		map[string]uint8{"cf_dns": 0, "g_dns": 1, "race_dns": 2, "cn_dns": 3}, "accept",
+		map[string][]uint8{"race_dns": {0, 1}})
+	if err != nil {
+		t.Fatalf("NewResponseMatcherBuilder: %v", err)
+	}
+	s.respMatcher, err = b.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ips := []netip.Addr{netip.MustParseAddr("1.2.3.4")}
+	for _, tc := range []struct {
+		name       string
+		from       *Upstream
+		wantReject bool
+	}{
+		{"cf_dns member", memberCf, true},
+		{"g_dns member", memberG, true},
+		{"unrelated upstream", other, false},
+	} {
+		idx, _, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), ips,
+			uint16(dnsmessage.RcodeSuccess), tc.from, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
+		if err != nil {
+			t.Fatalf("%s: ResponseSelect: %v", tc.name, err)
+		}
+		gotReject := idx == consts.DnsResponseOutboundIndex_Reject
+		if gotReject != tc.wantReject {
+			t.Fatalf("%s: reject=%v, want %v", tc.name, gotReject, tc.wantReject)
+		}
 	}
 }

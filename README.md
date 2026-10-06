@@ -332,9 +332,10 @@ Notes:
   it — without an rcode rule, every NXDOMAIN from that upstream triggers a
   re-resolution round-trip. Trade-off: a name its upstream answers with
   NXDOMAIN is no longer recovered by the re-resolution.
-- Race groups (upstream-section) cannot be referenced here: re-resolve through
-  a concrete upstream instead. Responses answered by race members still match
-  `upstream(...)` by the member's tag.
+- `upstream(<race tag>)` matches a response answered by **any member** of that
+  race group (the group itself never answers; responses are attributed to the
+  member that did). A race group cannot be used as the re-resolution target,
+  though — name a concrete upstream instead.
 - `upstream(...)` matches the upstream the response came from. A bare name also
   covers the `via:`-bound shadow members: a response answered through
   `race_dns(via: ai)` matches `upstream(cf_dns)`, `upstream('cf_dns(ai)')`, or

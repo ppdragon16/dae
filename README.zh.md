@@ -327,11 +327,13 @@ response {
   形式污染的域名不会再被重解析找回。
 - `upstream(...)` 匹配"应答来自哪个 upstream"。裸名同时覆盖 `via:` 绑定出的影子成员：
   经 `race_dns(via: ai)` 应答的响应会被 `upstream(cf_dns)`、`upstream('cf_dns(ai)')`
-  或组名整体（`upstream(race_dns)`）命中。
+  或组名整体（`upstream(race_dns)`）命中——**组名会展开为该组的所有成员**（组本身从不应答，
+  应答总是归属到具体成员）。
 - 必须用 `!upstream(...)` 排除重解析目标本身：否则重解析得到的应答会再次命中同一条规则，
   耗尽查找深度上限（3），查询变成 SERVFAIL。
 - `!ip(geoip:private)` 把局域网/静态条目应答排除出重解析：它们本就是有意的应答，公网上游只会
   用 NXDOMAIN 覆盖它们。
+- race 组**不能**作为重解析的目标（response 侧不支持 race 目标）：请写具体 upstream。
 - 重解析得到的应答与普通应答一样写入缓存，后续相同查询直接命中缓存，只重跑（廉价的）response 匹配。
 - 支持 `!` 取反、多值（`upstream(a, b)` = a 或 b）、以及与其它匹配器（`qtype`、`rcode`、`ip`、
   `mac`、`sip`、`qname`）的 `&&` 组合。
