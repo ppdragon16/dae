@@ -251,8 +251,15 @@ func TestRaceExpiredEntriesFallThroughToRacingRefresh(t *testing.T) {
 	if err := c.handleDNSRequestByUpstream(raceTestAnswer(t, qname, netip.IPv4Unspecified()), req, qi, groupUpstream, dnsResp); err != nil {
 		t.Fatalf("handleDNSRequestByUpstream: %v", err)
 	}
-	if ips, _ := dnsAnswers(dnsResp.respData); len(ips) != 1 {
-		t.Fatalf("expected the stale answer to be served, got %v", ips)
+	served, _ := dnsAnswers(dnsResp.respData)
+	if len(served) != 1 {
+		t.Fatalf("expected the stale answer to be served, got %v", served)
+	}
+	// The first member in config order is the one whose expired entry answers,
+	// exactly as a fresh entry would: a stale answer must not depend on which
+	// member happened to be probed first at runtime.
+	if served[0] != ipA {
+		t.Fatalf("stale answer served from %v, want member A's %v", served[0], ipA)
 	}
 
 	// Both members must have been dialed: the stale serve must not have

@@ -838,13 +838,17 @@ func (c *DnsController) forwardDNSRaceGroup(
 			// this gate a downed member is redialed once per query.
 			c.refreshDNSInBackground(data, queryInfo, cand.upstream, &cand.dialArg, key)
 		}
-		// The first FRESH entry in config order answers, and a stale answer is
-		// only used while no fresh one has been seen - a later fresh entry
-		// still takes over. Every expired entry is refreshed above regardless
-		// of which one answers, so the group's caches stay warm.
-		if chosenUpstream != nil && (chosenFresh || expired) {
+		if chosenFresh {
+			// A fresh entry already answers; the remaining members are only
+			// probed so their expired entries get refreshed above.
 			continue
 		}
+		if expired && chosenUpstream != nil {
+			// Keep the first stale entry in config order.
+			continue
+		}
+		// Nothing chosen yet, or a fresh entry takes over from an earlier
+		// stale one.
 		*out = cand.dialArg
 		c.useCachedResponse(queryInfo, data, dnsResp, cand.upstream, respData, isNew)
 		chosenUpstream, chosenFresh = cand.upstream, !expired
