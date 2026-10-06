@@ -730,12 +730,28 @@ func (c *DnsController) forwardDNSSingle(
 		c.useCachedResponse(queryInfo, data, dnsResp, upstream, respData, isNew)
 		return upstream, nil
 	}
-	if err := c.dialSend(data, upstream, dialArg, queryInfo, dnsResp); err != nil {
-		if err = c.forwardError(err, dialArg, queryInfo, dnsResp); err != nil {
-			return nil, err
-		}
+	if err := c.forwardOne(data, upstream, dialArg, queryInfo, dnsResp); err != nil {
+		return nil, err
 	}
 	return upstream, nil
+}
+
+// forwardOne sends the query to one already-chosen upstream and files the
+// answer, applying the forwarding-failure policy (nil means the error came with
+// a usable response and the caller carries on with it).
+func (c *DnsController) forwardOne(
+	data []byte,
+	upstream *dns.Upstream,
+	dialArg *dialArgument,
+	queryInfo queryInfo,
+	dnsResp *dnsResponseData,
+) error {
+	if err := c.dialSend(data, upstream, dialArg, queryInfo, dnsResp); err != nil {
+		if err = c.forwardError(err, dialArg, queryInfo, dnsResp); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dnsForwardCandidate is one member of a race group in a single lookup round.
@@ -855,11 +871,11 @@ func (c *DnsController) forwardDNSRaceGroup(
 	// Miss: forward. A single candidate sends directly; a race group's members
 	// send concurrently and the first success wins.
 	if len(usable) == 1 {
+		// Filtering left exactly one member: same as a plain upstream, only
+		// its dialer was chosen as part of the group.
 		cand := &usable[0]
-		if err := c.dialSend(data, cand.upstream, &cand.dialArg, queryInfo, dnsResp); err != nil {
-			if err = c.forwardError(err, &cand.dialArg, queryInfo, dnsResp); err != nil {
-				return nil, err
-			}
+		if err := c.forwardOne(data, cand.upstream, &cand.dialArg, queryInfo, dnsResp); err != nil {
+			return nil, err
 		}
 		*out = cand.dialArg
 		return cand.upstream, nil

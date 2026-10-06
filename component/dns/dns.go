@@ -126,11 +126,6 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 		if err := s.addRaceGroup(group.tag, group.link, predefinedUpstreamNames, upstreamName2Id, opt); err != nil {
 			return nil, err
 		}
-		dummy, err := url.Parse("race://" + group.tag)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create race upstream URL: %w", err)
-		}
-		predefinedUpstreamNames[group.tag] = dummy
 	}
 	for _, rule := range dns.Routing.Request.Rules {
 		var urlKey string
@@ -315,6 +310,21 @@ func (s *Dns) addRaceGroup(tag, link string, predefined map[string]*url.URL, ups
 		})
 		upstreamName2Id[spec] = idx
 		memberIndices = append(memberIndices, idx)
+	}
+	if len(memberIndices) == 1 {
+		// A single-member race group is a plain upstream in disguise: bind the
+		// tag straight to the member and skip the group machinery, so neither
+		// the query path nor response matching ever sees a degenerate group.
+		// The member's URL goes under the tag too, so rule references compile
+		// exactly like references to a declared upstream - and a tag collision
+		// is reported as the duplicate upstream tag it is.
+		if _, dup := predefined[tag]; dup {
+			return fmt.Errorf("%w: duplicate upstream tag %q", ErrBadUpstreamFormat, tag)
+		}
+		memberIdx := memberIndices[0]
+		upstreamName2Id[tag] = memberIdx
+		predefined[tag] = s.upstream[memberIdx].Raw
+		return nil
 	}
 	placeholder := s.registerRaceGroup(tag, specs, memberIndices, opt)
 	// Pre-register under the tag so response rules can reference the group by

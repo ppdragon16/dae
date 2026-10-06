@@ -336,3 +336,58 @@ func TestRaceMissForwardsOnEveryMember(t *testing.T) {
 		t.Fatalf("race miss did not forward on every member: dialer a calls=%d, dialer b calls=%d", a, b)
 	}
 }
+
+// TestSingleMemberRaceGroupBehavesLikeSingleUpstream pins that the race path's
+// degenerate branch - a group whose members filter down to one - answers like a
+// plain upstream. Configs cannot produce a one-member group any more (dns.New
+// normalizes it into that upstream), so this guards the hand-built case.
+func TestSingleMemberRaceGroupBehavesLikeSingleUpstream(t *testing.T) {
+	common.InitMetrics()
+	option := &dialer.GlobalOption{
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{"1.1.1.1:53"}},
+		CheckInterval:     time.Hour,
+	}
+	proxy := &raceStubProxy{}
+	d := dialer.NewDialer(proxy, option, &dialer.Property{Property: D.Property{Name: "a"}}, false)
+	group := outbound.NewDialerGroup(option, "grp-a", []*dialer.Dialer{d}, []*dialer.Annotation{{}},
+		dialer.DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_Fixed, FixedIndex: 0},
+		func(alive bool, networkType *common.NetworkType) {})
+	up := raceTestUpstream("1.1.1.1")
+	c := &DnsController{
+		enableCache:      true,
+		dnsCache:         NewCommonDnsCache(),
+		dnsCacheHashSeed: maphash.MakeSeed(),
+		routing:          &dns.Dns{},
+		matchBitmap:      func(string, []uint32) {},
+		bestDialerChooser: func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error {
+			outArg.Outbound, outArg.Dialer = group, d
+			outArg.networkType = common.NETWORK_UDP4
+			return nil
+		},
+	}
+	const qname = "solo.example.com"
+	key := c.GetHashKey(qname, uint16(dnsmessage.TypeA), group, d)
+	ip := netip.MustParseAddr("198.51.100.7")
+	c.dnsCache.Save(key, raceTestAnswer(t, qname, ip), 600, false)
+	c.dnsCache.Get(key) // consume IsNew
+
+	req := ObtainDnsRequest(
+		netip.MustParseAddrPort("192.168.16.129:44081"),
+		netip.MustParseAddrPort("8.8.8.8:53"),
+		&bpfRoutingResult{}, false)
+	defer RecycleDnsRequest(req)
+	solo := &dns.Upstream{
+		Scheme:    dns.UpstreamScheme_Race,
+		Hostname:  "race_solo",
+		RaceGroup: &dns.RaceGroup{Tag: "race_solo", Members: []*dns.Upstream{up}},
+	}
+	dnsResp := &dnsResponseData{}
+	qi := queryInfo{qname: qname, qtype: uint16(dnsmessage.TypeA)}
+	if err := c.handleDNSRequestByUpstream(raceTestAnswer(t, qname, netip.IPv4Unspecified()), req, qi, solo, dnsResp); err != nil {
+		t.Fatalf("handleDNSRequestByUpstream: %v", err)
+	}
+	served, _ := dnsAnswers(dnsResp.respData)
+	if len(served) != 1 || served[0] != ip {
+		t.Fatalf("solo group answered %v, want the cached %v", served, ip)
+	}
+}

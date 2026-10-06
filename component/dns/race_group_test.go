@@ -303,11 +303,53 @@ func TestResponseSelectRaceTargetYieldsGroupUpstream(t *testing.T) {
 func TestDuplicateRaceGroupTagRejected(t *testing.T) {
 	_, err := New(&config.Dns{
 		Upstream: []config.KeyableString{
-			"race_dns:race(udp://1.1.1.1:53)",
-			"race_dns:race(udp://8.8.8.8:53)",
+			"race_dns:race(udp://1.1.1.1:53,udp://8.8.8.8:53)",
+			"race_dns:race(udp://8.8.4.4:53,udp://8.8.8.4:53)",
 		},
 	}, &NewOption{UpstreamReadyCallback: func(*Upstream) {}}, map[string]uint8{})
 	if err == nil || !contains(err.Error(), "duplicate race group tag") {
 		t.Fatalf("error = %v, want a duplicate-tag error", err)
+	}
+
+	// A single-member group is normalized into a plain upstream, so its tag
+	// colliding with another declaration is a duplicate *upstream* tag.
+	_, err = New(&config.Dns{
+		Upstream: []config.KeyableString{
+			"race_dns:race(udp://1.1.1.1:53)",
+			"race_dns:race(udp://8.8.8.8:53)",
+		},
+	}, &NewOption{UpstreamReadyCallback: func(*Upstream) {}}, map[string]uint8{})
+	if err == nil || !contains(err.Error(), "duplicate upstream tag") {
+		t.Fatalf("error = %v, want a duplicate upstream tag error", err)
+	}
+}
+
+// TestSingleMemberRaceGroupNormalizedToPlainUpstream pins that a race group
+// declared with a single member never becomes a group at all: the tag binds to
+// the member, and a rule reference compiles exactly like a reference to a
+// declared upstream (its own resolver, like every plain reference).
+func TestSingleMemberRaceGroupNormalizedToPlainUpstream(t *testing.T) {
+	s, err := New(&config.Dns{
+		Upstream: []config.KeyableString{
+			"solo_dns:race(udp://1.1.1.1:53)",
+		},
+		Routing: config.DnsRouting{
+			Request: config.DnsRequestRouting{
+				Rules:    []*config_parser.RoutingRule{outboundRule("solo_dns")},
+				Fallback: "asis",
+			},
+			Response: config.DnsResponseRouting{Fallback: "accept"},
+		},
+	}, &NewOption{UpstreamReadyCallback: func(*Upstream) {}}, map[string]uint8{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if len(s.raceGroups) != 0 {
+		t.Fatalf("single-member group is still registered as a race group")
+	}
+	// The member resolver plus the rule's own reference - exactly what a
+	// declared upstream referenced from a rule produces.
+	if len(s.upstream) != 2 {
+		t.Fatalf("got %d resolvers, want the member and the rule's reference", len(s.upstream))
 	}
 }

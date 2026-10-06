@@ -314,7 +314,9 @@ flight per member, so that refresh races the group as well.
 `AAAA` queries skip members whose dialer cannot proxy IPv6 and are answered
 empty only when no member can. The race covers the forwarding step: response
 rules run on the winning answer, and a rule that sends the query back to the
-group starts another round against its members. Tags must be unique.
+group starts another round against its members. Tags must be unique, and a
+group with a single member is not a group at all: at load time its tag binds
+straight to that upstream, exactly as if it had been declared directly.
 
 ### `dns/response`
 
