@@ -283,19 +283,27 @@ qname(keyword:gemini, keyword:openai) -> proxy_dns(via: ai)
 
 ### `dns/race`
 
-并发查询多个上游，使用最先返回的响应：
+在 `upstream` 段定义 race 组——组内上游并发查询，使用最先返回的响应：
 
 ```shell
-qname(geosite:gfw) -> race(proxy_dns, googledns)
+upstream {
+    race_dns: 'race(udp://1.1.1.1:53, udp://8.8.8.8:53)'
+}
 ```
 
-可用尾随的 `via:` 把所有参与竞速的上游绑定到同一个 outbound group——在同一条路径上竞速，但各成员仍会在组内选择最优节点：
+在 routing 里按 tag 引用：
 
 ```shell
-qname(geosite:gfw) -> race(proxy_dns, googledns, via: ai)
+qname(geosite:gfw) -> race_dns
 ```
 
-`via:` 写在参数列表的任意位置均可。内部会将每个成员脱糖为虚拟上游 `proxy_dns(ai)` / `googledns(ai)`——与单独的 `proxy_dns(via: ai)` 规则共用同一个上游实例和缓存身份。
+成员既可以是裸 link，也可以是其它 upstream 的 tag。组还可在引用处绑定 outbound group——所有成员经由该组出站，但仍各自在组内选择最优节点：
+
+```shell
+qname(geosite:gfw) -> race_dns(via: ai)
+```
+
+条目过期后的后台刷新同样会对整个组进行 race。
 
 ### `dns/response`
 
@@ -317,9 +325,9 @@ response {
   （大小写不敏感）或数字（`rcode(3)`）。NXDOMAIN 没有任何应答 IP，`ip(...)` 永远匹配不上它——
   没有 rcode 规则时，非 race 成员的每个 NXDOMAIN 都会触发一轮重解析。代价：被上游以 NXDOMAIN
   形式污染的域名不会再被 race 找回。
-- `upstream(...)` 匹配"应答来自哪个 upstream"。裸名同时覆盖 `via:` 脱糖出的虚拟条目：
-  `race(cf_dns, g_dns, via: ai)` 的应答会被 `upstream(cf_dns)`、`upstream('cf_dns(ai)')`
-  或组名整体命中。
+- `upstream(...)` 匹配"应答来自哪个 upstream"。裸名同时覆盖 `via:` 绑定出的影子成员：
+  经 `race_dns(via: ai)` 应答的响应会被 `upstream(cf_dns)`、`upstream('cf_dns(ai)')`
+  或组名整体（`upstream(race_dns)`）命中。
 - 必须用 `!upstream(...)` 排除重解析目标本身：否则重解析得到的应答会再次命中同一条规则，
   耗尽查找深度上限（3），查询变成 SERVFAIL。
 - `!ip(geoip:private)` 把局域网/静态条目应答排除出重解析：它们本就是有意的应答，公网上游只会

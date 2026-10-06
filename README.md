@@ -283,23 +283,30 @@ qname(keyword:gemini, keyword:openai) -> proxy_dns(via: ai)
 
 ### `dns/race`
 
-Query multiple upstreams concurrently and use the first response:
+Define a race group in the `upstream` section — it queries its upstreams
+concurrently and uses the first response:
 
 ```shell
-qname(geosite:gfw) -> race(proxy_dns, googledns)
+upstream {
+    race_dns: 'race(udp://1.1.1.1:53, udp://8.8.8.8:53)'
+}
 ```
 
-A trailing `via:` binds every raced upstream to one outbound group — race them
-over the same path while each member still picks the best node inside it:
+Reference it from routing by tag:
 
 ```shell
-qname(geosite:gfw) -> race(proxy_dns, googledns, via: ai)
+qname(geosite:gfw) -> race_dns
 ```
 
-`via:` may appear anywhere in the argument list. Internally each member is
-desugared to its virtual upstream `proxy_dns(ai)` / `googledns(ai)` — the same
-instance a standalone `proxy_dns(via: ai)` rule uses — so both forms share one
-upstream entry and one cache identity.
+Members may be raw links or the tags of other upstreams. The group can also be
+bound to an outbound group at the reference site — every member is then dialed
+through that group while still picking the best node inside it:
+
+```shell
+qname(geosite:gfw) -> race_dns(via: ai)
+```
+
+The background refresh of an expired entry races the whole group too.
 
 ### `dns/response`
 
@@ -312,7 +319,7 @@ for a foreign name, re-query through the race group:
 ```shell
 response {
   rcode(nxdomain) -> accept   # names that don't exist: accept, don't re-resolve
-  !upstream(cf_dns, g_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race(cf_dns, g_dns)
+  !upstream(cf_dns, g_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race_dns
   fallback: accept
 }
 ```
@@ -326,9 +333,9 @@ Notes:
   a re-resolution round-trip. Trade-off: a name its upstream answers with
   NXDOMAIN is no longer recovered by the race.
 - `upstream(...)` matches the upstream the response came from. A bare name also
-  covers the `via:`-desugared virtual entries: a response answered by
-  `race(cf_dns, g_dns, via: ai)` matches `upstream(cf_dns)`,
-  `upstream('cf_dns(ai)')`, or the group as a whole.
+  covers the `via:`-bound shadow members: a response answered through
+  `race_dns(via: ai)` matches `upstream(cf_dns)`, `upstream('cf_dns(ai)')`, or
+  the group as a whole (`upstream(race_dns)`).
 - Excluding the re-resolution target with `!upstream(...)` is required: it stops
   the re-resolved answer from matching the same rule again and exhausting the
   lookup-depth bound (3), which would turn the query into SERVFAIL.

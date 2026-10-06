@@ -10,6 +10,7 @@ import (
 	"hash/maphash"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,5 +150,119 @@ func TestRaceCacheSweepServesFirstMemberInConfigOrder(t *testing.T) {
 		if got := answerIP(); got != ipA {
 			t.Fatalf("iteration %d answered %v, want stable %v", i, got, ipA)
 		}
+	}
+}
+
+// countingStubProxy counts dials and hands back a pre-closed pipe so writes
+// fail fast without any network.
+type countingStubProxy struct {
+	netproxy.Dialer
+	calls atomic.Int32
+}
+
+func (s *countingStubProxy) Alive() bool  { return true }
+func (s *countingStubProxy) Name() string { return "counting-stub" }
+
+func (s *countingStubProxy) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	s.calls.Add(1)
+	client, peer := net.Pipe()
+	_ = peer.Close() // pre-closed peer: writes fail immediately
+	return client, nil
+}
+
+func (s *countingStubProxy) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) {
+	return nil, nil
+}
+
+// TestRaceExpiredEntriesFallThroughToRacingRefresh pins the optimistic-cache
+// behaviour for a race group: when every member's cache entry is expired, the
+// sweep must NOT serve the stale answer and stop there. Instead the members
+// must all be dialed — the stale answer is served once, while every member's
+// background refresh flies on its own (upstream is part of the flight key), so
+// the refresh itself races the whole group and the first success repopulates
+// the cache.
+func TestRaceExpiredEntriesFallThroughToRacingRefresh(t *testing.T) {
+	common.InitMetrics()
+	option := &dialer.GlobalOption{
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{"1.1.1.1:53"}},
+		CheckInterval:     time.Hour,
+	}
+	proxyA := &countingStubProxy{}
+	proxyB := &countingStubProxy{}
+	dialerA := dialer.NewDialer(proxyA, option, &dialer.Property{Property: D.Property{Name: "a"}}, false)
+	dialerB := dialer.NewDialer(proxyB, option, &dialer.Property{Property: D.Property{Name: "b"}}, false)
+	newGroup := func(name string, d *dialer.Dialer) *outbound.DialerGroup {
+		return outbound.NewDialerGroup(option, name, []*dialer.Dialer{d}, []*dialer.Annotation{{}},
+			dialer.DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_Fixed, FixedIndex: 0},
+			func(alive bool, networkType *common.NetworkType) {})
+	}
+	groupA := newGroup("grp-a", dialerA)
+	groupB := newGroup("grp-b", dialerB)
+
+	upA := raceTestUpstream("1.1.1.1")
+	upB := raceTestUpstream("8.8.8.8")
+	c := &DnsController{
+		enableCache:      true,
+		dnsCache:         NewCommonDnsCache(),
+		dnsCacheHashSeed: maphash.MakeSeed(),
+		routing:          &dns.Dns{},
+		matchBitmap:      func(string, []uint32) {},
+		bestDialerChooser: func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error {
+			if upstream == upA {
+				outArg.Outbound, outArg.Dialer = groupA, dialerA
+			} else {
+				outArg.Outbound, outArg.Dialer = groupB, dialerB
+			}
+			outArg.networkType = common.NETWORK_UDP4
+			return nil
+		},
+	}
+
+	const qname = "stale.example.com"
+	keyA := c.GetHashKey(qname, uint16(dnsmessage.TypeA), groupA, dialerA)
+	keyB := c.GetHashKey(qname, uint16(dnsmessage.TypeA), groupB, dialerB)
+	ipA := netip.MustParseAddr("198.51.100.10")
+	ipB := netip.MustParseAddr("203.0.113.20")
+	c.dnsCache.Save(keyA, raceTestAnswer(t, qname, ipA), 600, false)
+	c.dnsCache.Save(keyB, raceTestAnswer(t, qname, ipB), 600, false)
+	// Age both entries past their TTL so the sweep sees them as expired.
+	for _, key := range []HashKey{keyA, keyB} {
+		if e, ok := c.dnsCache.cache.Get(key); ok {
+			e.FetchedAt = time.Now().Add(-2 * time.Hour)
+		}
+	}
+	// Consume the IsNew flag of both entries: the "new answer" epilogue in
+	// handleDNSRequestByUpstream updates the eBPF lookup cache, which this
+	// minimal controller has no core for (same trick as the sweep test).
+	c.dnsCache.Get(keyA)
+	c.dnsCache.Get(keyB)
+
+	req := ObtainDnsRequest(
+		netip.MustParseAddrPort("192.168.16.129:44081"),
+		netip.MustParseAddrPort("8.8.8.8:53"),
+		&bpfRoutingResult{}, false)
+	defer RecycleDnsRequest(req)
+	members := []*dns.Upstream{upA, upB}
+
+	dnsResp := &dnsResponseData{}
+	qi := queryInfo{qname: qname, qtype: uint16(dnsmessage.TypeA)}
+	if err := c.handleDNSRequestRace(raceTestAnswer(t, qname, netip.IPv4Unspecified()), req, qi, dnsResp, members); err != nil {
+		t.Fatalf("handleDNSRequestRace: %v", err)
+	}
+	if ips, _ := dnsAnswers(dnsResp.respData); len(ips) != 1 {
+		t.Fatalf("expected the stale answer to be served, got %v", ips)
+	}
+
+	// Both members must have been dialed: the stale serve must not have
+	// stopped the group-wide background refresh.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if proxyA.calls.Load() >= 1 && proxyB.calls.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if a, b := proxyA.calls.Load(), proxyB.calls.Load(); a < 1 || b < 1 {
+		t.Fatalf("refresh did not race the group: dialer a calls=%d, dialer b calls=%d", a, b)
 	}
 }

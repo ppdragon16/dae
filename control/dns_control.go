@@ -789,7 +789,13 @@ func (c *DnsController) handleDNSRequestRace(
 			continue
 		}
 		hashKey := c.GetHashKey(queryInfo.qname, queryInfo.qtype, dialArg.Outbound, dialArg.Dialer)
-		if c.dnsCache.Has(hashKey) {
+		// Only a FRESH entry short-circuits the race (first member in config
+		// order wins, deterministically). An expired entry must fall through to
+		// the spawned members below: each member's dialSend then serves the
+		// stale copy and launches its own background refresh — and since the
+		// flight key includes the upstream, the optimistic-cache refresh races
+		// the whole group instead of a single member.
+		if c.dnsCache.Fresh(hashKey, time.Now()) {
 			return c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, dnsResp)
 		}
 	}

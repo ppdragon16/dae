@@ -66,6 +66,28 @@ func (c *commonDnsCache) Has(key HashKey) bool {
 	return ok
 }
 
+// Fresh reports whether key holds an entry that is not expired yet, mirroring
+// the expiry rule of copyResponseFromCache (client ttl below minClientTtl
+// counts as expired) without copying the payload.
+func (c *commonDnsCache) Fresh(key HashKey, now time.Time) bool {
+	e, ok := c.cache.Get(key)
+	if !ok {
+		return false
+	}
+	elapsed := uint32(uint32(time.Since(e.FetchedAt).Seconds()))
+	for _, offset := range e.TTLOffsets {
+		rawTtl := binary.BigEndian.Uint32(e.Data[offset : offset+4])
+		clientTtl := uint32(0)
+		if rawTtl > elapsed {
+			clientTtl = rawTtl - elapsed
+		}
+		if clientTtl < minClientTtl {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *commonDnsCache) Get(key HashKey) (resp []byte, expired bool, isNew bool) {
 	cache, ok := c.cache.Get(key)
 	if !ok {
