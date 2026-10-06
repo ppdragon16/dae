@@ -46,6 +46,9 @@ type Dns struct {
 	// members' upstream indices, so response rules can expand upstream(<tag>)
 	// into "answered by any member".
 	raceTag2MemberIds map[string][]uint8
+	// raceGroupUpstreams holds the synthetic group upstream per placeholder
+	// index. Members are filled lazily on first use.
+	raceGroupUpstreams map[uint8]*Upstream
 }
 
 // Release frees shared interned structures held by the request/response
@@ -126,14 +129,6 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 			return nil, fmt.Errorf("failed to create race upstream URL: %w", err)
 		}
 		predefinedUpstreamNames[group.tag] = dummy
-	}
-	// Race groups cannot be referenced from response routing: a group has no
-	// single upstream to attribute a response to. Fail at config load instead
-	// of surfacing as an unresolvable placeholder at query time.
-	for _, rule := range dns.Routing.Response.Rules {
-		if _, isRace := s.raceTag2GroupIdx[rule.Outbound.Name]; isRace {
-			return nil, fmt.Errorf("race group %q cannot be used in dns response routing: reference a concrete upstream instead", rule.Outbound.Name)
-		}
 	}
 	for _, rule := range dns.Routing.Request.Rules {
 		var urlKey string
@@ -400,6 +395,13 @@ func (s *Dns) registerRaceGroup(tag string, memberIndices []uint8, opt *NewOptio
 		s.raceTag2GroupIdx = map[string]uint8{}
 	}
 	s.raceTag2GroupIdx[tag] = placeholder
+	if s.raceGroupUpstreams == nil {
+		s.raceGroupUpstreams = map[uint8]*Upstream{}
+	}
+	s.raceGroupUpstreams[placeholder] = &Upstream{
+		Scheme:   UpstreamScheme_Race,
+		Hostname: tag,
+	}
 	return placeholder
 }
 
@@ -419,7 +421,50 @@ func (s *Dns) CheckUpstreamsFormat() error {
 }
 
 func (s *Dns) GetUpstream(upstreamIndex consts.DnsRequestOutboundIndex) (upstream *Upstream, err error) {
-	return s.upstream[upstreamIndex].GetUpstream()
+	return s.upstreamOrRaceGroup(uint8(upstreamIndex))
+}
+
+// upstreamOrRaceGroup resolves an upstream index that may denote a race group.
+// A race group yields its synthetic group upstream with Members attached - the
+// placeholder resolver itself must never be resolved, its dummy "race://" URL
+// has no scheme any forwarder understands.
+func (s *Dns) upstreamOrRaceGroup(idx uint8) (upstream *Upstream, err error) {
+	if _, isRace := s.raceGroupIndices[idx]; isRace {
+		if upstream = s.raceGroupUpstream(idx); upstream == nil {
+			return nil, fmt.Errorf("race group at index %d has no usable member", idx)
+		}
+		return upstream, nil
+	}
+	if int(idx) >= len(s.upstream) {
+		return nil, fmt.Errorf("bad upstream index: %v not in [0, %v]", idx, len(s.upstream)-1)
+	}
+	return s.upstream[idx].GetUpstream()
+}
+
+// raceGroupUpstream returns the synthetic group upstream for a race placeholder
+// index, resolving and caching its members on first use.
+func (s *Dns) raceGroupUpstream(idx uint8) *Upstream {
+	s.raceCacheMu.RLock()
+	u := s.raceGroupUpstreams[idx]
+	ready := u != nil && u.RaceGroup != nil && u.RaceGroup.Members != nil
+	tag := ""
+	if u != nil {
+		tag = u.Hostname
+	}
+	s.raceCacheMu.RUnlock()
+	if ready {
+		return u
+	}
+	members := s.GetRaceUpstreams(consts.DnsRequestOutboundIndex(idx))
+	if u == nil || len(members) == 0 {
+		return nil
+	}
+	s.raceCacheMu.Lock()
+	if u.RaceGroup == nil || u.RaceGroup.Members == nil {
+		u.RaceGroup = &RaceGroup{Tag: tag, Members: members}
+	}
+	s.raceCacheMu.Unlock()
+	return u
 }
 
 // GetRaceUpstreams returns resolved upstreams for a race group.
@@ -535,14 +580,9 @@ func (s *Dns) ResponseSelect(qname string, qtype uint16, ips []netip.Addr, rcode
 		if int(upstreamIndex) >= len(s.upstream) {
 			return 0, nil, fmt.Errorf("bad upstream index: %v not in [0, %v]", upstreamIndex, len(s.upstream)-1)
 		}
-		if _, isRace := s.raceGroupIndices[uint8(upstreamIndex)]; isRace {
-			// The target is a race group: its placeholder carries a dummy
-			// "race://" URL that GetUpstream cannot parse. Hand the caller a
-			// placeholder marker and let it re-run the race via
-			// RaceGroupMembers, which resolves the real member upstreams.
-			return upstreamIndex, &Upstream{Scheme: UpstreamScheme_Race}, nil
-		}
-		upstream, err = s.upstream[upstreamIndex].GetUpstream()
+		// Resolves a race-group target into its synthetic group upstream with
+		// Members attached, so callers can expand it without special cases.
+		upstream, err = s.upstreamOrRaceGroup(uint8(upstreamIndex))
 		if err != nil {
 			return 0, nil, err
 		}

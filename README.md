@@ -314,12 +314,13 @@ The `response` block matches a DNS **response** — by the upstream that answere
 it, the response code, the IPs in the answer, the qtype, or the client — and
 then accepts it, rejects it, or re-resolves the query through another upstream.
 The canonical use is anti-poisoning: if a domestic upstream answers a non-CN IP
-for a foreign name, re-query through a different upstream:
+for a foreign name, re-query through another upstream — a race group is allowed
+as the target, in which case its members are queried concurrently again:
 
 ```shell
 response {
   rcode(nxdomain) -> accept   # names that don't exist: accept, don't re-resolve
-  upstream(cf_dns) && !ip(geoip:private) && !ip(geoip:cn) -> g_dns
+  !upstream(race_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race_dns
   fallback: accept
 }
 ```
@@ -334,8 +335,9 @@ Notes:
   NXDOMAIN is no longer recovered by the re-resolution.
 - `upstream(<race tag>)` matches a response answered by **any member** of that
   race group (the group itself never answers; responses are attributed to the
-  member that did). A race group cannot be used as the re-resolution target,
-  though — name a concrete upstream instead.
+  member that did). A race group works as the re-resolution target too; the
+  lookup-depth bound spans the expansion, so a rule that does not exclude the
+  group's members converges to SERVFAIL instead of looping forever.
 - `upstream(...)` matches the upstream the response came from. A bare name also
   covers the `via:`-bound shadow members: a response answered through
   `race_dns(via: ai)` matches `upstream(cf_dns)`, `upstream('cf_dns(ai)')`, or

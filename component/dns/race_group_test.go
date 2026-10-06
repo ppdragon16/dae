@@ -6,8 +6,12 @@
 package dns
 
 import (
+	"context"
+	"net/netip"
 	"strings"
 	"testing"
+
+	dnsmessage "github.com/miekg/dns"
 
 	"github.com/daeuniverse/dae/common/consts"
 	"github.com/daeuniverse/dae/config"
@@ -194,4 +198,92 @@ func TestUpstreamRaceGroupValidation(t *testing.T) {
 
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
+}
+
+// TestRaceGroupUpstreamCarriesMembers pins the contract the request and
+// response paths rely on after the race refactor: resolving a race index yields
+// the synthetic group upstream with its members attached (never the
+// non-dialable placeholder), so callers can expand it without special cases.
+func TestRaceGroupUpstreamCarriesMembers(t *testing.T) {
+	s := newForRaceTest(t, outboundRule("race_dns"))
+
+	idx, ok := s.raceTag2GroupIdx["race_dns"]
+	if !ok {
+		t.Fatalf("race group tag not registered")
+	}
+	up, err := s.GetUpstream(consts.DnsRequestOutboundIndex(idx))
+	if err != nil {
+		t.Fatalf("GetUpstream(race): %v", err)
+	}
+	if !up.IsRaceGroup() {
+		t.Fatalf("GetUpstream(race) = scheme %q, want the race group upstream", up.Scheme)
+	}
+	if up.RaceGroup == nil || len(up.RaceGroup.Members) != 2 {
+		t.Fatalf("race group missing members: %+v", up.RaceGroup)
+	}
+	if up.RaceGroup.Members[0].Hostname != "1.1.1.1" || up.RaceGroup.Members[1].Hostname != "8.8.8.8" {
+		t.Fatalf("members resolved wrong: %v %v", up.RaceGroup.Members[0].Hostname, up.RaceGroup.Members[1].Hostname)
+	}
+	// Repeated resolution returns the same cached group upstream.
+	again, err := s.GetUpstream(consts.DnsRequestOutboundIndex(idx))
+	if err != nil || again != up {
+		t.Fatalf("GetUpstream(race) not cached: err=%v same=%v", err, again == up)
+	}
+}
+
+// TestResponseSelectRaceTargetYieldsGroupUpstream pins that a response rule may
+// re-resolve through a race group again (restored after the race refactor):
+// ResponseSelect hands back the group upstream with members attached, which the
+// request path then expands.
+func TestResponseSelectRaceTargetYieldsGroupUpstream(t *testing.T) {
+	ctx := context.Background()
+	memberCf, err := NewUpstream(ctx, mustURL(t, "udp://1.1.1.1:53"), "")
+	if err != nil {
+		t.Fatalf("member cf: %v", err)
+	}
+	memberG, err := NewUpstream(ctx, mustURL(t, "udp://8.8.8.8:53"), "")
+	if err != nil {
+		t.Fatalf("member g: %v", err)
+	}
+	s := &Dns{
+		upstream: []*UpstreamResolver{
+			{Raw: mustURL(t, "udp://1.1.1.1:53"), upstream: memberCf, init: 1}, // 0: cf_dns
+			{Raw: mustURL(t, "udp://8.8.8.8:53"), upstream: memberG, init: 1},  // 1: g_dns
+			{Raw: mustURL(t, "race://race_dns")},                               // 2: placeholder
+		},
+		raceGroupIndices: map[uint8][]uint8{2: {0, 1}},
+		raceGroupUpstreams: map[uint8]*Upstream{
+			2: {Scheme: UpstreamScheme_Race, Hostname: "race_dns"},
+		},
+		upstream2Index: map[*Upstream]int{memberCf: 0, memberG: 1},
+	}
+	rules := []*config_parser.RoutingRule{
+		testResponseRule("race_dns", testResponseFunction("upstream", "cf_dns")),
+	}
+	b, err := NewResponseMatcherBuilder(rules,
+		map[string]uint8{"cf_dns": 0, "g_dns": 1, "race_dns": 2}, "accept",
+		map[string][]uint8{"race_dns": {0, 1}})
+	if err != nil {
+		t.Fatalf("NewResponseMatcherBuilder: %v", err)
+	}
+	s.respMatcher, err = b.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ips := []netip.Addr{netip.MustParseAddr("1.2.3.4")}
+	idx, up, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), ips,
+		uint16(dnsmessage.RcodeSuccess), memberCf, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
+	if err != nil {
+		t.Fatalf("ResponseSelect(race target): %v", err)
+	}
+	if idx != consts.DnsResponseOutboundIndex(2) {
+		t.Fatalf("got index %d, want the race group index 2", idx)
+	}
+	if !up.IsRaceGroup() || up.RaceGroup == nil || len(up.RaceGroup.Members) != 2 {
+		t.Fatalf("race target must yield the group upstream with members, got scheme=%q group=%v", up.Scheme, up.RaceGroup)
+	}
+	if up.RaceGroup.Members[0] != memberCf || up.RaceGroup.Members[1] != memberG {
+		t.Fatal("members resolved in the wrong order")
+	}
 }

@@ -73,7 +73,7 @@ Race groups are defined in the "upstream" section, e.g. race_dns: 'race(udp://1.
 	"response": `DNS responses will follow this routing.
 Built-in outbound: accept, reject.
 Available functions: qname, qtype, ip, upstream.
-Race groups (upstream section) cannot be referenced here: re-resolve through a concrete upstream instead.`,
+A race group may be the re-resolution target (its members are queried concurrently again). Keep excluding it with !upstream(<tag>) so the re-resolved answer does not match the same rule again.`,
 }
 
 var GroupDesc = Desc{

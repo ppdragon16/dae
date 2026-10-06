@@ -309,12 +309,12 @@ qname(geosite:gfw) -> race_dns(via: ai)
 
 `response` 块匹配 DNS **应答**——按"应答来自哪个 upstream / 应答码 / 应答中的 IP / qtype / 客户端"——然后
 accept、reject，或换一个 upstream 重新解析。典型用途是防污染：国内上游对国外域名答出了非 CN IP，
-就换一个 upstream 重查：
+就换另一个 upstream 重查——目标也可以是 race 组，此时其成员会再次并发查询：
 
 ```shell
 response {
   rcode(nxdomain) -> accept   # 不存在的名字：直接接受，不重查
-  upstream(cf_dns) && !ip(geoip:private) && !ip(geoip:cn) -> g_dns
+  !upstream(race_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race_dns
   fallback: accept
 }
 ```
@@ -333,7 +333,7 @@ response {
   耗尽查找深度上限（3），查询变成 SERVFAIL。
 - `!ip(geoip:private)` 把局域网/静态条目应答排除出重解析：它们本就是有意的应答，公网上游只会
   用 NXDOMAIN 覆盖它们。
-- race 组**不能**作为重解析的目标（response 侧不支持 race 目标）：请写具体 upstream。
+- race 组**可以**作为重解析的目标（其成员再次并发查询）；查找深度上界会跨越 race 展开，因此若不排除该组成员，规则会在 depth 上限收敛为 SERVFAIL 而不是无限递归。
 - 重解析得到的应答与普通应答一样写入缓存，后续相同查询直接命中缓存，只重跑（廉价的）response 匹配。
 - 支持 `!` 取反、多值（`upstream(a, b)` = a 或 b）、以及与其它匹配器（`qtype`、`rcode`、`ip`、
   `mac`、`sip`、`qname`）的 `&&` 组合。

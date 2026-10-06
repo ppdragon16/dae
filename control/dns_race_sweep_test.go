@@ -10,6 +10,7 @@ import (
 	"hash/maphash"
 	"net"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,8 +131,9 @@ func TestRaceCacheSweepServesFirstMemberInConfigOrder(t *testing.T) {
 		t.Helper()
 		dnsResp := &dnsResponseData{}
 		qi := queryInfo{qname: qname, qtype: uint16(dnsmessage.TypeA)}
-		if err := c.handleDNSRequestRace(raceTestAnswer(t, qname, netip.IPv4Unspecified()), req, qi, dnsResp, members); err != nil {
-			t.Fatalf("handleDNSRequestRace: %v", err)
+		groupUpstream := &dns.Upstream{Scheme: dns.UpstreamScheme_Race, Hostname: "race_dns", RaceGroup: &dns.RaceGroup{Tag: "race_dns", Members: members}}
+		if err := c.handleRaceGroup(raceTestAnswer(t, qname, netip.IPv4Unspecified()), req, qi, groupUpstream, dnsResp, 0); err != nil {
+			t.Fatalf("handleRaceGroup: %v", err)
 		}
 		ips, _ := dnsAnswers(dnsResp.respData)
 		if len(ips) != 1 {
@@ -246,8 +248,9 @@ func TestRaceExpiredEntriesFallThroughToRacingRefresh(t *testing.T) {
 
 	dnsResp := &dnsResponseData{}
 	qi := queryInfo{qname: qname, qtype: uint16(dnsmessage.TypeA)}
-	if err := c.handleDNSRequestRace(raceTestAnswer(t, qname, netip.IPv4Unspecified()), req, qi, dnsResp, members); err != nil {
-		t.Fatalf("handleDNSRequestRace: %v", err)
+	groupUpstream := &dns.Upstream{Scheme: dns.UpstreamScheme_Race, Hostname: "race_dns", RaceGroup: &dns.RaceGroup{Tag: "race_dns", Members: members}}
+	if err := c.handleRaceGroup(raceTestAnswer(t, qname, netip.IPv4Unspecified()), req, qi, groupUpstream, dnsResp, 0); err != nil {
+		t.Fatalf("handleRaceGroup: %v", err)
 	}
 	if ips, _ := dnsAnswers(dnsResp.respData); len(ips) != 1 {
 		t.Fatalf("expected the stale answer to be served, got %v", ips)
@@ -264,5 +267,51 @@ func TestRaceExpiredEntriesFallThroughToRacingRefresh(t *testing.T) {
 	}
 	if a, b := proxyA.calls.Load(), proxyB.calls.Load(); a < 1 || b < 1 {
 		t.Fatalf("refresh did not race the group: dialer a calls=%d, dialer b calls=%d", a, b)
+	}
+}
+
+// TestDNSLookupDepthBoundSpansRaceExpansion pins that the lookup-depth guard
+// holds across a race-group boundary: a race member answers at the depth its
+// group was entered with, so a response rule that keeps re-resolving through
+// the group (without excluding its members) converges to an error instead of
+// recursing without bound.
+func TestDNSLookupDepthBoundSpansRaceExpansion(t *testing.T) {
+	common.InitMetrics()
+	option := &dialer.GlobalOption{
+		CheckDnsOptionRaw: dialer.CheckDnsOptionRaw{Raw: []string{"1.1.1.1:53"}},
+		CheckInterval:     time.Hour,
+	}
+	proxy := &countingStubProxy{}
+	d := dialer.NewDialer(proxy, option, &dialer.Property{Property: D.Property{Name: "a"}}, false)
+	group := outbound.NewDialerGroup(option, "grp-a", []*dialer.Dialer{d}, []*dialer.Annotation{{}},
+		dialer.DialerSelectionPolicy{Policy: consts.DialerSelectionPolicy_Fixed, FixedIndex: 0},
+		func(alive bool, networkType *common.NetworkType) {})
+	up := raceTestUpstream("1.1.1.1")
+	c := &DnsController{
+		enableCache:      true,
+		dnsCache:         NewCommonDnsCache(),
+		dnsCacheHashSeed: maphash.MakeSeed(),
+		routing:          &dns.Dns{},
+		matchBitmap:      func(string, []uint32) {},
+		bestDialerChooser: func(req *dnsRequest, upstream *dns.Upstream, outArg *dialArgument) error {
+			outArg.Outbound, outArg.Dialer = group, d
+			outArg.networkType = common.NETWORK_UDP4
+			return nil
+		},
+	}
+	req := ObtainDnsRequest(
+		netip.MustParseAddrPort("192.168.16.129:44081"),
+		netip.MustParseAddrPort("8.8.8.8:53"),
+		&bpfRoutingResult{}, false)
+	defer RecycleDnsRequest(req)
+
+	dnsResp := &dnsResponseData{}
+	qi := queryInfo{qname: "deep.example.com", qtype: uint16(dnsmessage.TypeA)}
+	err := c.handleDNSRequestByUpstreamDepth(raceTestAnswer(t, qi.qname, netip.IPv4Unspecified()), req, qi, up, dnsResp, MaxDnsLookupDepth)
+	if err == nil || !strings.Contains(err.Error(), "too deep") {
+		t.Fatalf("error = %v, want a too-deep error", err)
+	}
+	if got := proxy.calls.Load(); got != 0 {
+		t.Fatalf("depth-exhausted lookup dialed %d times, want 0", got)
 	}
 }

@@ -504,12 +504,8 @@ func (c *DnsController) handleDNSRequest(
 		return nil
 	}
 
-	// Check for race group: race(upstream1, upstream2, ...)
-	if raceUpstreams := c.routing.GetRaceUpstreams(RequestIndex); len(raceUpstreams) > 0 {
-		return c.handleDNSRequestRace(data, req, queryInfo, dnsResp, raceUpstreams)
-	}
-
-	// Resolve the single upstream and dial.
+	// Resolve the upstream and dial. A race group resolves to its synthetic
+	// group upstream (members attached); handleDNSRequestByUpstream expands it.
 	var upstream *dns.Upstream
 	if RequestIndex == consts.DnsRequestOutboundIndex_AsIs {
 		upstream = &dns.Upstream{
@@ -559,12 +555,34 @@ func (c *DnsController) handleDNSRequestByUpstream(
 	upstream *dns.Upstream,
 	dnsResp *dnsResponseData,
 ) error {
+	return c.handleDNSRequestByUpstreamDepth(data, req, queryInfo, upstream, dnsResp, 0)
+}
+
+// handleDNSRequestByUpstreamDepth carries the lookup depth in, so the
+// MaxDnsLookupDepth bound spans race-group expansion: a race member answers at
+// the depth its group was entered with, and a response rule that re-resolves
+// through a race group again (without excluding its members) converges to
+// SERVFAIL instead of recursing without bound.
+func (c *DnsController) handleDNSRequestByUpstreamDepth(
+	data []byte,
+	req *dnsRequest,
+	queryInfo queryInfo,
+	upstream *dns.Upstream,
+	dnsResp *dnsResponseData,
+	depth int,
+) error {
+	if depth >= MaxDnsLookupDepth {
+		return common.Errf("too deep DNS lookup invoking (depth: %v); there may be infinite loop in your DNS response routing", depth)
+	}
+	if upstream.IsRaceGroup() {
+		return c.handleRaceGroup(data, req, queryInfo, upstream, dnsResp, depth)
+	}
 	dialArgument := dialArgumentPool.Get().(*dialArgument)
 	defer dialArgumentPool.Put(dialArgument)
 
 	var err error
 Dial:
-	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
+	for invokingDepth := depth + 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"qname":    queryInfo.qname,
@@ -663,6 +681,12 @@ Dial:
 				"next_upstream": nextUpstream.String(),
 			}).Debugln("Change DNS upstream and resend")
 		}
+		if nextUpstream.IsRaceGroup() {
+			// The response rule re-resolves through a race group: expand it,
+			// carrying the current depth so the lookup bound still holds across
+			// the boundary.
+			return c.handleRaceGroup(data, req, queryInfo, nextUpstream, dnsResp, invokingDepth)
+		}
 		upstream = nextUpstream
 		if dnsResp.respData != nil && dnsResp.fromPool {
 			pool.PutBuffer(dnsResp.respData)
@@ -756,16 +780,24 @@ func (c *DnsController) ResolveForVerification(fqdn string, src netip.AddrPort, 
 	return false
 }
 
-// handleDNSRequestRace sends DNS queries to multiple upstreams concurrently and uses the
-// first successful response. Each sub-upstream independently goes through the full
-// handleDNSRequestByUpstream path (including response routing).
-func (c *DnsController) handleDNSRequestRace(
+// handleRaceGroup runs one race group: it serves a FRESH cached answer from the
+// first member in config order, otherwise it queries every member concurrently
+// and uses the first successful response. Expired entries fall through to the
+// spawn path, where each member's dialSend serves the stale copy and launches
+// its own background refresh - and since the flight key includes the upstream,
+// that refresh races the whole group too.
+func (c *DnsController) handleRaceGroup(
 	data []byte,
 	req *dnsRequest,
 	queryInfo queryInfo,
+	raceUpstream *dns.Upstream,
 	dnsResp *dnsResponseData,
-	raceUpstreams []*dns.Upstream,
+	depth int,
 ) error {
+	if raceUpstream.RaceGroup == nil || len(raceUpstream.RaceGroup.Members) == 0 {
+		return common.Errf("race group %s has no usable member", raceUpstream.String())
+	}
+	raceUpstreams := raceUpstream.RaceGroup.Members
 	dialArg := dialArgumentPool.Get().(*dialArgument)
 	defer dialArgumentPool.Put(dialArg)
 	for _, upstream := range raceUpstreams {
@@ -783,7 +815,7 @@ func (c *DnsController) handleDNSRequestRace(
 		// flight key includes the upstream, the optimistic-cache refresh races
 		// the whole group instead of a single member.
 		if c.dnsCache.Fresh(hashKey, time.Now()) {
-			return c.handleDNSRequestByUpstream(data, req, queryInfo, upstream, dnsResp)
+			return c.handleDNSRequestByUpstreamDepth(data, req, queryInfo, upstream, dnsResp, depth)
 		}
 	}
 
@@ -821,7 +853,7 @@ func (c *DnsController) handleDNSRequestRace(
 			}()
 
 			localResp := dnsResponseDataPool.Get().(*dnsResponseData)
-			err := c.handleDNSRequestByUpstream(dataCopy, reqCopy, queryInfo, upstream, localResp)
+			err := c.handleDNSRequestByUpstreamDepth(dataCopy, reqCopy, queryInfo, upstream, localResp, depth)
 			win := err == nil && winner.CompareAndSwap(false, true)
 			if win {
 				*dnsResp = *localResp
