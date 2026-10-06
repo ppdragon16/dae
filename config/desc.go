@@ -72,7 +72,8 @@ Available functions: qname, qtype, static.
 Race groups are defined in the "upstream" section, e.g. race_dns: 'race(udp://1.1.1.1:53,udp://8.8.8.8:53)', and referenced from routing by tag (-> race_dns). A race group queries its upstreams concurrently and uses the first response. Optionally bind it to an outbound at the reference site: -> race_dns(via: ai). The background refresh of an expired entry races the whole group too.`,
 	"response": `DNS responses will follow this routing.
 Built-in outbound: accept, reject.
-Available functions: qname, qtype, ip, upstream`,
+Available functions: qname, qtype, ip, upstream.
+Race groups (upstream section) cannot be referenced here: re-resolve through a concrete upstream instead.`,
 }
 
 var GroupDesc = Desc{

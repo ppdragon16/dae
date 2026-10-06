@@ -61,11 +61,6 @@ func NewCommonDnsCache() *commonDnsCache {
 	return c
 }
 
-func (c *commonDnsCache) Has(key HashKey) bool {
-	_, ok := c.cache.Get(key)
-	return ok
-}
-
 // Fresh reports whether key holds an entry that is not expired yet, mirroring
 // the expiry rule of copyResponseFromCache (client ttl below minClientTtl
 // counts as expired) without copying the payload.

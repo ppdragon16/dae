@@ -36,8 +36,8 @@ dae (daeuniverse/dae)          — 原始项目
 | DNS `ecs` | EDNS0 Client Subnet 控制：全局 `dns.ecs` 默认值（`strip`）+ 节点级 `[ecs: ...]` 标注（`strip`/`<cidr>`/`pass`）——防止客户端网段经代理泄漏与 CDN 区域错配 |
 | DNS `static` | 用户自定义静态 DNS 条目，支持 A、AAAA、TXT 记录，可通过 HTTP API 热更新 |
 | DNS `via` | DNS 查询通过指定 outbound 组发出（如 `proxy_dns(via: ai)`） |
-| DNS `race` | 并发查询多个上游，取最快响应——`request` 与 `response` 路由均可使用 |
-| DNS `response` 路由 | 按"应答来自哪个上游 / 应答码 / 应答 IP / qtype / 客户端"匹配 DNS 应答，然后 accept、reject 或换 upstream（含 `race`）重新解析 |
+| DNS `race` | 并发查询多个上游，取最快响应——在 `upstream` 段定义 race 组 |
+| DNS `response` 路由 | 按"应答来自哪个上游 / 应答码 / 应答 IP / qtype / 客户端"匹配 DNS 应答，然后 accept、reject 或换 upstream 重新解析 |
 | DNS `mac` + `sip` | 基于 MAC 地址或源 IP 的客户端级 DNS 过滤 |
 | DNS pool 调优 | 可配置 `udp_pool_size`、`udp_pool_ttl`、`tcp_pool_size`、`tcp_pool_ttl` |
 | 协议 | 扩展支持：Trojan、SSR、SS、SS2022、VLESS、VMess、AnyTLS、Tuic (v5)、Juicity、Hysteria2 |
@@ -309,12 +309,12 @@ qname(geosite:gfw) -> race_dns(via: ai)
 
 `response` 块匹配 DNS **应答**——按"应答来自哪个 upstream / 应答码 / 应答中的 IP / qtype / 客户端"——然后
 accept、reject，或换一个 upstream 重新解析。典型用途是防污染：国内上游对国外域名答出了非 CN IP，
-就用 race 组重查：
+就换一个 upstream 重查：
 
 ```shell
 response {
   rcode(nxdomain) -> accept   # 不存在的名字：直接接受，不重查
-  !upstream(cf_dns, g_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race(cf_dns, g_dns)
+  upstream(cf_dns) && !ip(geoip:private) && !ip(geoip:cn) -> g_dns
   fallback: accept
 }
 ```
@@ -323,8 +323,8 @@ response {
 
 - `rcode(...)` 匹配应答码：`noerror`、`formerr`、`servfail`、`nxdomain`、`notimp`、`refused`、...
   （大小写不敏感）或数字（`rcode(3)`）。NXDOMAIN 没有任何应答 IP，`ip(...)` 永远匹配不上它——
-  没有 rcode 规则时，非 race 成员的每个 NXDOMAIN 都会触发一轮重解析。代价：被上游以 NXDOMAIN
-  形式污染的域名不会再被 race 找回。
+  没有 rcode 规则时，该上游的每个 NXDOMAIN 都会触发一轮重解析。代价：被上游以 NXDOMAIN
+  形式污染的域名不会再被重解析找回。
 - `upstream(...)` 匹配"应答来自哪个 upstream"。裸名同时覆盖 `via:` 绑定出的影子成员：
   经 `race_dns(via: ai)` 应答的响应会被 `upstream(cf_dns)`、`upstream('cf_dns(ai)')`
   或组名整体（`upstream(race_dns)`）命中。

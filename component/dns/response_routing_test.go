@@ -300,74 +300,15 @@ func TestResponseMatcherUnknownUpstreamName(t *testing.T) {
 		t.Fatalf("expected not-found error, got %v", err)
 	}
 }
-
-// TestResponseSelectRaceTargetYieldsPlaceholder pins the contract the control
-// plane relies on when a response rule re-resolves through a race group: the
-// placeholder is handed back untouched (GetUpstream would fail on its dummy
-// race:// URL) and the members stay resolvable via RaceGroupMembers.
-func TestResponseSelectRaceTargetYieldsPlaceholder(t *testing.T) {
-	memberCf, err := NewUpstream(context.Background(), mustURL(t, "udp://1.1.1.1:53"), "")
-	if err != nil {
-		t.Fatalf("member cf: %v", err)
-	}
-	memberG, err := NewUpstream(context.Background(), mustURL(t, "udp://8.8.8.8:53"), "")
-	if err != nil {
-		t.Fatalf("member g: %v", err)
-	}
-	s := &Dns{
-		upstream: []*UpstreamResolver{
-			{Raw: mustURL(t, "udp://1.1.1.1:53"), upstream: memberCf, init: 1},
-			{Raw: mustURL(t, "udp://8.8.8.8:53"), upstream: memberG, init: 1},
-			{Raw: mustURL(t, "race://cf_dns,g_dns")}, // placeholder: never dialable
-		},
-		raceGroupIndices: map[uint8][]uint8{2: {0, 1}},
-	}
-	rules := []*config_parser.RoutingRule{
-		testResponseRule("race(cf_dns,g_dns)", testResponseFunction("upstream", "cf_dns")),
-	}
-	b, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 0, "g_dns": 1, "race(cf_dns,g_dns)": 2}, "reject")
-	if err != nil {
-		t.Fatalf("NewResponseMatcherBuilder: %v", err)
-	}
-	s.respMatcher, err = b.Build()
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-
-	ips := []netip.Addr{netip.MustParseAddr("1.2.3.4")}
-	idx, upstream, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), ips, uint16(dnsmessage.RcodeSuccess), memberCf, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
-	if err != nil {
-		t.Fatalf("ResponseSelect must not fail on a race target: %v", err)
-	}
-	if !upstream.IsRacePlaceholder() {
-		t.Fatalf("expected a race placeholder, got scheme %q", upstream.Scheme)
-	}
-
-	members, ok := s.RaceGroupMembers(idx)
-	if !ok || len(members) != 2 {
-		t.Fatalf("RaceGroupMembers: ok=%v len=%d, want true/2", ok, len(members))
-	}
-	if members[0] != memberCf || members[1] != memberG {
-		t.Fatal("members resolved in the wrong order")
-	}
-
-	// Regression: before the placeholder short-circuit, ResponseSelect failed
-	// here with "unexpected scheme: race" (surfaced as "failed to init dns
-	// upstream") the moment a response rule re-resolved through a race group.
-}
-
 func mustURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)
 	if err != nil {
-		t.Fatalf("parse %q: %v", raw, err)
+		t.Fatalf("url.Parse(%q): %v", raw, err)
 	}
 	return u
 }
 
-// TestResponseMatcherRCode pins rcode matching: a rule keyed on the response
-// code fires only for that code, regardless of the answer IPs — this is how
-// NXDOMAIN (rcode 3) can be accepted without triggering a re-resolution.
 func TestResponseMatcherRCode(t *testing.T) {
 	rules := []*config_parser.RoutingRule{
 		testResponseRule("accept", testResponseFunction("rcode", "nxdomain", "servfail")),
@@ -410,18 +351,21 @@ func TestResponseSelectRCodeNxdomainAccept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("member: %v", err)
 	}
+	member2, err := NewUpstream(context.Background(), mustURL(t, "udp://8.8.8.8:53"), "")
+	if err != nil {
+		t.Fatalf("member2: %v", err)
+	}
 	s := &Dns{
 		upstream: []*UpstreamResolver{
 			{Raw: mustURL(t, "udp://1.1.1.1:53"), upstream: member, init: 1},
-			{Raw: mustURL(t, "race://cf_dns")}, // race placeholder at index 1
+			{Raw: mustURL(t, "udp://8.8.8.8:53"), upstream: member2, init: 1}, // re-resolve target at index 1
 		},
-		raceGroupIndices: map[uint8][]uint8{1: {0}},
 	}
 	rules := []*config_parser.RoutingRule{
 		testResponseRule("accept", testResponseFunction("rcode", "nxdomain")),
-		testResponseRule("race(cf_dns)", testResponseFunction("upstream", "cf_dns")),
+		testResponseRule("g_dns", testResponseFunction("upstream", "cf_dns")),
 	}
-	b, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 0, "race(cf_dns)": 1}, "reject")
+	b, err := NewResponseMatcherBuilder(rules, map[string]uint8{"cf_dns": 0, "g_dns": 1}, "reject")
 	if err != nil {
 		t.Fatalf("NewResponseMatcherBuilder: %v", err)
 	}
@@ -440,16 +384,16 @@ func TestResponseSelectRCodeNxdomainAccept(t *testing.T) {
 		t.Fatalf("nxdomain: got %v, want accept", idx)
 	}
 
-	// NOERROR with answers from the same member: the race rule matches and
-	// hands back the race placeholder for re-resolution.
+	// NOERROR with answers from the same member: the upstream rule matches and
+	// hands back g_dns for re-resolution.
 	idx, up, err := s.ResponseSelect("x.example.com.", uint16(dnsmessage.TypeA), []netip.Addr{netip.MustParseAddr("1.2.3.4")}, uint16(dnsmessage.RcodeSuccess), member, [6]byte{}, netip.MustParseAddr("192.168.1.5"))
 	if err != nil {
 		t.Fatalf("ResponseSelect(noerror): %v", err)
 	}
-	if !up.IsRacePlaceholder() {
-		t.Fatalf("noerror: expected the race placeholder, got scheme %q", up.Scheme)
+	if up == nil || up.Scheme != "udp" || up.Hostname != "8.8.8.8" {
+		t.Fatalf("noerror: expected the g_dns upstream, got %+v", up)
 	}
 	if idx != consts.DnsResponseOutboundIndex(1) {
-		t.Fatalf("noerror: got race index %d, want 1", idx)
+		t.Fatalf("noerror: got index %d, want 1", idx)
 	}
 }

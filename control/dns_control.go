@@ -656,19 +656,6 @@ Dial:
 		if invokingDepth == MaxDnsLookupDepth {
 			return common.Errf("too deep DNS lookup invoking (depth: %v); there may be infinite loop in your DNS response routing", MaxDnsLookupDepth)
 		}
-		if nextUpstream.IsRacePlaceholder() {
-			// The response rule re-resolves through a race group. Re-run the
-			// race among its members: the placeholder itself is not dialable
-			// (its dummy "race://" URL has no scheme any forwarder understands).
-			members, ok := c.routing.RaceGroupMembers(ResponseIndex)
-			if !ok || len(members) == 0 {
-				return common.Errf("race group %v has no usable member", ResponseIndex.String())
-			}
-			if err = c.handleDNSRequestRace(data, req, queryInfo, dnsResp, members); err != nil {
-				return err
-			}
-			break Dial
-		}
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"qname":         queryInfo.qname,

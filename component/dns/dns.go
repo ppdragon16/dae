@@ -123,6 +123,14 @@ func New(dns *config.Dns, opt *NewOption, outboundName2Id map[string]uint8) (s *
 		}
 		predefinedUpstreamNames[group.tag] = dummy
 	}
+	// Race groups cannot be referenced from response routing: a group has no
+	// single upstream to attribute a response to. Fail at config load instead
+	// of surfacing as an unresolvable placeholder at query time.
+	for _, rule := range dns.Routing.Response.Rules {
+		if _, isRace := s.raceTag2GroupIdx[rule.Outbound.Name]; isRace {
+			return nil, fmt.Errorf("race group %q cannot be used in dns response routing: reference a concrete upstream instead", rule.Outbound.Name)
+		}
+	}
 	for _, rule := range dns.Routing.Request.Rules {
 		var urlKey string
 		var rawURL *url.URL
@@ -476,25 +484,6 @@ func (s *Dns) GetStaticEntry(name string) (*config.DnsStaticEntry, bool) {
 	defer s.staticEntriesMu.RUnlock()
 	entry, ok := s.staticEntries[name]
 	return entry, ok
-}
-
-// RaceGroupMembers resolves the member upstreams of the race group identified
-// by a response-routing target index, reporting whether that index denotes a
-// race group at all. Members may be dialed: unlike the group placeholder, they
-// carry real URLs.
-func (s *Dns) RaceGroupMembers(responseIndex consts.DnsResponseOutboundIndex) (members []*Upstream, ok bool) {
-	subIdxs, isRace := s.raceGroupIndices[uint8(responseIndex)]
-	if !isRace {
-		return nil, false
-	}
-	for _, subIdx := range subIdxs {
-		up, err := s.upstream[subIdx].GetUpstream()
-		if err != nil {
-			return nil, false
-		}
-		members = append(members, up)
-	}
-	return members, true
 }
 
 func (s *Dns) RequestSelect(qname string, qtype uint16, srcMac [6]byte, srcIp netip.Addr) (upstreamIndex consts.DnsRequestOutboundIndex, err error) {

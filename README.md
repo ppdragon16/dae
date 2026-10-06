@@ -36,8 +36,8 @@ dae (daeuniverse/dae)          — Original project
 | DNS `ecs` | EDNS0 Client Subnet control: global `dns.ecs` default (`strip`) plus per-dialer `[ecs: ...]` annotation (`strip`/`<cidr>`/`pass`) — stops client-subnet leaks and CDN region mismatch through proxies |
 | DNS `static` | User-defined static DNS entries with A, AAAA, TXT records — hot-reloadable via HTTP API |
 | DNS `via` | Route DNS queries through a specific outbound group (e.g. `proxy_dns(via: ai)`) |
-| DNS `race` | Query multiple upstreams concurrently, first response wins — usable in both `request` and `response` routing |
-| DNS `response` routing | Match DNS responses by answering upstream / response code / answer IPs / qtype / client and accept, reject, or re-resolve via another upstream (incl. `race`) |
+| DNS `race` | Query multiple upstreams concurrently, first response wins — define race groups in the `upstream` section |
+| DNS `response` routing | Match DNS responses by answering upstream / response code / answer IPs / qtype / client and accept, reject, or re-resolve via another upstream |
 | DNS `mac` + `sip` | Per-client DNS filtering by MAC address or source IP |
 | DNS pool tuning | Configurable `udp_pool_size`, `udp_pool_ttl`, `tcp_pool_size`, `tcp_pool_ttl` |
 | Protocols | Extended support: Trojan, SSR, SS, SS2022, VLESS, VMess, AnyTLS, Tuic (v5), Juicity, Hysteria2 |
@@ -314,12 +314,12 @@ The `response` block matches a DNS **response** — by the upstream that answere
 it, the response code, the IPs in the answer, the qtype, or the client — and
 then accepts it, rejects it, or re-resolves the query through another upstream.
 The canonical use is anti-poisoning: if a domestic upstream answers a non-CN IP
-for a foreign name, re-query through the race group:
+for a foreign name, re-query through a different upstream:
 
 ```shell
 response {
   rcode(nxdomain) -> accept   # names that don't exist: accept, don't re-resolve
-  !upstream(cf_dns, g_dns) && !ip(geoip:private) && !ip(geoip:cn) -> race_dns
+  upstream(cf_dns) && !ip(geoip:private) && !ip(geoip:cn) -> g_dns
   fallback: accept
 }
 ```
@@ -329,9 +329,12 @@ Notes:
 - `rcode(...)` matches the response code: `noerror`, `formerr`, `servfail`,
   `nxdomain`, `notimp`, `refused`, ... (case-insensitive) or the number
   (`rcode(3)`). An NXDOMAIN carries no answer IPs, so `ip(...)` never matches
-  it — without an rcode rule, every NXDOMAIN from a non-race upstream triggers
-  a re-resolution round-trip. Trade-off: a name its upstream answers with
-  NXDOMAIN is no longer recovered by the race.
+  it — without an rcode rule, every NXDOMAIN from that upstream triggers a
+  re-resolution round-trip. Trade-off: a name its upstream answers with
+  NXDOMAIN is no longer recovered by the re-resolution.
+- Race groups (upstream-section) cannot be referenced here: re-resolve through
+  a concrete upstream instead. Responses answered by race members still match
+  `upstream(...)` by the member's tag.
 - `upstream(...)` matches the upstream the response came from. A bare name also
   covers the `via:`-bound shadow members: a response answered through
   `race_dns(via: ai)` matches `upstream(cf_dns)`, `upstream('cf_dns(ai)')`, or
