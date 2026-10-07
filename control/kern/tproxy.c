@@ -49,7 +49,11 @@
 #endif
 #define MAX_LPM_SIZE 2048000
 #define MAX_LPM_NUM (MAX_MATCH_SET_LEN + 8)
+// Overridable so a test build can shrink the map and exercise the
+// write-failure/event/janitor path without patching the source.
+#ifndef MAX_DST_MAPPING_NUM
 #define MAX_DST_MAPPING_NUM 65536
+#endif
 #define MAX_COOKIE_PID_PNAME_MAPPING_NUM 65536
 #define MAX_DOMAIN_ROUTING_NUM 65536
 #define MAX_ARG_LEN 128
