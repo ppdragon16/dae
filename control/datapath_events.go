@@ -196,6 +196,14 @@ func startDatapathEventConsumer(bpf *bpfState) {
 	datapathEvents.start(bpf)
 }
 
+// stopDatapathEventConsumer stops the process-wide consumer. Ownership follows
+// the bpf state (see datapathEventConsumer), so the caller must know that the
+// state is really dying: a reload hands it to a successor that keeps the very
+// same reader running.
+func stopDatapathEventConsumer() {
+	datapathEvents.stop()
+}
+
 func setDatapathEventSink(sink *datapathEventSink) {
 	datapathEvents.sink.Store(sink)
 }

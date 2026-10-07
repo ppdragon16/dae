@@ -140,6 +140,14 @@ func (c *controlPlaneCore) Close() (err error) {
 		return nil
 	default:
 	}
+	// The datapath event consumer owns a ringbuf reader over this bpf state's
+	// map, so it has to stop before the objects are closed -- and only when this
+	// core is the one tearing the state down. A reload ejects the bpf state into
+	// its successor, which keeps the same reader running (see
+	// datapathEventConsumer's ownership note).
+	if !c.bpfEjected {
+		stopDatapathEventConsumer()
+	}
 	// Invoke defer funcs in reverse order.
 	for _, v := range slices.Backward(c.deferFuncs) {
 		if e := v(); e != nil {
