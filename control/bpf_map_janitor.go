@@ -46,6 +46,24 @@ const (
 	// janitorPressureLogInterval rate-limits the report of an urgent sweep: a
 	// sustained datapath pressure would otherwise ask for one every second.
 	janitorPressureLogInterval = 5 * time.Second
+	// janitorPressureSweepInterval is the minimum spacing between urgent
+	// sweeps. Under a sustained flood the events arrive once per second per
+	// slot, so without this every event would buy a full three-map scan; the
+	// request is not dropped, it just waits for the window.
+	janitorPressureSweepInterval = time.Second
+)
+
+// Pressure categories an urgent sweep may be asked for. An urgent round only
+// forces the map that actually rejected a write: sweeping an unaffected map
+// would be wasted work, and each one is a 64k-entry scan.
+//
+// There is deliberately no cookie_pid bit: a full cookie_pid_map degrades
+// process-name attribution while routing keeps working, so it is not worth an
+// out-of-band sweep (see the sink's cookie_pid case). Its periodic cadence
+// still applies.
+const (
+	janitorPressureRedirect uint32 = 1 << iota
+	janitorPressureRoutingTuples
 )
 
 // ---- scratch helpers ----
@@ -71,15 +89,17 @@ type bpfMapJanitor struct {
 
 	wake chan bool // true=cleanup now, false/closed=stop
 	done chan struct{}
-	// pressure is set by WakePressure when the datapath reports that a bounded
-	// map rejected a write. The next round then ignores the per-category
-	// intervals: the periodic cadence can be minutes away, while the map needs
-	// room right now.
-	pressure atomic.Bool
+	// pressure holds the categories whose map rejected a write (see
+	// janitorPressure*). The next round forces exactly those categories past
+	// their intervals: the periodic cadence can be minutes away, while the map
+	// needs room right now.
+	pressure atomic.Uint32
 	// pressureWarnAt rate-limits the "pressure but nothing to free" warning.
 	pressureWarnAt atomic.Int64
 	// pressureLogAt rate-limits the "swept under pressure" report.
-	pressureLogAt        atomic.Int64
+	pressureLogAt atomic.Int64
+	// pressureSweepAt is when the last urgent sweep started.
+	pressureSweepAt      atomic.Int64
 	cookiePidScratch     janitorScratch[uint64, bpfPidPname]
 	redirectScratch      janitorScratch[bpfRedirectTuple, bpfRedirectEntry]
 	routingTuplesScratch janitorScratch[bpfTuplesKey, bpfRoutingResult]
@@ -102,13 +122,49 @@ func newBpfMapJanitor(bpf func() *bpfObjects) bpfMapJanitor {
 	}
 }
 
-// WakePressure asks for an immediate cleanup round that also ignores the
-// per-category intervals. It is how a datapath write failure (reported over the
-// event ring buffer) turns into an urgent sweep instead of a wait of up to
-// janitorMaxInterval.
-func (j *bpfMapJanitor) WakePressure() {
-	j.pressure.Store(true)
+// WakePressure asks for an immediate cleanup of kinds (a janitorPressure* mask)
+// that also ignores their per-category intervals. It is how a datapath write
+// failure (reported over the event ring buffer) turns into an urgent sweep
+// instead of a wait of up to janitorMaxInterval.
+func (j *bpfMapJanitor) WakePressure(kinds uint32) {
+	j.pressure.Or(kinds)
 	j.Wake()
+}
+
+// janitorPressureNames renders a pressure mask for the log.
+func janitorPressureNames(kinds uint32) string {
+	if kinds == 0 {
+		return "none"
+	}
+	names := make([]string, 0, 3)
+	if kinds&janitorPressureRoutingTuples != 0 {
+		names = append(names, "routing_tuples")
+	}
+	if kinds&janitorPressureRedirect != 0 {
+		names = append(names, "redirect_track")
+	}
+	return strings.Join(names, ",")
+}
+
+// reservePressureSweep decides whether a pending urgent sweep may run now, and
+// which categories it covers.
+//
+// It returns the categories to force (and records the time) when the previous
+// sweep is at least janitorPressureSweepInterval old, or 0 when it is too soon
+// — in which case the request is merged back so a later round honours it
+// instead of it being lost. Requests are never dropped, only delayed; requests
+// that arrive while this runs stay pending for the next round.
+func (j *bpfMapJanitor) reservePressureSweep(nowNano int64) uint32 {
+	pending := j.pressure.Swap(0)
+	if pending == 0 {
+		return 0
+	}
+	if last := j.pressureSweepAt.Load(); nowNano-last < int64(janitorPressureSweepInterval) {
+		j.pressure.Or(pending)
+		return 0
+	}
+	j.pressureSweepAt.Store(nowNano)
+	return pending
 }
 
 // Wake signals the janitor to perform a cleanup round immediately. Safe
@@ -144,24 +200,26 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 
 			now := time.Now()
 			cleaned := 0
-			// A pressure round sweeps every category now, whatever the
-			// per-category intervals say.
-			force := j.pressure.Swap(false)
+			// A pressure round forces the categories the datapath complained
+			// about past their intervals. Urgent sweeps are spaced out; a
+			// request that arrives too soon stays pending.
+			pressure := j.reservePressureSweep(now.UnixNano())
+			force := pressure != 0
 			var freedCookiePid, freedRedirect, freedRoutingTuples int
 
-			if force || lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
+			if lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
 				n := j.cleanupCookiePidMap()
 				freedCookiePid = n
 				cleaned += n
 				lastCookiePidCleanup = now
 			}
-			if force || lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
+			if pressure&janitorPressureRedirect != 0 || lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
 				n := j.cleanupRedirectTrackMap()
 				freedRedirect = n
 				cleaned += n
 				lastRedirectCleanup = now
 			}
-			if force || lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
+			if pressure&janitorPressureRoutingTuples != 0 || lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
 				n := j.cleanupRoutingTuplesMap()
 				freedRoutingTuples = n
 				cleaned += n
@@ -176,6 +234,9 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 				if last := j.pressureLogAt.Load(); nowNano-last > int64(janitorPressureLogInterval) &&
 					j.pressureLogAt.CompareAndSwap(last, nowNano) {
 					log.WithFields(log.Fields{
+						"forced": janitorPressureNames(pressure),
+						// Freed by this round: the forced categories plus
+						// any whose periodic interval happened to elapse.
 						"routing_tuples": freedRoutingTuples,
 						"redirect_track": freedRedirect,
 						"cookie_pid":     freedCookiePid,
@@ -200,8 +261,9 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 				nowNano := now.UnixNano()
 				if last := j.pressureWarnAt.Load(); nowNano-last > int64(time.Minute) &&
 					j.pressureWarnAt.CompareAndSwap(last, nowNano) {
-					log.Warnln("datapath map pressure: cleanup freed no entries, " +
-						"the maps are at capacity and writes keep failing until flows expire")
+					log.WithField("forced", janitorPressureNames(pressure)).
+						Warnln("datapath map pressure: cleanup freed no entries, " +
+							"the maps are at capacity and writes keep failing until flows expire")
 				}
 			}
 
@@ -212,6 +274,11 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 				interval = janitorTickInterval
 			} else {
 				interval = min(interval*2, janitorMaxInterval)
+			}
+			if j.pressure.Load() != 0 {
+				// An urgent sweep is still pending for a later window: come
+				// back as soon as it may run instead of backing off.
+				interval = janitorPressureSweepInterval
 			}
 			ticker.Reset(interval)
 		}

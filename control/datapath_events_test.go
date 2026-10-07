@@ -8,6 +8,7 @@ package control
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -98,23 +99,75 @@ func TestDatapathEventSinkWakesJanitorOnPressure(t *testing.T) {
 		Site:  routingTuplesSiteUdpNewFlow,
 		Errno: -7,
 	})
-	if !janitor.pressure.Load() {
-		t.Fatal("a routing_tuples write failure must request an immediate sweep")
+	if got := janitor.pressure.Load(); got != janitorPressureRoutingTuples {
+		t.Fatalf("routing_tuples failure must request exactly the routing_tuples sweep, got %d", got)
 	}
-	if !janitor.pressure.Swap(false) {
-		t.Fatal("pressure flag must be set exactly once per request")
-	}
-	if janitor.pressure.Load() {
-		t.Fatal("reading the pressure flag must clear it")
+	if janitor.pressure.Swap(0) != janitorPressureRoutingTuples {
+		t.Fatal("the request must be pending exactly once")
 	}
 
 	sink.HandleDatapathEvent(datapathEvent{Type: datapathEventCookiePidWriteFailed})
-	if janitor.pressure.Load() {
+	if janitor.pressure.Load() != 0 {
 		t.Fatal("a cookie_pid failure must not request a sweep")
 	}
 
 	sink.HandleDatapathEvent(datapathEvent{Type: datapathEventRedirectTrackWriteFailed})
-	if !janitor.pressure.Load() {
-		t.Fatal("a redirect_track write failure must request an immediate sweep")
+	if got := janitor.pressure.Load(); got != janitorPressureRedirect {
+		t.Fatalf("redirect_track failure must request only the redirect_track sweep, got %d", got)
+	}
+}
+
+// TestReservePressureSweepSpacing pins the urgent-sweep window: a flood asks
+// for a sweep once per second per slot, and a full three-map scan per request
+// would be wasted work. A request that arrives too soon must stay pending
+// rather than be dropped, so no pressure is ever ignored.
+func TestReservePressureSweepSpacing(t *testing.T) {
+	var janitor bpfMapJanitor
+	now := time.Now().UnixNano()
+
+	if janitor.reservePressureSweep(now) != 0 {
+		t.Fatal("no request pending: an urgent sweep must not start")
+	}
+
+	janitor.WakePressure(janitorPressureRoutingTuples)
+	if got := janitor.reservePressureSweep(now); got != janitorPressureRoutingTuples {
+		t.Fatalf("a fresh request must be honoured immediately with its own category, got %d", got)
+	}
+	if janitor.pressure.Load() != 0 {
+		t.Fatal("a reserved sweep must clear the pending flag")
+	}
+
+	// Another request inside the window: not allowed now, but kept pending,
+	// and it must not widen into categories nobody asked for.
+	janitor.WakePressure(janitorPressureRedirect)
+	if janitor.reservePressureSweep(now+int64(500*time.Millisecond)) != 0 {
+		t.Fatal("a request inside the spacing window must be delayed")
+	}
+	if got := janitor.pressure.Load(); got != janitorPressureRedirect {
+		t.Fatalf("a delayed request must stay pending with only its own category, got %d", got)
+	}
+
+	// Once the window has passed the pending request runs.
+	if got := janitor.reservePressureSweep(now + int64(janitorPressureSweepInterval) + 1); got != janitorPressureRedirect {
+		t.Fatalf("a pending request must run after the spacing window with its category, got %d", got)
+	}
+}
+
+// TestJanitorPressureNames keeps the pressure log fields readable: a numeric
+// mask would leave "which map was forced?" unanswered.
+func TestJanitorPressureNames(t *testing.T) {
+	cases := []struct {
+		kinds uint32
+		want  string
+	}{
+		{0, "none"},
+		{janitorPressureRoutingTuples, "routing_tuples"},
+		{janitorPressureRedirect, "redirect_track"},
+		{janitorPressureRoutingTuples | janitorPressureRedirect, "routing_tuples,redirect_track"},
+	}
+	for _, c := range cases {
+		if got := janitorPressureNames(c.kinds); got != c.want {
+			t.Fatalf("janitorPressureNames(%d) = %q, want %q", c.kinds, got, c.want)
+		}
 	}
 }

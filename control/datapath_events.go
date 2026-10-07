@@ -140,9 +140,14 @@ func (s *datapathEventSink) HandleDatapathEvent(ev datapathEvent) {
 	case datapathEventRoutingTuplesWriteFailed, datapathEventRedirectTrackWriteFailed:
 		// A rejected write means a bounded datapath map is under pressure.
 		// The periodic janitor can be minutes away; sweep now so the map has a
-		// chance to free entries before the next packet needs them.
+		// chance to free entries before the next packet needs them. Only the
+		// map that failed is forced: the others are 64k-entry scans.
 		if s.janitor != nil {
-			s.janitor.WakePressure()
+			if ev.Type == datapathEventRedirectTrackWriteFailed {
+				s.janitor.WakePressure(janitorPressureRedirect)
+			} else {
+				s.janitor.WakePressure(janitorPressureRoutingTuples)
+			}
 		}
 		log.WithFields(log.Fields{
 			"event":   datapathEventTypeName(ev.Type),
