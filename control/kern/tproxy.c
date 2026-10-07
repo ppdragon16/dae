@@ -137,7 +137,13 @@ struct {
 	__type(value, struct redirect_entry);
 	__uint(max_entries, 65536);
 } redirect_track SEC(".maps");
-// Memory is allocated on demand (BPF_F_NO_PREALLOC).
+// BPF_F_NO_PREALLOC allocates entries on demand, but the kernel still
+// charges the bucket array at load time: max_entries * 16 B, i.e. 1 MiB
+// at the 65536 slots below, whatever the live entry count is (measured on
+// kernel 6.17). The same floor applies to routing_tuples_map,
+// domain_routing_map, domain_bump_map and cookie_pid_map, so size each one
+// to its measured live count with wide headroom and treat the janitor's
+// capacity warning as the signal to raise it again.
 
 
 struct routing_result {
@@ -210,7 +216,13 @@ struct {
 	__uint(max_entries, MAX_DST_MAPPING_NUM);
 	__uint(pinning, LIBBPF_PIN_NONE);
 } routing_tuples_map SEC(".maps");
-// Memory is allocated on demand (BPF_F_NO_PREALLOC).
+// BPF_F_NO_PREALLOC allocates entries on demand, but the kernel still
+// charges the bucket array at load time: max_entries * 16 B, i.e. 1 MiB
+// at the 65536 slots below, whatever the live entry count is (measured on
+// kernel 6.17). The same floor applies to routing_tuples_map,
+// domain_routing_map, domain_bump_map and cookie_pid_map, so size each one
+// to its measured live count with wide headroom and treat the janitor's
+// capacity warning as the signal to raise it again.
 
 // ---------------------------------------------------------------------------
 // Datapath events: eBPF -> control plane proactive notification.
@@ -435,7 +447,13 @@ struct {
 	/// NOTICE: No persistence.
 	// __uint(pinning, LIBBPF_PIN_BY_NAME);
 } domain_routing_map SEC(".maps");
-// 13.63 MB
+// BPF_F_NO_PREALLOC allocates entries on demand, but the kernel still
+// charges the bucket array at load time: max_entries * 16 B, i.e. 1 MiB
+// at the 65536 slots below, whatever the live entry count is (measured on
+// kernel 6.17). The same floor applies to routing_tuples_map,
+// domain_routing_map, domain_bump_map and cookie_pid_map, so size each one
+// to its measured live count with wide headroom and treat the janitor's
+// capacity warning as the signal to raise it again.
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -446,7 +464,13 @@ struct {
 	/// NOTICE: No persistence.
 	// __uint(pinning, LIBBPF_PIN_BY_NAME);
 } domain_bump_map SEC(".maps");
-// 13.63 MB
+// BPF_F_NO_PREALLOC allocates entries on demand, but the kernel still
+// charges the bucket array at load time: max_entries * 16 B, i.e. 1 MiB
+// at the 65536 slots below, whatever the live entry count is (measured on
+// kernel 6.17). The same floor applies to routing_tuples_map,
+// domain_routing_map, domain_bump_map and cookie_pid_map, so size each one
+// to its measured live count with wide headroom and treat the janitor's
+// capacity warning as the signal to raise it again.
 
 
 struct pid_pname {
@@ -464,7 +488,13 @@ struct {
 	/// NOTICE: No persistence.
 	__uint(pinning, LIBBPF_PIN_NONE);
 } cookie_pid_map SEC(".maps");
-// Memory is allocated on demand (BPF_F_NO_PREALLOC).
+// BPF_F_NO_PREALLOC allocates entries on demand, but the kernel still
+// charges the bucket array at load time: max_entries * 16 B, i.e. 1 MiB
+// at the 65536 slots below, whatever the live entry count is (measured on
+// kernel 6.17). The same floor applies to routing_tuples_map,
+// domain_routing_map, domain_bump_map and cookie_pid_map, so size each one
+// to its measured live count with wide headroom and treat the janitor's
+// capacity warning as the signal to raise it again.
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
