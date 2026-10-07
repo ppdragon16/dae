@@ -208,6 +208,40 @@ struct {
 } routing_tuples_map SEC(".maps");
 // Memory is allocated on demand (BPF_F_NO_PREALLOC).
 
+#ifdef __DEBUG_ROUTING
+// Diagnostics for a rejected routing_tuples_map write. The map is deliberately
+// bounded and fail-closed (HASH, no eviction, MAX_DST_MAPPING_NUM entries), so
+// a transiently full map — or a failed on-demand entry allocation — makes the
+// update fail. For UDP the packet is still delivered to the control plane,
+// which then finds no entry; that is exactly the failure we want to see, but a
+// flow storm makes it happen on every packet, hence the one-line-per-second
+// throttle. Both the map and the print compile out without __DEBUG_ROUTING.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, 1);
+} routing_tuples_fail_log_state SEC(".maps");
+
+static __always_inline void log_routing_tuples_update_failed(__u8 l4proto, long ret,
+							     __u8 site)
+{
+	__u32 key = 0;
+	__u64 *last = bpf_map_lookup_elem(&routing_tuples_fail_log_state, &key);
+	__u64 now = bpf_ktime_get_ns();
+
+	if (!last)
+		return;
+	if (now - *last < 1000000000ULL)
+		return;
+	*last = now;
+	bpf_printk("routing_tuples_map update failed: site=%d l4proto=%d ret=%d",
+		   (int)site, (int)l4proto, (int)ret);
+}
+#else
+#define log_routing_tuples_update_failed(l4proto, ret, site) ((void)0)
+#endif
+
 // Array of LPM tries:
 struct lpm_key {
 	struct bpf_lpm_trie_key trie_key;
@@ -1792,7 +1826,16 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 	routing_result->last_seen_ns = bpf_ktime_get_ns();
 
 	if (l4proto == IPPROTO_UDP) {
-		bpf_map_update_elem(&routing_tuples_map, &udp_tuples_key, routing_result, BPF_ANY);
+		// Unchecked updates used to fail silently here; the control plane then
+		// looked up a key that was never written. Keep the forwarding path
+		// untouched (the packet still goes to the control plane) and only
+		// report the failure.
+		long update_ret = bpf_map_update_elem(&routing_tuples_map,
+						      &udp_tuples_key,
+						      routing_result, BPF_ANY);
+
+		if (update_ret)
+			log_routing_tuples_update_failed(l4proto, update_ret, 1);
 	}
 
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
@@ -1827,9 +1870,13 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 #endif
 		if (l4proto == IPPROTO_TCP && routing_result->mark != 0) {
 			// Marked TCP direct route, must be saved to map for subsequent packets.
-			if (bpf_map_update_elem(&routing_tuples_map, &tuples.five,
-						routing_result, BPF_ANY)) {
-				bpf_printk("shot save direct routing result: %d", s64_ret);
+			long update_ret = bpf_map_update_elem(&routing_tuples_map,
+							      &tuples.five,
+							      routing_result,
+							      BPF_ANY);
+
+			if (update_ret) {
+				log_routing_tuples_update_failed(l4proto, update_ret, 2);
 				return TC_ACT_SHOT;
 			}
 		}
@@ -1854,9 +1901,12 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 
 	// TCP proxy traffic should be saved.
 	if (l4proto == IPPROTO_TCP) {
-		if (bpf_map_update_elem(&routing_tuples_map, &tuples.five,
-					routing_result, BPF_ANY)) {
-			bpf_printk("shot save routing result: %d", s64_ret);
+		long update_ret = bpf_map_update_elem(&routing_tuples_map,
+						      &tuples.five, routing_result,
+						      BPF_ANY);
+
+		if (update_ret) {
+			log_routing_tuples_update_failed(l4proto, update_ret, 3);
 			return TC_ACT_SHOT;
 		}
 	}
