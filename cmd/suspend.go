@@ -35,12 +35,19 @@ var (
 				cmd.Help()
 				os.Exit(1)
 			}
+			abortMarkerCreated := false
 			if abort {
-				if f, err := os.Create(AbortFile); err == nil {
-					f.Close()
+				if err := createReloadAbortMarker(AbortFile); err != nil {
+					fmt.Println("Failed to create abort marker:", err)
+					os.Exit(1)
 				}
+				abortMarkerCreated = true
 			}
 			if err = syscall.Kill(pid, syscall.SIGUSR2); err != nil {
+				// The signal never reached dae, so nothing will consume the
+				// marker; leaving it behind would abort the connections of the
+				// next unrelated reload.
+				err = cleanupReloadAbortMarker(AbortFile, abortMarkerCreated, err)
 				fmt.Println(err)
 				os.Exit(1)
 			}
