@@ -12,8 +12,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # control/kern/headers is a submodule and the generation step needs it.
+          submodules: recursive
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # cmd and the main package import control, so the lint gate can only
+      # compile a fresh checkout once the bpf2go types exist. Those files are
+      # gitignored, which is why this job used to fail on every commit with
+      # "undefined: bpfObjects" even though its package list excludes control.
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+      - name: Generate eBPF objects
+        run: make ebpf
       - name: Run Go lint (gofmt, go vet, staticcheck)
         run: make lint-go
