@@ -150,7 +150,17 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	}()
 
 	if err := c.core.RetrieveTCPRoutingResult(src, dst, routingResult); err != nil {
-		return common.Wrap(err, "failed to retrieve target info %v", dst.String())
+		if !istcpdns {
+			// General TCP traffic keeps failing closed: without a routing
+			// result there is no way to know where it should go, and guessing
+			// could leak it past the configured proxy.
+			return common.Wrap(err, "failed to retrieve target info %v", dst.String())
+		}
+		// DNS over TCP fails open like UDP DNS: the control plane answers
+		// static/local entries without any routing result, and the alternative
+		// is failing the client's resolution.
+		logDnsRoutingMissThrottled(src, dst)
+		*routingResult = bpfRoutingResult{}
 	}
 
 	defer c.core.closeRoutingTuplesEntry(src, dst, 6 /* IPPROTO_TCP */)

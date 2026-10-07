@@ -1556,19 +1556,18 @@ func (c *ControlPlane) udpRoutine(param *udpRoutineParam) {
 		var routingResult *bpfRoutingResult
 		var ok bool
 		if routingResult, ok = c.dnsRoutingResultCache.Get(src.Addr()); !ok {
-			var err error
 			// Don't use ObtainBpfRoutingResult() because it would be saved in cache.
-			routingResult = new(bpfRoutingResult)
-			// DNS routing is per-IP, not per-sport.
-			dnsSrc := netip.AddrPortFrom(src.Addr(), 0)
-			if err = c.core.RetrieveUDPRoutingResult(dnsSrc, dst, routingResult); err != nil {
-				if log.IsLevelEnabled(log.ErrorLevel) {
-					log.Errorf("%+v", common.Wrap(err, "Failed to retrieve udp 53 routing result, src: %v", src))
-				}
-				pool.PutBuffer(data)
-				return
+			// A missing routing result fails open for DNS: see
+			// resolveUdpDnsRoutingResult. Dropping here used to kill every DNS
+			// query — static/local entries included — whenever the dataplane
+			// failed to record a flow.
+			var cacheable bool
+			routingResult, cacheable = resolveUdpDnsRoutingResult(c.core.RetrieveUDPRoutingResult, src, dst)
+			if !cacheable {
+				logDnsRoutingMissThrottled(src, dst)
+			} else {
+				c.dnsRoutingResultCache.Save(src.Addr(), routingResult)
 			}
-			c.dnsRoutingResultCache.Save(src.Addr(), routingResult)
 		}
 		if routingResult.Must == 0 {
 			dq := ObtainDnsRequest(src, dst, routingResult, false)
