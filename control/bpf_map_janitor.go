@@ -10,11 +10,14 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
+
+	"github.com/daeuniverse/dae/common"
 )
 
 const (
@@ -62,8 +65,15 @@ func recycleScratchDelete[S ~[]E, E any](s *S) {
 type bpfMapJanitor struct {
 	bpf func() *bpfObjects
 
-	wake                 chan bool // true=cleanup now, false/closed=stop
-	done                 chan struct{}
+	wake chan bool // true=cleanup now, false/closed=stop
+	done chan struct{}
+	// pressure is set by WakePressure when the datapath reports that a bounded
+	// map rejected a write. The next round then ignores the per-category
+	// intervals: the periodic cadence can be minutes away, while the map needs
+	// room right now.
+	pressure atomic.Bool
+	// pressureWarnAt rate-limits the "pressure but nothing to free" warning.
+	pressureWarnAt       atomic.Int64
 	cookiePidScratch     janitorScratch[uint64, bpfPidPname]
 	redirectScratch      janitorScratch[bpfRedirectTuple, bpfRedirectEntry]
 	routingTuplesScratch janitorScratch[bpfTuplesKey, bpfRoutingResult]
@@ -84,6 +94,15 @@ func newBpfMapJanitor(bpf func() *bpfObjects) bpfMapJanitor {
 			delete: make([]bpfTuplesKey, 0, janitorDeleteInitCap),
 		},
 	}
+}
+
+// WakePressure asks for an immediate cleanup round that also ignores the
+// per-category intervals. It is how a datapath write failure (reported over the
+// event ring buffer) turns into an urgent sweep instead of a wait of up to
+// janitorMaxInterval.
+func (j *bpfMapJanitor) WakePressure() {
+	j.pressure.Store(true)
+	j.Wake()
 }
 
 // Wake signals the janitor to perform a cleanup round immediately. Safe
@@ -119,21 +138,37 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 
 			now := time.Now()
 			cleaned := 0
+			// A pressure round sweeps every category now, whatever the
+			// per-category intervals say.
+			force := j.pressure.Swap(false)
 
-			if lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
+			if force || lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
 				n := j.cleanupCookiePidMap()
 				cleaned += n
 				lastCookiePidCleanup = now
 			}
-			if lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
+			if force || lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
 				n := j.cleanupRedirectTrackMap()
 				cleaned += n
 				lastRedirectCleanup = now
 			}
-			if lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
+			if force || lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
 				n := j.cleanupRoutingTuplesMap()
 				cleaned += n
 				lastRoutingTuplesCleanup = now
+			}
+
+			if force && cleaned == 0 {
+				// The datapath ran out of room and expiry alone freed nothing:
+				// every entry is still inside its timeout, so the maps are at
+				// capacity. Keep failing closed, but say so once a minute
+				// instead of once per pressure event.
+				nowNano := now.UnixNano()
+				if last := j.pressureWarnAt.Load(); nowNano-last > int64(time.Minute) &&
+					j.pressureWarnAt.CompareAndSwap(last, nowNano) {
+					log.Warnln("datapath map pressure: cleanup freed no entries, " +
+						"the maps are at capacity and writes keep failing until flows expire")
+				}
 			}
 
 			// Calm-state backoff: when nothing was expired, double
@@ -277,9 +312,11 @@ func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 	defer recycleScratchDelete(&scratch.delete)
 
 	var cursor ebpf.MapBatchCursor
+	total := 0
 	for {
 		count, err := m.BatchLookup(&cursor, scratch.keys[:], scratch.values[:], nil)
 		if count > 0 {
+			total += count
 			for i := range count {
 				val := scratch.values[i]
 				key := scratch.keys[i]
@@ -300,6 +337,11 @@ func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 			}
 			break
 		}
+	}
+	// The scan we just did is the cheapest occupancy sample available, so
+	// publish it: it is what tells a high-water trigger how full the map is.
+	if common.Metrics.RoutingTuplesEntries != nil {
+		common.Metrics.RoutingTuplesEntries.With0().Set(int64(total))
 	}
 
 	if len(scratch.delete) > 0 {

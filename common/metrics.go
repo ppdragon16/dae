@@ -273,6 +273,12 @@ var Metrics = struct {
 	BufferPoolDemoted   *Gauge
 	BufferPoolOccupancy *Gauge
 	BufferPoolMax       *Gauge
+	// Datapath event pipeline: exact (never throttled) failure counts per
+	// event type and site, the last error code seen, and how full the routing
+	// tuple map is. See control/datapath_events.go.
+	DatapathEvents         *Gauge
+	DatapathEventLastErrno *Gauge
+	RoutingTuplesEntries   *Gauge
 }{}
 
 func InitMetrics() {
@@ -298,4 +304,7 @@ func InitMetrics() {
 	Metrics.BufferPoolDemoted = NewGauge("dae_buffer_pool_demoted", "class")
 	Metrics.BufferPoolOccupancy = NewGauge("dae_buffer_pool_occupancy", "class")
 	Metrics.BufferPoolMax = NewGauge("dae_buffer_pool_max", "class")
+	Metrics.DatapathEvents = NewGauge("dae_datapath_events_total", "event", "site")
+	Metrics.DatapathEventLastErrno = NewGauge("dae_datapath_event_last_errno", "event", "site")
+	Metrics.RoutingTuplesEntries = NewGauge("dae_routing_tuples_entries")
 }

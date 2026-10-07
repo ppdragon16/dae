@@ -208,38 +208,110 @@ struct {
 } routing_tuples_map SEC(".maps");
 // Memory is allocated on demand (BPF_F_NO_PREALLOC).
 
-#ifdef __DEBUG_ROUTING
-// Diagnostics for a rejected routing_tuples_map write. The map is deliberately
-// bounded and fail-closed (HASH, no eviction, MAX_DST_MAPPING_NUM entries), so
-// a transiently full map — or a failed on-demand entry allocation — makes the
-// update fail. For UDP the packet is still delivered to the control plane,
-// which then finds no entry; that is exactly the failure we want to see, but a
-// flow storm makes it happen on every packet, hence the one-line-per-second
-// throttle. Both the map and the print compile out without __DEBUG_ROUTING.
+// ---------------------------------------------------------------------------
+// Datapath events: eBPF -> control plane proactive notification.
+//
+// A bounded datapath structure that rejects a write is a condition the control
+// plane must know about immediately (and, for the maps it can, relieve). The
+// ring buffer carries that notification; the control plane consumes it and
+// decides whether to sweep, throttle or just report.
+//
+// Two rules keep this safe under a flood:
+//   1. the per-slot exact counter is incremented before any throttling, so the
+//      reported volume is never understated by a lost event;
+//   2. the event itself is throttled to one per (type, site) per second,
+//      because the ring buffer is a bounded shared resource and a flood must
+//      not be able to starve the other event types out of it.
+// ---------------------------------------------------------------------------
+
+// Event types. Append-only: the Go decoder (control/datapath_events.go) maps
+// these numbers to names.
+enum dae_event_type {
+	DAE_EVENT_UNSPECIFIED = 0,
+	DAE_EVENT_ROUTING_TUPLES_WRITE_FAILED = 1,
+	DAE_EVENT_REDIRECT_TRACK_WRITE_FAILED = 2,
+	DAE_EVENT_COOKIE_PID_WRITE_FAILED = 3,
+};
+
+#define EVENT_SLOT_TYPES 8
+#define EVENT_SLOT_SITES 8
+#define EVENT_SLOT_COUNT (EVENT_SLOT_TYPES * EVENT_SLOT_SITES)
+#define EVENT_SLOT_KEY(type, site) \
+	(((type) % EVENT_SLOT_TYPES) * EVENT_SLOT_SITES + ((site) % EVENT_SLOT_SITES))
+#define EVENT_EMIT_INTERVAL_NS 1000000000ULL /* 1s per (type, site) */
+
+struct dae_event {
+	__u64 timestamp_ns;
+	__u32 type;
+	__u32 site;
+	__s32 err;
+	__u32 l4proto;
+};
+
+struct dae_event_slot {
+	__u64 count;      /* exact failure count, never throttled */
+	__u64 last_emit_ns;
+	__s32 last_err;
+	__u32 last_l4proto;
+};
+
+/* The Go decoder reads these fields by offset; any change here must be mirrored
+ * in control/datapath_events.go (and its layout test). */
+typedef char dae_event_layout_check[(sizeof(struct dae_event) == 24) ? 1 : -1];
+typedef char dae_event_slot_layout_check[(sizeof(struct dae_event_slot) == 24) ? 1 : -1];
+
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 18); /* 256 KiB of throttled diagnostics */
+} event_ringbuf SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32);
-	__type(value, __u64);
-	__uint(max_entries, 1);
-} routing_tuples_fail_log_state SEC(".maps");
+	__type(value, struct dae_event_slot);
+	__uint(max_entries, EVENT_SLOT_COUNT);
+} event_slots SEC(".maps");
 
-static __always_inline void log_routing_tuples_update_failed(__u8 l4proto, long ret,
-							     __u8 site)
+static __always_inline void note_dae_event(__u32 type, __u32 site, __s32 err,
+					   __u32 l4proto)
 {
-	__u32 key = 0;
-	__u64 *last = bpf_map_lookup_elem(&routing_tuples_fail_log_state, &key);
-	__u64 now = bpf_ktime_get_ns();
+	__u32 key = EVENT_SLOT_KEY(type, site);
+	struct dae_event_slot *slot = bpf_map_lookup_elem(&event_slots, &key);
+	struct dae_event *ev;
+	__u64 now;
 
-	if (!last)
+	if (!slot)
 		return;
-	if (now - *last < 1000000000ULL)
+
+	__sync_fetch_and_add(&slot->count, 1);
+	slot->last_err = err;
+	slot->last_l4proto = l4proto;
+
+	now = bpf_ktime_get_ns();
+	if (now - slot->last_emit_ns < EVENT_EMIT_INTERVAL_NS)
 		return;
-	*last = now;
-	bpf_printk("routing_tuples_map update failed: site=%d l4proto=%d ret=%d",
-		   (int)site, (int)l4proto, (int)ret);
+	slot->last_emit_ns = now;
+
+	ev = bpf_ringbuf_reserve(&event_ringbuf, sizeof(*ev), 0);
+	if (!ev)
+		return; /* ring buffer full: lose the notification, keep the count */
+	ev->timestamp_ns = now;
+	ev->type = type;
+	ev->site = site;
+	ev->err = err;
+	ev->l4proto = l4proto;
+	bpf_ringbuf_submit(ev, 0);
+}
+
+#ifdef __DEBUG_ROUTING
+static __always_inline void debug_note_dae_event(__u32 type, __u32 site,
+						 __s32 err)
+{
+	bpf_printk("dae event: type=%d site=%d err=%d", (int)type, (int)site,
+		   (int)err);
 }
 #else
-#define log_routing_tuples_update_failed(l4proto, ret, site) ((void)0)
+#define debug_note_dae_event(type, site, err) ((void)0)
 #endif
 
 // Array of LPM tries:
@@ -1558,7 +1630,10 @@ publish_redirect_track_for_packet(struct __sk_buff *skb, __u32 link_h_len,
 	map_ret = bpf_map_update_elem(&redirect_track, &redirect_tuple,
 				      &redirect_entry, BPF_ANY);
 	if (map_ret) {
-		bpf_printk("redirect_track update failed: %d", (int)map_ret);
+		note_dae_event(DAE_EVENT_REDIRECT_TRACK_WRITE_FAILED, 0,
+			       (__s32)map_ret, 0);
+		debug_note_dae_event(DAE_EVENT_REDIRECT_TRACK_WRITE_FAILED, 0,
+				     (__s32)map_ret);
 		return (int)map_ret;
 	}
 	return 0;
@@ -1834,8 +1909,12 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 						      &udp_tuples_key,
 						      routing_result, BPF_ANY);
 
-		if (update_ret)
-			log_routing_tuples_update_failed(l4proto, update_ret, 1);
+		if (update_ret) {
+			note_dae_event(DAE_EVENT_ROUTING_TUPLES_WRITE_FAILED, 1,
+				       (__s32)update_ret, l4proto);
+			debug_note_dae_event(DAE_EVENT_ROUTING_TUPLES_WRITE_FAILED, 1,
+					     (__s32)update_ret);
+		}
 	}
 
 #if defined(__DEBUG_ROUTING) || defined(__PRINT_ROUTING_RESULT)
@@ -1876,7 +1955,10 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 							      BPF_ANY);
 
 			if (update_ret) {
-				log_routing_tuples_update_failed(l4proto, update_ret, 2);
+				note_dae_event(DAE_EVENT_ROUTING_TUPLES_WRITE_FAILED, 2,
+					       (__s32)update_ret, l4proto);
+				debug_note_dae_event(DAE_EVENT_ROUTING_TUPLES_WRITE_FAILED,
+						     2, (__s32)update_ret);
 				return TC_ACT_SHOT;
 			}
 		}
@@ -1906,7 +1988,10 @@ static __always_inline int do_tproxy(struct __sk_buff *skb, bool is_wan, u32 lin
 						      BPF_ANY);
 
 		if (update_ret) {
-			log_routing_tuples_update_failed(l4proto, update_ret, 3);
+			note_dae_event(DAE_EVENT_ROUTING_TUPLES_WRITE_FAILED, 3,
+				       (__s32)update_ret, l4proto);
+			debug_note_dae_event(DAE_EVENT_ROUTING_TUPLES_WRITE_FAILED, 3,
+					     (__s32)update_ret);
 			return TC_ACT_SHOT;
 		}
 	}
@@ -2317,7 +2402,11 @@ static __always_inline int _update_map_elem_by_cookie(const __u64 cookie,
 	// Update map.
 	ret = bpf_map_update_elem(&cookie_pid_map, &cookie, val, BPF_ANY);
 	if (unlikely(ret)) {
-		// bpf_printk("setup_mapping_from_sk: failed update map: %d", ret);
+		// A full cookie_pid_map silently degrades pname-based routing; make
+		// the failure visible instead of only returning it.
+		note_dae_event(DAE_EVENT_COOKIE_PID_WRITE_FAILED, 1, (__s32)ret, 0);
+		debug_note_dae_event(DAE_EVENT_COOKIE_PID_WRITE_FAILED, 1,
+				     (__s32)ret);
 		return ret;
 	}
 
@@ -2338,7 +2427,12 @@ static __always_inline int update_map_elem_by_cookie(const __u64 cookie)
 		// Fallback to only write pid to avoid loop due to packets sent by dae.
 		val.last_seen_ns = bpf_ktime_get_ns();
 		val.pid = bpf_get_current_pid_tgid() >> 32;
-		bpf_map_update_elem(&cookie_pid_map, &cookie, &val, BPF_ANY);
+		if (bpf_map_update_elem(&cookie_pid_map, &cookie, &val, BPF_ANY)) {
+			note_dae_event(DAE_EVENT_COOKIE_PID_WRITE_FAILED, 2,
+				       -1, 0);
+			debug_note_dae_event(DAE_EVENT_COOKIE_PID_WRITE_FAILED, 2,
+					     -1);
+		}
 		return ret;
 	}
 	return 0;

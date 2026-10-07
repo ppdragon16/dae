@@ -1387,6 +1387,11 @@ func (c *ControlPlane) Serve(readyChan chan<- bool, listener *Listener) (err err
 	}
 
 	c.bpfMapJanitor.Start(c.ctx)
+	// Datapath events (bounded-map write failures) are pushed over the event
+	// ring buffer; this control plane reacts to them while it is serving. The
+	// reader itself follows the bpf state, so a hot reload keeps it alive.
+	setDatapathEventSink(&datapathEventSink{owner: c, janitor: &c.bpfMapJanitor})
+	startDatapathEventConsumer(c.core.bpf)
 
 	<-c.ctx.Done()
 	return nil
@@ -2331,6 +2336,9 @@ func (c *ControlPlane) Close() (err error) {
 
 	// Stop janitor before cancel (so BPF maps are still valid during cleanup).
 	c.bpfMapJanitor.Stop()
+	// Stop reacting to datapath events; a successor installed by a hot reload
+	// keeps its own registration.
+	clearDatapathEventSink(c)
 
 	// Invoke defer funcs in reverse order.
 	for _, v := range slices.Backward(c.deferFuncs) {
