@@ -36,9 +36,16 @@ const (
 
 	// routingTuples scan and timeout constants.
 	routingTuplesJanitorInterval = 30 * time.Second
-	routingTuplesTimeoutActive   = 30 * time.Minute
-	routingTuplesTimeoutClosing  = 10 * time.Second
-	routingTuplesTimeoutUdp      = 1 * time.Minute
+	// routingTuplesTimeoutActive is how long a live TCP entry may go without a
+	// packet before it is dropped. Losing one is not a cache miss: the
+	// remaining packets of an established connection whose entry is gone are
+	// passed straight through by the datapath instead of re-routed, so the
+	// timeout has to outlast the idle periods of connections that are still
+	// alive. Application heartbeats are opt-in (OpenSSH's ServerAliveInterval
+	// defaults to 0), so two hours is the floor rather than the ceiling.
+	routingTuplesTimeoutActive  = 2 * time.Hour
+	routingTuplesTimeoutClosing = 10 * time.Second
+	routingTuplesTimeoutUdp     = 1 * time.Minute
 
 	janitorBatchLookupSize = 64
 	janitorDeleteInitCap   = 32
