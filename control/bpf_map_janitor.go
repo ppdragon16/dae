@@ -42,6 +42,10 @@ const (
 
 	janitorBatchLookupSize = 64
 	janitorDeleteInitCap   = 32
+
+	// janitorPressureLogInterval rate-limits the report of an urgent sweep: a
+	// sustained datapath pressure would otherwise ask for one every second.
+	janitorPressureLogInterval = 5 * time.Second
 )
 
 // ---- scratch helpers ----
@@ -73,7 +77,9 @@ type bpfMapJanitor struct {
 	// room right now.
 	pressure atomic.Bool
 	// pressureWarnAt rate-limits the "pressure but nothing to free" warning.
-	pressureWarnAt       atomic.Int64
+	pressureWarnAt atomic.Int64
+	// pressureLogAt rate-limits the "swept under pressure" report.
+	pressureLogAt        atomic.Int64
 	cookiePidScratch     janitorScratch[uint64, bpfPidPname]
 	redirectScratch      janitorScratch[bpfRedirectTuple, bpfRedirectEntry]
 	routingTuplesScratch janitorScratch[bpfTuplesKey, bpfRoutingResult]
@@ -141,21 +147,49 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 			// A pressure round sweeps every category now, whatever the
 			// per-category intervals say.
 			force := j.pressure.Swap(false)
+			var freedCookiePid, freedRedirect, freedRoutingTuples int
 
 			if force || lastCookiePidCleanup.IsZero() || now.Sub(lastCookiePidCleanup) >= cookiePidJanitorInterval {
 				n := j.cleanupCookiePidMap()
+				freedCookiePid = n
 				cleaned += n
 				lastCookiePidCleanup = now
 			}
 			if force || lastRedirectCleanup.IsZero() || now.Sub(lastRedirectCleanup) >= redirectTrackJanitorInterval {
 				n := j.cleanupRedirectTrackMap()
+				freedRedirect = n
 				cleaned += n
 				lastRedirectCleanup = now
 			}
 			if force || lastRoutingTuplesCleanup.IsZero() || now.Sub(lastRoutingTuplesCleanup) >= routingTuplesJanitorInterval {
 				n := j.cleanupRoutingTuplesMap()
+				freedRoutingTuples = n
 				cleaned += n
 				lastRoutingTuplesCleanup = now
+			}
+
+			if force {
+				// Make the proactive sweep observable: without this a pressure
+				// round that does free entries leaves no trace in the log at
+				// all, and "did the reaction work?" cannot be answered.
+				nowNano := now.UnixNano()
+				if last := j.pressureLogAt.Load(); nowNano-last > int64(janitorPressureLogInterval) &&
+					j.pressureLogAt.CompareAndSwap(last, nowNano) {
+					log.WithFields(log.Fields{
+						"routing_tuples": freedRoutingTuples,
+						"redirect_track": freedRedirect,
+						"cookie_pid":     freedCookiePid,
+						"total":          cleaned,
+					}).Infoln("datapath pressure: swept the maps immediately")
+				}
+			} else if cleaned > 0 {
+				// Periodic rounds are frequent and normally free idle flows;
+				// keep them out of the default log.
+				log.WithFields(log.Fields{
+					"routing_tuples": freedRoutingTuples,
+					"redirect_track": freedRedirect,
+					"cookie_pid":     freedCookiePid,
+				}).Debugln("janitor swept the maps")
 			}
 
 			if force && cleaned == 0 {
