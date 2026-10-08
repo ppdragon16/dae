@@ -297,7 +297,16 @@ func (af *Anyfrom) flushLocked() {
 	for i := range n {
 		req := &af.sBuf.reqs[i]
 
-		iovs[i] = unix.Iovec{Base: &req.data[0], Len: uint64(len(req.data))}
+		// A zero-length datagram is legal, and the pool hands out an empty
+		// (non-nil) slice for it: &req.data[0] would panic on that, in this
+		// flush -- which runs on the batch timer or the packet goroutine, so
+		// the panic takes the process down. sendmsg sends an empty datagram
+		// when iov_len is 0 and the base is nil.
+		var base *byte
+		if len(req.data) > 0 {
+			base = &req.data[0]
+		}
+		iovs[i] = unix.Iovec{Base: base, Len: uint64(len(req.data))}
 
 		if req.dst.IsValid() {
 			// Encode sockaddr for this slot.
@@ -338,7 +347,7 @@ func (af *Anyfrom) flushLocked() {
 		}
 	}
 
-	_, _, e := unix.Syscall6(
+	sent, _, e := unix.Syscall6(
 		unix.SYS_SENDMMSG,
 		uintptr(af.fd),
 		uintptr(unsafe.Pointer(&msgs[0])),
@@ -346,7 +355,18 @@ func (af *Anyfrom) flushLocked() {
 		0, 0, 0,
 	)
 	if e != 0 {
-		log.Debugf("[sendmmsg] flush error: %v", e)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.Debugf("[sendmmsg] flush error: %v", e)
+		}
+	} else if int(sent) != n && log.IsLevelEnabled(log.DebugLevel) {
+		// A partial batch: sendmmsg stops at the first datagram the kernel
+		// refuses (EMSGSIZE for an oversized one), and the remainder is dropped
+		// on purpose -- re-queueing it would duplicate the accepted prefix and
+		// reorder datagrams, while UDP applications retransmit. Report the
+		// shortfall rather than discarding it silently, since a silently short
+		// flush is invisible in production. The level check keeps the common
+		// full-flush path from paying logrus's argument boxing per batch.
+		log.Debugf("[sendmmsg] flushed %d of %d datagrams", sent, n)
 	}
 
 	// Free data buffers.
