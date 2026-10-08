@@ -290,6 +290,10 @@ func InitMetrics() {
 	Metrics.CheckMovingLatency = NewGauge("dae_check_moving_latency", "outbound", "subtag", "dialer", "network")
 	Metrics.CheckSelectLatency = NewGauge("dae_check_select_latency", "outbound", "subtag", "dialer", "network")
 	Metrics.DialerSelectIndex = NewGauge("dae_dialer_select_index", "outbound", "subtag", "dialer", "network")
+	// dae_error_count counts the forwarding failures that reach the client and
+	// its log line. A failure a DNS race absorbs is deliberately not counted:
+	// a sibling answered, so the client never saw it (the drop point in
+	// control/dns_control.go mirrors it at debug level instead).
 	Metrics.ErrorCount = NewGauge("dae_error_count", "outbound", "subtag", "dialer", "network")
 	Metrics.TrafficBytes = NewGauge("dae_traffic_bytes", "outbound", "subtag", "dialer", "network")
 	Metrics.StackInuse = NewGauge("dae_stack_inuse_kb")

@@ -731,6 +731,7 @@ func (c *DnsController) forwardDNSSingle(
 		return upstream, nil
 	}
 	if err := c.forwardOne(data, upstream, dialArg, queryInfo, dnsResp); err != nil {
+		common.Metrics.ErrorCount.With4(dnsDialErrorLabels(dialArg)).Inc()
 		return nil, err
 	}
 	return upstream, nil
@@ -875,6 +876,7 @@ func (c *DnsController) forwardDNSRaceGroup(
 		// its dialer was chosen as part of the group.
 		cand := &usable[0]
 		if err := c.forwardOne(data, cand.upstream, &cand.dialArg, queryInfo, dnsResp); err != nil {
+			common.Metrics.ErrorCount.With4(dnsDialErrorLabels(&cand.dialArg)).Inc()
 			return nil, err
 		}
 		*out = cand.dialArg
@@ -912,17 +914,36 @@ func (c *DnsController) forwardDNSRaceGroup(
 		}(cand, dataCopy)
 	}
 	var firstErr error
+	var firstFailedDialArg *dialArgument
 	for range len(usable) {
 		res := <-results
 		if res.win {
 			return res.candidate.upstream, nil
 		}
-		if firstErr == nil && res.err != nil {
-			firstErr = res.err
+		if res.err != nil {
+			// This member did not answer. If a sibling does, the failure is
+			// absorbed: the client never sees it, it is not counted and nothing
+			// is logged, so mirror the detail at debug level -- also the only
+			// place that explains why the member may have been demoted. If
+			// nobody answers, the first one here is the failure the returned
+			// error reports (and the query's single count).
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"upstream": res.candidate.upstream.String(),
+					"qname":    queryInfo.qname,
+					"qtype":    queryInfo.qtype,
+				}).WithError(res.err).Debugln("DNS race candidate failed; another member answered")
+			}
+			if firstErr == nil {
+				firstErr = res.err
+				firstFailedDialArg = &res.candidate.dialArg
+			}
 		}
 	}
-	if firstErr == nil {
-		firstErr = common.Errf("no race member produced an answer")
+	// No winner means error. The switch above guarantees at least one usable
+	// member, so reaching here means every result failed.
+	if firstFailedDialArg != nil {
+		common.Metrics.ErrorCount.With4(dnsDialErrorLabels(firstFailedDialArg)).Inc()
 	}
 	return nil, fmt.Errorf("all %d race upstreams failed: %w", len(usable), firstErr)
 }
@@ -974,6 +995,17 @@ func (c *DnsController) refreshDNSInBackground(data []byte, queryInfo queryInfo,
 	}(c, p, key)
 }
 
+// dnsDialErrorLabels builds the metric labels of a counted DNS forwarding
+// failure (outbound, subscription tag, dialer, network).
+func dnsDialErrorLabels(dialArg *dialArgument) [4]string {
+	return [4]string{
+		dialArg.Outbound.Name,
+		dialArg.Dialer.Property.SubscriptionTag,
+		dialArg.Dialer.Name,
+		dialArg.networkType.String(),
+	}
+}
+
 // forwardError applies the forwarding-failure policy: wrap the error with its
 // routing context, count it, and mark the dialer unavailable when the failure
 // says something about the route. It returns nil when the error came with a
@@ -991,13 +1023,10 @@ func (c *DnsController) forwardError(err error, dialArg *dialArgument, queryInfo
 			With("Outbound", dialArg.Outbound.Name).
 			With("Dialer", dialArg.Dialer.Name).
 			Wrapf(err, "DNS dialSend error")
-		labels := [...]string{
-			dialArg.Outbound.Name,
-			dialArg.Dialer.Property.SubscriptionTag,
-			dialArg.Dialer.Name,
-			dialArg.networkType.String(),
-		}
-		common.Metrics.ErrorCount.With4(labels).Inc()
+		// Counting is deliberately NOT done here: this function cannot know
+		// whether a race sibling will absorb the failure. The callers that do
+		// know count it -- forwardOne for a fatal single-upstream failure, and
+		// the race loop only when no member answered at all.
 
 		if !isNetError || isClosed || !dnsResponse(dnsResp.respData) {
 			return err
