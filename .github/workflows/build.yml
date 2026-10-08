@@ -36,7 +36,10 @@ jobs:
     secrets: inherit
 
   build:
-    uses: daeuniverse/dae/.github/workflows/seed-build.yml@main
+    # Built by this repo's own copy: upstream's seed-build.yml@main now needs
+    # the CI scripts and Makefile targets of upstream #1099, which this fork
+    # does not carry. The local copy is self-contained (no scripts).
+    uses: ./.github/workflows/seed-build.yml
     with:
       ref: ${{ github.sha }}
       build-type: main-build

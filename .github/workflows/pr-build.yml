@@ -38,7 +38,10 @@ jobs:
   build:
     needs: [pre-actions]
     if: ${{ github.event.pull_request.draft == false }}
-    uses: daeuniverse/dae/.github/workflows/seed-build.yml@main
+    # Built by this repo's own copy: upstream's seed-build.yml@main now needs
+    # the CI scripts and Makefile targets of upstream #1099, which this fork
+    # does not carry. The local copy is self-contained (no scripts).
+    uses: ./.github/workflows/seed-build.yml
     with:
       ref: ${{ github.event.pull_request.head.sha }}
       pr-number: ${{ github.event.pull_request.number }}

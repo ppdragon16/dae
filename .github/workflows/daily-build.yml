@@ -12,6 +12,9 @@
 name: Daily Build (Main)
 
 on:
+  # Manual runs: the cron below can be delayed for hours (or skipped), so allow
+  # starting one on demand from the Actions page.
+  workflow_dispatch:
   schedule:
     # At (UTC+8 0:00 | UTC+0 16:00) every day
     - cron: "0 16 * * *"
@@ -27,7 +30,10 @@ jobs:
     secrets: inherit
 
   build:
-    uses: daeuniverse/dae/.github/workflows/seed-build.yml@main
+    # Built by this repo's own copy: upstream's seed-build.yml@main now needs
+    # the CI scripts and Makefile targets of upstream #1099, which this fork
+    # does not carry. The local copy is self-contained (no scripts).
+    uses: ./.github/workflows/seed-build.yml
     with:
       ref: ${{ github.sha }}
       build-type: daily-build
