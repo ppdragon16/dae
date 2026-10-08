@@ -345,7 +345,9 @@ func (c *datapathEventConsumer) run(ctx context.Context, reader *ringbuf.Reader,
 			if errors.Is(err, ringbuf.ErrClosed) || ctx.Err() != nil {
 				return
 			}
-			log.Debugf("failed to read the datapath event ring buffer: %v", err)
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.Debugf("failed to read the datapath event ring buffer: %v", err)
+			}
 			// Do not spin on a persistent error.
 			select {
 			case <-time.After(100 * time.Millisecond):
@@ -356,7 +358,9 @@ func (c *datapathEventConsumer) run(ctx context.Context, reader *ringbuf.Reader,
 		}
 		ev, err := decodeDatapathEvent(rec.RawSample)
 		if err != nil {
-			log.Debugf("failed to decode a datapath event: %v", err)
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.Debugf("failed to decode a datapath event: %v", err)
+			}
 			continue
 		}
 		if sink := c.sink.Load(); sink != nil {

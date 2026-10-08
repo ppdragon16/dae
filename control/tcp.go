@@ -70,7 +70,9 @@ func (c *ControlPlane) handleTcpDns(
 		_, err = io.ReadFull(lConn, data)
 	}
 	if err != nil {
-		log.Debugf("failed to read tcp dns request: %v", err)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.Debugf("failed to read tcp dns request: %v", err)
+		}
 		// It's common to get EOF when reading tcp dns request.
 		return nil
 	}

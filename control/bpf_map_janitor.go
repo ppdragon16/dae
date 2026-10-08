@@ -250,9 +250,10 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 						"total":          cleaned,
 					}).Infoln("datapath pressure: swept the maps immediately")
 				}
-			} else if cleaned > 0 {
+			} else if cleaned > 0 && log.IsLevelEnabled(log.DebugLevel) {
 				// Periodic rounds are frequent and normally free idle flows;
-				// keep them out of the default log.
+				// keep them out of the default log. The level check comes
+				// first so the field map is not built when nothing is emitted.
 				log.WithFields(log.Fields{
 					"routing_tuples": freedRoutingTuples,
 					"redirect_track": freedRedirect,
@@ -348,7 +349,8 @@ func (j *bpfMapJanitor) cleanupCookiePidMap() int {
 	}
 
 	if len(scratch.delete) > 0 {
-		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil {
+		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil &&
+			log.IsLevelEnabled(log.DebugLevel) {
 			log.WithError(err).Debug("cleanupCookiePidMap: batch delete error")
 		}
 	}
@@ -392,7 +394,8 @@ func (j *bpfMapJanitor) cleanupRedirectTrackMap() int {
 	}
 
 	if len(scratch.delete) > 0 {
-		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil {
+		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil &&
+			log.IsLevelEnabled(log.DebugLevel) {
 			log.WithError(err).Debug("cleanupRedirectTrackMap: batch delete error")
 		}
 	}
@@ -453,7 +456,8 @@ func (j *bpfMapJanitor) cleanupRoutingTuplesMap() int {
 	}
 
 	if len(scratch.delete) > 0 {
-		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil {
+		if _, err := BpfMapBatchDelete(m, scratch.delete); err != nil &&
+			log.IsLevelEnabled(log.DebugLevel) {
 			log.WithError(err).Debug("cleanupRoutingTuplesMap: batch delete error")
 		}
 	}

@@ -138,8 +138,11 @@ func (ue *UdpEndpoint) run() {
 				common.Metrics.ErrorCount.With4(ue.labels).Inc()
 				log.Warnf("%+v", readErr)
 			} else if isClosed {
-				// Endpoint was closed locally; normal termination.
-				log.Debugf("%+v", readErr)
+				// Endpoint was closed locally; normal termination. This runs
+				// once per endpoint teardown, so keep the level check first.
+				if log.IsLevelEnabled(log.DebugLevel) {
+					log.Debugf("%+v", readErr)
+				}
 			} else if !isTimeout && ue.dialer.NeedAliveState() {
 				common.Metrics.ErrorCount.With4(ue.labels).Inc()
 				ue.dialer.ReportUnavailable()
