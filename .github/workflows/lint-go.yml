@@ -17,6 +17,9 @@ jobs:
           submodules: recursive
       - uses: actions/setup-go@v5
         with:
+          # Keep lint on go.mod's version, not the build version: staticcheck
+          # 2026.2.1 (the newest release) cannot read Go 1.27 export data, so
+          # linting under 1.27 fails at the compile stage.
           go-version-file: go.mod
       # cmd and the main package import control, so the lint gate can only
       # compile a fresh checkout once the bpf2go types exist. Those files are
