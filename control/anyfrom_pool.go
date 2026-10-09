@@ -306,7 +306,11 @@ func (af *Anyfrom) flushLocked() {
 		if len(req.data) > 0 {
 			base = &req.data[0]
 		}
-		iovs[i] = unix.Iovec{Base: base, Len: uint64(len(req.data))}
+		iovs[i] = unix.Iovec{Base: base}
+		// Len is uint32 on 32-bit Linux and uint64 on 64-bit, so a literal
+		// uint64 conversion does not compile for 386/arm/mips*; SetLen is the
+		// portable setter the standard library uses for the same struct.
+		iovs[i].SetLen(len(req.data))
 
 		if req.dst.IsValid() {
 			// Encode sockaddr for this slot.
