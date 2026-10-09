@@ -66,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout codebase
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
@@ -97,7 +97,7 @@ jobs:
           echo "ASSET_NAME=$_NAME" >> $GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           cache-dependency-path: |
             go.mod
@@ -135,7 +135,7 @@ jobs:
         run: ./build/dae-$ASSET_NAME --version
 
       - name: Upload files to Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: dae-${{ steps.get_filename.outputs.ASSET_NAME }}
           path: build/*
@@ -145,7 +145,7 @@ jobs:
         # does not have, so gate it behind a repo variable: a same-repo PR would
         # otherwise fail here with missing secrets. Set DAE_BOT_CHECK_RUN=true
         # (Settings > Variables) once the app is configured.
-        uses: daeuniverse/ci-seed-jobs/common/report-check-run@master
+        uses: daeuniverse/ci-seed-jobs/common/report-check-run@5d0b8710ae2b7fcc2051e5e9379671c6662b278e  # master @ 2026-10-07 run
         if: >-
           always() && inputs.build-type == 'pr-build'
           && startsWith(github.event.pull_request.head.repo.full_name, github.repository_owner)

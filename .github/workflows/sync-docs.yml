@@ -33,7 +33,7 @@ jobs:
       git_commit_msg: ${{ steps.export.outputs.git_commit_msg }}
       git_run_number: ${{ steps.export.outputs.git_run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - name: Get metadata from HEAD sha
         id: export
         run: |
@@ -47,7 +47,7 @@ jobs:
           python3 hack/ci/config-doc-generator.py
 
       - name: Export artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: pre_flight_artifacts
           path: |
@@ -59,14 +59,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout to daeuniverse/dae-docs
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           repository: daeuniverse/dae-docs
           fetch-depth: 0
           ref: master
 
       - name: Copy artifacts from build job to local path
-        uses: actions/download-artifact@v4.1.4
+        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427  # v4.1.4
         with:
           name: pre_flight_artifacts
           path: docs/
@@ -81,7 +81,7 @@ jobs:
 
       - name: Create Pull Request
         id: create_pr
-        uses: peter-evans/create-pull-request@v5
+        uses: peter-evans/create-pull-request@4e1beaa7521e8b457b572c090b25bd3db56bf1c5  # v5
         with:
           author: daebot <dae@v2raya.org>
           committer: daebot <dae@v2raya.org>

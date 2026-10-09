@@ -27,7 +27,7 @@ on:
 jobs:
   pre-actions:
     if: ${{ github.event.pull_request.draft == false }}
-    uses: daeuniverse/ci-seed-jobs/.github/workflows/pre-actions.yml@master
+    uses: daeuniverse/ci-seed-jobs/.github/workflows/pre-actions.yml@5d0b8710ae2b7fcc2051e5e9379671c6662b278e  # master @ 2026-10-07 run
     with:
       repository: ${{ github.repository }}
       ref: ${{ github.event.pull_request.head.sha }}
@@ -51,7 +51,7 @@ jobs:
   post-actions:
     if: always()
     needs: [build]
-    uses: daeuniverse/ci-seed-jobs/.github/workflows/dae-post-actions.yml@master
+    uses: daeuniverse/ci-seed-jobs/.github/workflows/dae-post-actions.yml@5d0b8710ae2b7fcc2051e5e9379671c6662b278e  # master @ 2026-10-07 run
     with:
       check-run-id: "dae-bot[bot]/pr-build-passed"
       check-run-conclusion: ${{ needs.build.result }}
