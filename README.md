@@ -74,6 +74,7 @@ priority: '<default>[,<pri>(<latency_low>,<latency_high>)[; ...]]'
 | `<pri>(<low>,<high>)` | Override priority when the node's observed latency falls within `[low, high]` |
 
 In the example above:
+
 - `sub1` nodes default to priority 0, but jump to priority **2** when latency is below 300ms — with a `min_moving_avg` policy, higher-priority nodes are preferred, so sub1 dominates when it's fast.
 - `sub2` nodes default to priority 0, jump to priority **1** when below 200ms — a tighter latency requirement with lower reward.
 - `sub3` nodes have no annotation, meaning priority defaults to 0 with no conditional boost.
@@ -445,7 +446,6 @@ anytls://user@host:port?minIdleSession=2&idleCheckInterval=30s&idleTimeout=5m#No
 Please refer to the [Quick Start Guide](./docs/en/README.md) for kernel requirements, installation, and minimal configuration.
 
 A full example config is available at [example_next.dae](./example_next.dae).
-
 
 ## License
 
