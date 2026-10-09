@@ -3,12 +3,13 @@ name: Synchronize Documents
 on:
   workflow_dispatch:
   push:
+    # No tags trigger: this workflow ends by pushing to daeuniverse/dae-docs
+    # with secrets.GH_TOKEN, which a fork cannot do -- a release tag should not
+    # start a run that is bound to fail.
     branches:
       - main
       - 'ci/**'
       - 'release/**'
-    tags:
-      - 'v*'
     paths:
       - "README*.md"
       - "docs/**"
@@ -56,6 +57,9 @@ jobs:
   sync-to-dae-docs:
     needs: [replicate-config]
     name: Synchronize changes to dae-docs
+    # Needs write access to daeuniverse/dae-docs plus secrets.GH_TOKEN; enable
+    # with the repository variable DAE_DOCS_SYNC=true once both exist.
+    if: vars.DAE_DOCS_SYNC == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout to daeuniverse/dae-docs
