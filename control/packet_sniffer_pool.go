@@ -83,7 +83,7 @@ func (p *PacketSnifferPool) GetOrCreate(key PacketSnifferKey, createOption *Pack
 		}
 
 		qs = &PacketSniffer{
-			Sniffer:       sniffing.NewPacketSniffer(nil, createOption.Ttl),
+			Sniffer:       sniffing.NewPacketSniffer(nil),
 			Mu:            sync.Mutex{},
 			deadlineTimer: nil,
 		}

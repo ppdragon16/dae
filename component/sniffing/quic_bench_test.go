@@ -8,7 +8,6 @@ package sniffing
 import (
 	"encoding/hex"
 	"testing"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -20,7 +19,7 @@ var QuicStream, _ = hex.DecodeString("c00000000108d60451e5cb0f7050000044bc9acdca
 func BenchmarkReassembleCryptoToBytesFromPool(b *testing.B) {
 	log.SetLevel(log.DebugLevel)
 	for i := 0; i < b.N; i++ {
-		sniffer := NewPacketSniffer(QuicStream, 300*time.Millisecond)
+		sniffer := NewPacketSniffer(QuicStream)
 		d, err := sniffer.SniffQuic()
 		if err != nil {
 			b.Fatal(err)

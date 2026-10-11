@@ -9,14 +9,13 @@ import (
 	"bytes"
 	"errors"
 	"testing"
-	"time"
 )
 
 // TestSniffHttpNeedsMoreOnSplitRequestLine pins the retry contract at the
 // request line: a method-validated buffer without an LF is a request line split
 // across reads, not a final verdict. (Port of kdae ca97821b.)
 func TestSniffHttpNeedsMoreOnSplitRequestLine(t *testing.T) {
-	sniffer := NewPacketSniffer([]byte("GET /path HTTP/1.1\r"), 50*time.Millisecond)
+	sniffer := NewPacketSniffer([]byte("GET /path HTTP/1.1\r"))
 	_, err := sniffer.SniffHttp()
 	if !errors.Is(err, ErrNeedMore) {
 		t.Fatalf("err = %v, want ErrNeedMore for a split request line", err)
@@ -36,7 +35,7 @@ func TestSniffHttpNeedsMoreOnSplitRequestLine(t *testing.T) {
 // must not be accepted as complete — that would route by a silently truncated
 // domain (here "exam") instead of waiting for the rest of the header block.
 func TestSniffHttpNeedsMoreOnSplitHostValue(t *testing.T) {
-	sniffer := NewPacketSniffer([]byte("GET /path HTTP/1.1\r\nHost: exam"), 50*time.Millisecond)
+	sniffer := NewPacketSniffer([]byte("GET /path HTTP/1.1\r\nHost: exam"))
 	_, err := sniffer.SniffHttp()
 	if !errors.Is(err, ErrNeedMore) {
 		t.Fatalf("err = %v, want ErrNeedMore for a Host value split across reads", err)
@@ -47,7 +46,7 @@ func TestSniffHttpNeedsMoreOnSplitHostValue(t *testing.T) {
 // end-of-headers blank line are not a final verdict either — the Host may
 // arrive in a later header line.
 func TestSniffHttpNeedsMoreUntilHeaderBlockEnds(t *testing.T) {
-	sniffer := NewPacketSniffer([]byte("GET /path HTTP/1.1\r\nAccept: text/plain\r\n"), 50*time.Millisecond)
+	sniffer := NewPacketSniffer([]byte("GET /path HTTP/1.1\r\nAccept: text/plain\r\n"))
 	_, err := sniffer.SniffHttp()
 	if !errors.Is(err, ErrNeedMore) {
 		t.Fatalf("err = %v, want ErrNeedMore for an unfinished header block", err)
@@ -61,7 +60,7 @@ func TestSniffHttpNeedsMoreUntilHeaderBlockEnds(t *testing.T) {
 // block still resolves its Host.
 func TestSniffHttpGivesUpAtBufferCap(t *testing.T) {
 	head := append([]byte("GET /path HTTP/1.1\r\nX-Pad: "), bytes.Repeat([]byte{'a'}, sniffHTTPMaxBufferedSize)...)
-	sniffer := NewPacketSniffer(head, 50*time.Millisecond)
+	sniffer := NewPacketSniffer(head)
 	_, err := sniffer.SniffHttp()
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound past the buffered-size cap", err)
@@ -73,7 +72,7 @@ func TestSniffHttpGivesUpAtBufferCap(t *testing.T) {
 	big := append([]byte("GET /path HTTP/1.1\r\nHost: early.example\r\nX-Pad: "),
 		bytes.Repeat([]byte{'b'}, sniffHTTPMaxBufferedSize)...)
 	big = append(big, "\r\n\r\n"...)
-	sniffer = NewPacketSniffer(big, 50*time.Millisecond)
+	sniffer = NewPacketSniffer(big)
 	d, err := sniffer.SniffHttp()
 	if err != nil {
 		t.Fatalf("oversized-but-parseable header block: %v", err)

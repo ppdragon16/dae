@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/daeuniverse/dae/component/sniffing/internal/quicutils"
 	log "github.com/sirupsen/logrus"
@@ -31,7 +30,7 @@ func dumpCryptos(t *testing.T, cryptos []*quicutils.CryptoFrameOffset) {
 
 func TestQuicReassemble(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
-	sniffer := NewPacketSniffer(QuicStream2_1, 300*time.Millisecond)
+	sniffer := NewPacketSniffer(QuicStream2_1)
 	d, err := sniffer.SniffQuic()
 	if err != nil {
 		if sniffer.NeedMore() {
@@ -52,7 +51,7 @@ func TestQuicReassemble(t *testing.T) {
 }
 func TestQuic(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
-	sniffer := NewPacketSniffer(QuicStream3, 300*time.Millisecond)
+	sniffer := NewPacketSniffer(QuicStream3)
 	d, err := sniffer.SniffQuic()
 	if err != nil {
 		dumpCryptos(t, sniffer.quicCryptos)

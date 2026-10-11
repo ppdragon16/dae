@@ -56,7 +56,11 @@ func NewStreamSniffer(r io.Reader, timeout time.Duration) *Sniffer {
 	return s
 }
 
-func NewPacketSniffer(data []byte, timeout time.Duration) *Sniffer {
+// NewPacketSniffer wraps one datagram for sniffing. UDP sniffing has no wait:
+// there is nothing to block on, and a QUIC exchange split across datagrams is
+// continued by feeding each later datagram into the same session (bounded by
+// the session TTL), not by a timeout.
+func NewPacketSniffer(data []byte) *Sniffer {
 	buffer := pool.NewPooledBuffer()
 	buffer.Write(data)
 	s := &Sniffer{

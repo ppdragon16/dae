@@ -89,8 +89,10 @@ global {
     # Allow insecure TLS certificates. It is not recommended to turn it on unless you have to.
     allow_insecure: false
 
-    # Timeout to waiting for first data sending for sniffing. It is always 0 if dial_mode is ip. Set it higher is useful
-    # in high latency LAN network.
+    # TCP-only: the budget for waiting for the peer's first data before TCP sniffing gives up,
+    # doubled for ports 80 and 443, and forced to 0 unless dial_target_override is on or
+    # reroute_mode is not none. UDP sniffing (udp_sniff_ports) works per datagram and does not
+    # use this. Set it higher is useful in high latency network.
     sniffing_timeout: 100ms
 
     # TLS implementation. tls is to use Go's crypto/tls. utls is to use uTLS, which can imitate browser's Client Hello.
