@@ -16,6 +16,9 @@ import (
 type ConnSnifferInterface interface {
 	net.Conn
 	SniffTcp() (string, error)
+	// SniffProgress reports the accumulated byte count and a snapshot of the
+	// leading bytes, so a failed sniff can be reported with what it saw.
+	SniffProgress() (int, []byte)
 }
 
 type ConnSniffer struct {

@@ -46,6 +46,33 @@ func appendStr(buf []byte, key, val string) []byte {
 	return buf
 }
 
+// appendAddrPortField appends:  key="1.2.3.4:5678"  without allocating
+// (netip.AddrPort.AppendTo writes straight into the buffer).
+func appendAddrPortField(buf []byte, key string, ap netip.AddrPort) []byte {
+	buf = append(buf, ' ')
+	buf = append(buf, key...)
+	buf = append(buf, `="`...)
+	buf = ap.AppendTo(buf)
+	buf = append(buf, '"')
+	return buf
+}
+
+// appendHexField appends:  key="16 03 01 02 00"  without allocating.
+func appendHexField(buf []byte, key string, b []byte) []byte {
+	const hexDigits = "0123456789abcdef"
+	buf = append(buf, ' ')
+	buf = append(buf, key...)
+	buf = append(buf, `="`...)
+	for i, c := range b {
+		if i > 0 {
+			buf = append(buf, ' ')
+		}
+		buf = append(buf, hexDigits[c>>4], hexDigits[c&0xF])
+	}
+	buf = append(buf, '"')
+	return buf
+}
+
 // appendUint appends:  key=123  (zero alloc via strconv.AppendUint)
 func appendUint(buf []byte, key string, v uint32) []byte {
 	buf = append(buf, ' ')

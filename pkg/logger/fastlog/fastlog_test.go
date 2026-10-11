@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -637,5 +638,88 @@ func BenchmarkLogrusLogDnsResponse(b *testing.B) {
 			"pname":    "curl",
 			"mac":      "aa:bb:cc:dd:ee:ff",
 		}).Info("[DNS] 192.168.1.1:54321 <-> 8.8.8.8:53")
+	}
+}
+
+func TestLogSniffTimeoutFormat(t *testing.T) {
+	var buf bytes.Buffer
+	Configure(&buf)
+
+	LogSniffTimeout(
+		mustAddrPort("192.0.2.10:34567"),
+		mustAddrPort("198.51.100.20:443"),
+		SniffTimeoutPartialTLS,
+		100, 512, 95,
+		[]byte{0x16, 0x03, 0x01, 0x02, 0x00},
+		300*time.Millisecond,
+	)
+
+	output := buf.String()
+	t.Logf("LogSniffTimeout output:\n%s", output)
+	checks := []string{
+		`level=info`,
+		`msg="Sniffing timeout"`,
+		`src="192.0.2.10:34567"`,
+		`dst="198.51.100.20:443"`,
+		`bytes=100`,
+		`elapsed_ms=300`,
+		`cause="partial TLS record"`,
+		`record_len=512`,
+		`record_got=95`,
+		`head="16 03 01 02 00"`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+
+	// A peer that never sent a byte reports no record numbers and no head.
+	buf.Reset()
+	LogSniffTimeout(
+		mustAddrPort("192.0.2.10:34567"),
+		mustAddrPort("198.51.100.20:443"),
+		SniffTimeoutNoFirstByte,
+		0, 0, 0, nil, 100*time.Millisecond,
+	)
+	output = buf.String()
+	if !strings.Contains(output, `cause="no first byte"`) {
+		t.Fatalf("output missing the zero-byte cause:\n%s", output)
+	}
+	for _, unwanted := range []string{"record_len", "record_got", "head="} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("zero-byte line carries %q:\n%s", unwanted, output)
+		}
+	}
+}
+
+// TestLogSniffTimeoutIsAllocationFree pins the reason this line goes through
+// fastlog: it is a per-connection event, so it must not build a fields map or
+// format strings per timeout.
+func TestLogSniffTimeoutIsAllocationFree(t *testing.T) {
+	var buf bytes.Buffer
+	Configure(&buf)
+
+	src := mustAddrPort("192.0.2.10:34567")
+	dst := mustAddrPort("198.51.100.20:443")
+	head := []byte{0x16, 0x03, 0x01, 0x02, 0x00}
+
+	// Warm the buffer pool so the measurement sees the steady state.
+	LogSniffTimeout(src, dst, SniffTimeoutPartialTLS, 100, 512, 95, head, 300*time.Millisecond)
+
+	for attempt := 0; attempt < 3; attempt++ {
+		allocs := testing.AllocsPerRun(500, func() {
+			LogSniffTimeout(src, dst, SniffTimeoutPartialTLS, 100, 512, 95, head, 300*time.Millisecond)
+			buf.Reset()
+		})
+		if allocs == 0 {
+			return
+		}
+		// The cached timestamp is rebuilt once per second; retry so crossing a
+		// second boundary inside the measurement is not reported as the event
+		// allocating.
+		if attempt == 2 {
+			t.Fatalf("LogSniffTimeout allocated %v times per call, want 0", allocs)
+		}
 	}
 }

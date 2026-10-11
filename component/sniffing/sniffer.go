@@ -82,6 +82,31 @@ func sniffGroup(sniffs ...sniff) (d string, err error) {
 	return "", ErrNotApplicable
 }
 
+// sniffHeadBytes bounds the leading-bytes snapshot SniffProgress returns.
+const sniffHeadBytes = 16
+
+// SniffProgress reports how far the sniffer got before it gave up: the number of
+// accumulated bytes and a copy of the first at most sniffHeadBytes of them (nil
+// when none arrived). It exists so a failed sniff can say which shape it saw --
+// no peer data at all, a TLS record that never completed, a stalled header
+// block -- instead of only that it timed out.
+func (s *Sniffer) SniffProgress() (n int, head []byte) {
+	if s == nil || s.buf == nil {
+		return 0, nil
+	}
+	b := s.buf.Bytes()
+	n = len(b)
+	if n == 0 {
+		return 0, nil
+	}
+	if n > sniffHeadBytes {
+		b = b[:sniffHeadBytes]
+	}
+	head = make([]byte, len(b))
+	copy(head, b)
+	return n, head
+}
+
 func (s *Sniffer) SniffTcp() (d string, err error) {
 	if s.sniffed != "" {
 		return s.sniffed, nil

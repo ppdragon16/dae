@@ -186,7 +186,8 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 		// ConnSniffer should be used later, so we cannot close it now.
 		defer sniffer.Close()
 
-		lConn.SetReadDeadline(time.Now().Add(sniffingTimeout))
+		sniffStart := time.Now()
+		lConn.SetReadDeadline(sniffStart.Add(sniffingTimeout))
 		domain, err := sniffer.SniffTcp()
 		lConn.SetReadDeadline(time.Time{})
 		if err != nil {
@@ -196,13 +197,27 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 				return nil
 			}
 			// In case of lConn timeout, we continue relaying for remote-first tcp conversation (e.g. ftp, smtp, etc.).
-			// For other network errors, we stop relaying without logging the errors.
+			// Other network errors stop the relay, which is no longer silent:
+			// the peer going away mid-sniff is as common as the EOF case above,
+			// so it is reported at debug (with what it had sent) rather than
+			// left indistinguishable from a sniffing failure.
 			if isNetError, _, isTimeout, _ := GetNetErrorInfo(err); isNetError {
 				if !isTimeout {
+					if log.IsLevelEnabled(log.DebugLevel) {
+						bytesRead, head := sniffer.SniffProgress()
+						reportSniffAbort(src, dst, err, bytesRead, head, time.Since(sniffStart))
+					}
 					return nil
 				}
 				if log.IsLevelEnabled(log.InfoLevel) {
-					log.Infof("Sniffing timeout!")
+					// A timeout is the only sniffing failure reported at all, so
+					// say what it saw: no peer data (remote-first protocols,
+					// preconnects, probes) reads very differently from a TLS
+					// record or header block that never completed. Per-connection
+					// event, so it goes through the zero-allocation fast logger
+					// when that is configured.
+					bytesRead, head := sniffer.SniffProgress()
+					reportSniffTimeout(src, dst, bytesRead, head, time.Since(sniffStart))
 				}
 			}
 		}
