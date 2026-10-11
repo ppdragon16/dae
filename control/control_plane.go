@@ -555,15 +555,8 @@ func NewControlPlane(
 	})
 	// 规则改变不会使得记录失效, 因为程序仍会访问那个域名, 但我们需要保留记录的条目以便 GC
 	if _bpf != nil {
-		var key [4]uint32
-		var val bpfDomainRouting
-		iter := core.bpf.DomainRoutingMap.Iterate()
-		for iter.Next(&key, &val) {
-			_ = core.bpf.DomainRoutingMap.Delete(&key)
-		}
-		iter = core.bpf.DomainBumpMap.Iterate()
-		for iter.Next(&key, &val) {
-			_ = core.bpf.DomainBumpMap.Delete(&key)
+		if failed, err := wipeDomainMaps(core.bpf.DomainRoutingMap, core.bpf.DomainBumpMap); failed > 0 {
+			log.WithError(err).Warnf("could not wipe %d domain-routing map entries; stale entries keep matching the previous rule set until the DNS cache rebuilds them", failed)
 		}
 	}
 
@@ -2369,4 +2362,35 @@ func (c *ControlPlane) Close() (err error) {
 		}
 	}
 	return
+}
+
+// wipeDomainMaps removes every entry from the DNS-derived domain maps.
+//
+// A rule change invalidates all of their bitmaps: the entries are rebuilt from
+// the DNS cache, but until then a stale one keeps matching the previous rule
+// set. Report what the wipe could not remove -- including an iteration error,
+// which leaves the rest untouched -- so a systematic failure cannot look like an
+// already-empty map. (Same principle as kdae 875a4b23/4893a72f: a fallback that
+// silently does nothing is worse than one that says so.)
+func wipeDomainMaps(maps ...*ebpf.Map) (failed int, firstErr error) {
+	var key [4]uint32
+	var val bpfDomainRouting
+	for _, m := range maps {
+		iter := m.Iterate()
+		for iter.Next(&key, &val) {
+			if err := m.Delete(&key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		if err := iter.Err(); err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return failed, firstErr
 }
