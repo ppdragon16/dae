@@ -73,3 +73,53 @@ func (s *ConnSniffer) Close() error {
 	}
 	return s.Conn.Close()
 }
+
+// WatchOnlyConnSniffer relays the connection untouched and classifies the
+// stream on the way out: every read's bytes are accumulated and parsed until a
+// verdict is reached, and the verdict -- the sniffed domain, empty when none
+// was learned -- is reported to onDomain exactly once (also when the
+// connection closes before a verdict). It is observability only: the domain
+// never influences routing or the dial target.
+type WatchOnlyConnSniffer struct {
+	net.Conn
+	sniffer  *Sniffer
+	onDomain func(domain string)
+	decided  bool
+}
+
+// NewWatchOnlyConnSniffer returns a conn that relays immediately and
+// classifies the stream on its reads. When the underlay supports a
+// half-close, the returned conn keeps that capability (a wrapper that faked
+// CloseWrite would tell the relay the peer received a FIN it never got).
+func NewWatchOnlyConnSniffer(conn net.Conn, timeout time.Duration, onDomain func(domain string)) *WatchOnlyConnSniffer {
+	w := &WatchOnlyConnSniffer{
+		Conn:     conn,
+		sniffer:  NewStreamSniffer(conn, timeout),
+		onDomain: onDomain,
+	}
+	if w.onDomain == nil {
+		w.onDomain = func(string) {}
+	}
+	return w
+}
+
+func (w *WatchOnlyConnSniffer) Read(p []byte) (n int, err error) {
+	n, err = w.Conn.Read(p)
+	if w.decided || n == 0 {
+		return n, err
+	}
+	w.sniffer.AppendTcpData(p[:n])
+	if d, serr := w.sniffer.SniffTcpData(); !errors.Is(serr, ErrNeedMore) {
+		w.decided = true
+		w.onDomain(d) // empty on a terminal verdict
+	}
+	return n, err
+}
+
+func (w *WatchOnlyConnSniffer) Close() error {
+	if !w.decided {
+		w.decided = true
+		w.onDomain("")
+	}
+	return w.Conn.Close()
+}

@@ -250,3 +250,36 @@ func (s *Sniffer) Close() (err error) {
 	s.plaintextBufs = nil
 	return nil
 }
+
+// AppendTcpData accumulates relay-served bytes for background classification.
+// Accumulation stops at the cap; the parsers give up past it on their own.
+func (s *Sniffer) AppendTcpData(p []byte) {
+	if s.buf == nil || len(p) == 0 || s.buf.Len() >= sniffHTTPMaxBufferedSize {
+		return
+	}
+	s.buf.Write(p)
+}
+
+// SniffTcpData classifies the accumulated bytes. ErrNeedMore means the shape is
+// still open and more stream should be fed; anything else is terminal.
+func (s *Sniffer) SniffTcpData() (d string, err error) {
+	if s.buf.Len() == 0 {
+		return "", ErrNotApplicable
+	}
+	return sniffTcpBuffer(s.buf.Bytes())
+}
+
+// sniffTcpBuffer mirrors SniffTcp's parser order over an explicit buffer.
+func sniffTcpBuffer(b []byte) (d string, err error) {
+	if d, err = sniffTlsBuffer(b); err == nil {
+		return NormalizeDomain(d), nil
+	} else if !errors.Is(err, ErrNotApplicable) {
+		return "", err
+	}
+	if d, err = sniffHTTPBuffer(b); err == nil {
+		return NormalizeDomain(d), nil
+	} else if !errors.Is(err, ErrNotApplicable) {
+		return "", err
+	}
+	return "", ErrNotApplicable
+}

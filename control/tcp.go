@@ -174,61 +174,81 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	}
 
 	// No need sniffer for tcp://8.8.8.8:53.
+	networkType := common.GetNetworkType(consts.L4ProtoStr_TCP, dst.Addr())
+	dialOption := ObtainDialOption()
+	defer RecycleDialOption(dialOption)
 	sniffedDomain := ""
+	watchOnly := false
 	lConnRelay := lConn
 	if c.sniffingTimeout > 0 {
 		sniffingTimeout := c.sniffingTimeout
 		if dstTcpAddr.Port == 80 || dstTcpAddr.Port == 443 {
 			sniffingTimeout = 2 * sniffingTimeout
 		}
-		// Sniff target domain.
-		sniffer := sniffing.NewConnSniffer(lConn, sniffingTimeout)
-		// ConnSniffer should be used later, so we cannot close it now.
-		defer sniffer.Close()
-
 		sniffStart := time.Now()
-		lConn.SetReadDeadline(sniffStart.Add(sniffingTimeout))
-		domain, err := sniffer.SniffTcp()
-		lConn.SetReadDeadline(time.Time{})
-		if err != nil {
-			// Avoid massive EOF logs. A common case: clients (e.g. browser) tend to establish both
-			// ipv4 and ipv6 connections, and then close one of them.
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			// In case of lConn timeout, we continue relaying for remote-first tcp conversation (e.g. ftp, smtp, etc.).
-			// Other network errors stop the relay, which is no longer silent:
-			// the peer going away mid-sniff is as common as the EOF case above,
-			// so it is reported at debug (with what it had sent) rather than
-			// left indistinguishable from a sniffing failure.
-			if isNetError, _, isTimeout, _ := GetNetErrorInfo(err); isNetError {
-				if !isTimeout {
-					if log.IsLevelEnabled(log.DebugLevel) {
-						bytesRead, head := sniffer.SniffProgress()
-						reportSniffAbort(src, dst, err, bytesRead, head, time.Since(sniffStart))
-					}
+
+		// A blocking sniff is only warranted when the domain changes the
+		// outcome: the kernel punted this connection because the domain is
+		// ambiguous (control-plane routing), the operator forced rerouting, or
+		// the sniffed domain overrides the dial target. Everything else starts
+		// relaying immediately: the sniff rides the relay's read path and only
+		// feeds the log.
+		if needsBlockingSniff(consts.OutboundIndex(routingResult.Outbound), c.rerouteMode, c.dialTargetOverride) {
+			// ConnSniffer should be used later, so we cannot close it now.
+			sniffer := sniffing.NewConnSniffer(lConn, sniffingTimeout)
+			defer sniffer.Close()
+			lConn.SetReadDeadline(sniffStart.Add(sniffingTimeout))
+			domain, err := sniffer.SniffTcp()
+			lConn.SetReadDeadline(time.Time{})
+			if err != nil {
+				// Avoid massive EOF logs. A common case: clients (e.g. browser) tend to establish both
+				// ipv4 and ipv6 connections, and then close one of them.
+				if errors.Is(err, io.EOF) {
 					return nil
 				}
-				if log.IsLevelEnabled(log.InfoLevel) {
-					// A timeout is the only sniffing failure reported at all, so
-					// say what it saw: no peer data (remote-first protocols,
-					// preconnects, probes) reads very differently from a TLS
-					// record or header block that never completed. Per-connection
-					// event, so it goes through the zero-allocation fast logger
-					// when that is configured.
-					bytesRead, head := sniffer.SniffProgress()
-					reportSniffTimeout(src, dst, bytesRead, head, time.Since(sniffStart))
+				// In case of lConn timeout, we continue relaying for remote-first tcp conversation (e.g. ftp, smtp, etc.).
+				// Other network errors stop the relay, which is no longer silent:
+				// the peer going away mid-sniff is as common as the EOF case above,
+				// so it is reported at debug (with what it had sent) rather than
+				// left indistinguishable from a sniffing failure.
+				if isNetError, _, isTimeout, _ := GetNetErrorInfo(err); isNetError {
+					if !isTimeout {
+						if log.IsLevelEnabled(log.DebugLevel) {
+							bytesRead, head := sniffer.SniffProgress()
+							reportSniffAbort(src, dst, err, bytesRead, head, time.Since(sniffStart))
+						}
+						return nil
+					}
+					if log.IsLevelEnabled(log.InfoLevel) {
+						// A timeout is the only sniffing failure reported at all, so
+						// say what it saw: no peer data (remote-first protocols,
+						// preconnects, probes) reads very differently from a TLS
+						// record or header block that never completed. Per-connection
+						// event, so it goes through the zero-allocation fast logger
+						// when that is configured.
+						bytesRead, head := sniffer.SniffProgress()
+						reportSniffTimeout(src, dst, bytesRead, head, time.Since(sniffStart))
+					}
 				}
 			}
+			sniffedDomain = domain
+			lConnRelay = sniffer
+		} else {
+			// The kernel already routed this connection, so the domain is only
+			// observability: dial starts now, the sniff rides the relay's read
+			// path, and the dial log carries the domain once it is learned (an
+			// empty domain when the peer never speaks). The routing result is
+			// snapshotted because its pooled storage is recycled before the
+			// deferred log runs.
+			snap := *routingResult
+			w := sniffing.NewWatchOnlyConnSniffer(lConn, sniffingTimeout, func(domain string) {
+				LogDial(src, dst, domain, dialOption, networkType, &snap)
+			})
+			lConnRelay = w
+			watchOnly = true
 		}
-		sniffedDomain = domain
-		lConnRelay = sniffer
 	}
-
 	// Route
-	networkType := common.GetNetworkType(consts.L4ProtoStr_TCP, dst.Addr())
-	dialOption := ObtainDialOption()
-	defer RecycleDialOption(dialOption)
 	if err := c.RouteDialOption(src, dst, sniffedDomain, networkType, routingResult, dialOption); err != nil {
 		return err
 	}
@@ -240,7 +260,9 @@ func (c *ControlPlane) handleConn(lConn net.Conn) error {
 	}
 
 	// Dial
-	LogDial(src, dst, sniffedDomain, dialOption, networkType, routingResult)
+	if !watchOnly {
+		LogDial(src, dst, sniffedDomain, dialOption, networkType, routingResult)
+	}
 	// routingResult is not used in following code, recycle it eariler.
 	RecycleBpfRoutingResult(routingResult)
 	routingResult = nil

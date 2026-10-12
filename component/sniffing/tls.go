@@ -29,19 +29,27 @@ var (
 
 // SniffTls only supports tls1.2, tls1.3
 func (s *Sniffer) SniffTls() (d string, err error) {
+	return sniffTlsBuffer(s.buf.Bytes())
+}
+
+// sniffTlsBuffer is the buffer-based core of the TLS sniffer, shared by the
+// synchronous path (which parses the accumulated buf) and the watch-only path
+// (which parses a separate accumulation the relay does not drain), so the two
+// cannot drift.
+func sniffTlsBuffer(b []byte) (d string, err error) {
 	// The Transport Layer Security (TLS) Protocol Version 1.3
 	// https://www.rfc-editor.org/rfc/rfc8446#page-27
 	boundary := 5
-	if s.buf.Len() < boundary {
+	if len(b) < boundary {
 		return "", ErrNotApplicable
 	}
 
-	if s.buf.Bytes()[0] != ContentType_HandShake || (!bytes.Equal(s.buf.Bytes()[1:3], Version_Tls1_0) && !bytes.Equal(s.buf.Bytes()[1:3], Version_Tls1_2)) {
+	if b[0] != ContentType_HandShake || (!bytes.Equal(b[1:3], Version_Tls1_0) && !bytes.Equal(b[1:3], Version_Tls1_2)) {
 		return "", ErrNotApplicable
 	}
 
-	length := int(binary.BigEndian.Uint16(s.buf.Bytes()[3:5]))
-	search := s.buf.Bytes()[5:]
+	length := int(binary.BigEndian.Uint16(b[3:5]))
+	search := b[5:]
 	if len(search) < length {
 		return "", ErrNeedMore
 	}

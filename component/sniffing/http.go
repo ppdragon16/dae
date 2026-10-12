@@ -99,13 +99,19 @@ func sniffHTTPHostHeader(data []byte) (string, error) {
 }
 
 func (s *Sniffer) SniffHttp() (d string, err error) {
+	return sniffHTTPBuffer(s.buf.Bytes())
+}
+
+// sniffHTTPBuffer is the buffer-based core of the HTTP sniffer, shared by the
+// synchronous path and the watch-only accumulation (see sniffTlsBuffer).
+func sniffHTTPBuffer(b []byte) (d string, err error) {
 	// First byte should be printable.
-	if s.buf.Len() == 0 || !unicode.IsPrint(rune(s.buf.Bytes()[0])) {
+	if len(b) == 0 || !unicode.IsPrint(rune(b[0])) {
 		return "", ErrNotApplicable
 	}
 
 	// Search method.
-	search := s.buf.Bytes()
+	search := b
 	if len(search) > 12 {
 		search = search[:12]
 	}
@@ -119,5 +125,5 @@ func (s *Sniffer) SniffHttp() (d string, err error) {
 
 	// Now we assume it is an HTTP packet. We should not return NotApplicableError after here.
 
-	return sniffHTTPHostHeader(s.buf.Bytes())
+	return sniffHTTPHostHeader(b)
 }
