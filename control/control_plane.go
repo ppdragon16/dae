@@ -267,12 +267,6 @@ func NewControlPlane(
 	consts.VerifyRerouteMode(string(global.RerouteMode))
 	consts.VerifySniffVerifyMode(string(global.SniffVerifyMode))
 
-	sniffingTimeout := global.SniffingTimeout
-	if !global.DialTargetOverride && global.RerouteMode == consts.RerouteMode_None {
-		// Sniff is not needed.
-		sniffingTimeout = 0
-	}
-
 	/// Init DialerGroups.
 	var noConnectivityOutbound consts.OutboundIndex
 	switch global.NoConnectivityBehavior {
@@ -472,7 +466,7 @@ func NewControlPlane(
 		dialTargetOverride:     global.DialTargetOverride,
 		rerouteMode:            global.RerouteMode,
 		sniffVerifyMode:        global.SniffVerifyMode,
-		sniffingTimeout:        sniffingTimeout,
+		sniffingTimeout:        global.SniffingTimeout,
 		udpSniffPorts:          convertUdpSniffPorts(global.UdpSniffPorts),
 		tproxyPortProtect:      global.TproxyPortProtect,
 		trafficLogger:          trafficLogger,

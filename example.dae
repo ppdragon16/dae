@@ -90,9 +90,12 @@ global {
     allow_insecure: false
 
     # TCP-only: the budget for waiting for the peer's first data before TCP sniffing gives up,
-    # doubled for ports 80 and 443, and forced to 0 unless dial_target_override is on or
-    # reroute_mode is not none. UDP sniffing (udp_sniff_ports) works per datagram and does not
-    # use this. Set it higher is useful in high latency network.
+    # doubled for ports 80 and 443. Connections the kernel already routed relay
+    # immediately and only classify in the background for the log; the wait
+    # applies to connections punted for control-plane routing, where the sniffed
+    # domain picks the outbound. UDP sniffing (udp_sniff_ports) works per
+    # datagram and does not use this. Set it higher is useful in high latency
+    # network.
     sniffing_timeout: 100ms
 
     # TLS implementation. tls is to use Go's crypto/tls. utls is to use uTLS, which can imitate browser's Client Hello.
