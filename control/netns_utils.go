@@ -33,8 +33,9 @@ var (
 )
 
 type DaeNetns struct {
-	setupDone atomic.Bool
-	mu        sync.Mutex
+	setupDone          atomic.Bool
+	handlesInitialized bool
+	mu                 sync.Mutex
 
 	dae0, dae0peer netlink.Link
 	hostNs, daeNs  netns.NsHandle
@@ -147,11 +148,37 @@ func (ns *DaeNetns) setup() (err error) {
 		}
 	}()
 
-	if err = ns.setupVeth(); err != nil {
+	if err = ns.ensureNetnsAndLo(); err != nil {
 		return
 	}
-	if err = ns.setupNetns(); err != nil {
-		return
+	// Preferred path: create the pair with the peer landing directly in daens,
+	// so the host namespace never sees a transient dae0peer (every appearance
+	// broadcasts an RTM_NEWLINK/DELLINK pair that races netlink watchers).
+	// Any failure falls back to the legacy two-step sequence, which keeps the
+	// transient window but preserves today's behavior.
+	if err = ns.setupVethInNetns(); err != nil {
+		log.WithError(err).Warn("failed to create the veth pair with the peer directly in the daens namespace; " +
+			"falling back to the legacy create-then-move sequence (transient dae0peer window returns)")
+		if err = ns.setupVeth(); err != nil {
+			return
+		}
+		ns.releaseNetnsHandle()
+		if err = ns.setupNetns(); err != nil {
+			return
+		}
+	} else if err = ns.setupPeerInNetns(); err != nil {
+		log.WithError(err).Warn("failed to bring up the peer inside the daens namespace; " +
+			"falling back to the legacy create-then-move sequence (transient dae0peer window returns)")
+		_ = DeleteLink(HostVethName)
+		ns.dae0 = nil
+		ns.dae0peer = nil
+		if err = ns.setupVeth(); err != nil {
+			return
+		}
+		ns.releaseNetnsHandle()
+		if err = ns.setupNetns(); err != nil {
+			return
+		}
 	}
 	if err = ns.setupSysctl(); err != nil {
 		return
@@ -270,6 +297,98 @@ func (ns *DaeNetns) setupVeth() (err error) {
 	// ip l s dae0 up
 	if err = netlink.LinkSetUp(ns.dae0); err != nil {
 		return fmt.Errorf("failed to set link dae0 up: %v", err)
+	}
+	return
+}
+
+// ensureNetnsAndLo creates the daens named namespace and brings its loopback
+// up, leaving the calling thread back in the host namespace (setup() holds the
+// OS thread for the whole sequence). It is split out of setupNetns so that the
+// namespace exists before the veth pair is created, which allows the peer end
+// to be born directly inside daens.
+func (ns *DaeNetns) ensureNetnsAndLo() (err error) {
+	// ip netns a daens (with the stale-mount recovery path)
+	_ = DeleteNamedNetns(NsName)
+	if ns.daeNs, err = netns.NewNamed(NsName); err != nil {
+		return fmt.Errorf("failed to create netns: %v", err)
+	}
+	ns.handlesInitialized = true
+	// NewNamed() switches the thread into the new namespace; manage its
+	// loopback before returning to the host.
+	if err = netns.Set(ns.hostNs); err != nil {
+		return fmt.Errorf("failed to switch to host netns: %v", err)
+	}
+	lo, err := netlink.LinkByName("lo")
+	if err != nil {
+		return fmt.Errorf("failed to get link lo: %v", err)
+	}
+	// (ip net e daens) ip l s lo up
+	if err = netlink.LinkSetUp(lo); err != nil {
+		return fmt.Errorf("failed to set link lo up: %v", err)
+	}
+	return
+}
+
+// releaseNetnsHandle closes the daens handle opened by ensureNetnsAndLo when
+// the legacy fallback is about to re-create the namespace via setupNetns;
+// otherwise the superseded handle would leak. Only meaningful on a setup()
+// path: a bare DaeNetns zero-value daeNs handle reads as open (fd 0), which
+// must never be closed, hence the handlesInitialized guard.
+func (ns *DaeNetns) releaseNetnsHandle() {
+	if !ns.handlesInitialized || !ns.daeNs.IsOpen() {
+		return
+	}
+	_ = ns.daeNs.Close()
+	ns.daeNs = netns.None()
+}
+
+// setupVethInNetns creates the veth pair with the peer born directly inside
+// the daens namespace (Veth.PeerNamespace -> IFLA_NET_NS_FD nested in the peer
+// attributes), so the host namespace never sees a link named dae0peer and
+// there is no RTM_NEWLINK broadcast for it at all. It only brings up the host
+// end; the peer end is brought up later by setupPeerInNetns. On failure the
+// caller falls back to the legacy create-then-move sequence.
+func (ns *DaeNetns) setupVethInNetns() (err error) {
+	// ip l a dae0 type veth peer name dae0peer netns daens
+	_ = DeleteLink(HostVethName)
+	if err = netlink.LinkAdd(&netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:   HostVethName,
+			TxQLen: 1000,
+		},
+		PeerName:      NsVethName,
+		PeerTxQLen:    1000,
+		PeerNamespace: netlink.NsFd(ns.daeNs),
+	}); err != nil {
+		return fmt.Errorf("failed to add veth pair with peer in netns: %v", err)
+	}
+	if ns.dae0, err = netlink.LinkByName(HostVethName); err != nil {
+		return fmt.Errorf("failed to get link dae0: %v", err)
+	}
+	// ip l s dae0 up
+	if err = netlink.LinkSetUp(ns.dae0); err != nil {
+		return fmt.Errorf("failed to set link dae0 up: %v", err)
+	}
+	return
+}
+
+// setupPeerInNetns brings up the peer end inside daens and re-fetches its link
+// (for the latest MAC address).
+func (ns *DaeNetns) setupPeerInNetns() (err error) {
+	if err = netns.Set(ns.daeNs); err != nil {
+		return fmt.Errorf("failed to switch to daens: %v", err)
+	}
+	defer func() { _ = netns.Set(ns.hostNs) }()
+	// (ip net e daens) ip l s dae0peer up
+	if ns.dae0peer, err = netlink.LinkByName(NsVethName); err != nil {
+		return fmt.Errorf("failed to get link dae0peer in daens: %v", err)
+	}
+	if err = netlink.LinkSetUp(ns.dae0peer); err != nil {
+		return fmt.Errorf("failed to set link dae0peer up: %v", err)
+	}
+	// re-fetch dae0peer to make sure we have the latest mac address
+	if ns.dae0peer, err = netlink.LinkByName(NsVethName); err != nil {
+		return fmt.Errorf("failed to get link dae0peer: %v", err)
 	}
 	return
 }
