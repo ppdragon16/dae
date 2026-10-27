@@ -333,6 +333,13 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 	if err := netlink.FilterAdd(filterIngress); err != nil {
 		return common.Errf("cannot attach ebpf object to filter ingress: %w", err)
 	}
+	if c.isReload {
+		// make-before-break: the new generation's filter is attached above;
+		// reload reuses the same BPF program, so both flip handles point at
+		// the same program and deleting the previous generation's flipped
+		// filter now leaves no datapath gap. (Port of upstream #1047.)
+		c.tryDeleteFlippedFilter(filterIngress)
+	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterIngress); err != nil {
 			return common.Errf("FilterDel(%v:%v): %w", ifname, filterIngress.Name, err)
@@ -369,6 +376,9 @@ func (c *controlPlaneCore) _bindLan(ifname string) error {
 	}
 	if err := netlink.FilterAdd(filterEgress); err != nil {
 		return common.Errf("cannot attach ebpf object to filter egress: %w", err)
+	}
+	if c.isReload {
+		c.tryDeleteFlippedFilter(filterEgress)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterEgress); err != nil {
@@ -527,6 +537,9 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 	if err := netlink.FilterAdd(filterEgress); err != nil {
 		return common.Errf("cannot attach ebpf object to filter egress: %w", err)
 	}
+	if c.isReload {
+		c.tryDeleteFlippedFilter(filterEgress)
+	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterEgress); err != nil && !os.IsNotExist(err) {
 			return common.Errf("FilterDel(%v:%v): %w", ifname, filterEgress.Name, err)
@@ -562,6 +575,9 @@ func (c *controlPlaneCore) _bindWan(ifname string) error {
 	}
 	if err := netlink.FilterAdd(filterIngress); err != nil {
 		return common.Errf("cannot attach ebpf object to filter ingress: %w", err)
+	}
+	if c.isReload {
+		c.tryDeleteFlippedFilter(filterIngress)
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterIngress); err != nil && !os.IsNotExist(err) {
@@ -602,16 +618,30 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 	// Remove and add.
 	if !c.isReload {
 		// Clean up thoroughly.
-		filterIngressFlipped := deepcopy.Copy(filterDae0peerIngress).(*netlink.BpfFilter)
-		filterIngressFlipped.FilterAttrs.Handle ^= 1
+		filterDae0peerIngressFlipped := deepcopy.Copy(filterDae0peerIngress).(*netlink.BpfFilter)
+		filterDae0peerIngressFlipped.FilterAttrs.Handle ^= 1
 		daens.With(func() error {
-			return netlink.FilterDel(filterDae0peerIngress)
+			return netlink.FilterDel(filterDae0peerIngressFlipped)
 		})
 	}
 	if err = daens.With(func() error {
 		return netlink.FilterAdd(filterDae0peerIngress)
 	}); err != nil {
 		return common.Errf("cannot attach ebpf object to filter ingress: %w", err)
+	}
+	if c.isReload {
+		// make-before-break: the new generation's filter is attached above
+		// (inside daens); reload reuses the same BPF program, so deleting the
+		// previous generation's flipped filter now leaves no datapath gap.
+		filterDae0peerIngressFlipped := deepcopy.Copy(filterDae0peerIngress).(*netlink.BpfFilter)
+		filterDae0peerIngressFlipped.FilterAttrs.Handle ^= 1
+		daens.With(func() error {
+			err := netlink.FilterDel(filterDae0peerIngressFlipped)
+			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
+				return nil
+			}
+			return err
+		})
 	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		daens.With(func() error {
@@ -645,6 +675,9 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 	if err := netlink.FilterAdd(filterDae0Ingress); err != nil {
 		return common.Errf("cannot attach ebpf object to filter egress: %w", err)
 	}
+	if c.isReload {
+		c.tryDeleteFlippedFilter(filterDae0Ingress)
+	}
 	c.deferFuncs = append(c.deferFuncs, func() error {
 		if err := netlink.FilterDel(filterDae0Ingress); err != nil && !os.IsNotExist(err) {
 			return common.Errf("FilterDel(%v:%v): %w", daens.Dae0().Attrs().Name, filterDae0Ingress.Name, err)
@@ -652,6 +685,19 @@ func (c *controlPlaneCore) bindDaens() (err error) {
 		return nil
 	})
 	return
+}
+
+// tryDeleteFlippedFilter deletes the sibling TC filter whose handle differs
+// from filter's only in the lowest bit. During a reload both handles point at
+// the same BPF program (reload reuses the object), so deleting the flipped one
+// cannot create a datapath gap; leaving it attached lets a stale TC handle
+// black-hole the datapath. (Port of upstream #1047.)
+func (c *controlPlaneCore) tryDeleteFlippedFilter(filter *netlink.BpfFilter) {
+	flipped := deepcopy.Copy(filter).(*netlink.BpfFilter)
+	flipped.FilterAttrs.Handle ^= 1
+	if err := netlink.FilterDel(flipped); err != nil && !errors.Is(err, unix.ENOENT) {
+		log.WithError(err).Warn("failed to delete the previous generation's flipped filter")
+	}
 }
 
 func getBit(bitmap []uint32, index int) uint32 {
