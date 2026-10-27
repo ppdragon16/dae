@@ -239,8 +239,8 @@ func (ns *DaeNetns) setupRoutingPolicy() (err error) {
 	}
 
 	/** ip rule
-	ip rule add fwmark 0x8000000/0x8000000 table 2023
-	ip -6 rule add fwmark 0x8000000/0x8000000 table 2023
+	ip rule add fwmark 0x8000000/0x8000000 table 2023 proto kernel
+	ip -6 rule add fwmark 0x8000000/0x8000000 table 2023 proto kernel
 	*/
 	rules := []netlink.Rule{{
 		SuppressIfgroup:   -1,
@@ -252,6 +252,7 @@ func (ns *DaeNetns) setupRoutingPolicy() (err error) {
 		Table:             table,
 		Mark:              consts.TproxyMark,
 		Mask:              &consts.TproxyMark,
+		Protocol:          unix.RTPROT_KERNEL,
 	}, {
 		SuppressIfgroup:   -1,
 		SuppressPrefixlen: -1,
@@ -262,6 +263,7 @@ func (ns *DaeNetns) setupRoutingPolicy() (err error) {
 		Table:             table,
 		Mark:              consts.TproxyMark,
 		Mask:              &consts.TproxyMark,
+		Protocol:          unix.RTPROT_KERNEL,
 	}}
 
 	for _, rule := range rules {
