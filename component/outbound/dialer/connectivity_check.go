@@ -764,6 +764,14 @@ func (d *Dialer) Update(ok bool, latency time.Duration, networkType *common.Netw
 	}
 	oldAlive := d.alive.Load()
 	d.alive.Store(ok)
+	// A recovery edge gets a clean slate: the failure that flipped the dialer
+	// not-alive already filed timeout-penalty samples into every group's
+	// history, and an EMA over them decays far slower than the node recovers,
+	// so min_moving_avg keeps routing away from a node that is back. This is
+	// the same reset the update-sub recycle path performs via ResetLatency.
+	if !oldAlive && ok {
+		d.ResetLatency()
+	}
 	d.mu.Lock()
 	for g := range d.registeredDialerGroups {
 		if !ok {
