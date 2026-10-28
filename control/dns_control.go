@@ -443,9 +443,14 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	}
 	dataToWrite := dnsResp.respData
 	if err != nil || !dnsResponse(dataToWrite) {
-		isNetError, _, _, isTemporary := GetNetErrorInfo(err)
-		if !isNetError || !isTemporary {
-			log.Errorf("%+v", err)
+		// Only an actual error is logged. The branch also covers the
+		// no-error-no-answer case (the SERVFAIL fallback), and logging there
+		// printed "<nil>" -- the branch condition is a union, the log message
+		// is not.
+		if err != nil {
+			if isNetError, _, _, isTemporary := GetNetErrorInfo(err); !isNetError || !isTemporary {
+				log.Errorf("%+v", err)
+			}
 		}
 		dataToWrite = data
 		dnsRcodeSet(dataToWrite, dnsmessage.RcodeServerFailure)
