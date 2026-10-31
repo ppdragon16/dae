@@ -443,14 +443,26 @@ func (c *DnsController) Handle(data []byte, req *dnsRequest) bool {
 	}
 	dataToWrite := dnsResp.respData
 	if err != nil || !dnsResponse(dataToWrite) {
-		// Only an actual error is logged. The branch also covers the
-		// no-error-no-answer case (the SERVFAIL fallback), and logging there
-		// printed "<nil>" -- the branch condition is a union, the log message
-		// is not.
+		// The client-facing record of the failure, with the requester and the
+		// DNS server it asked: the pooled forwarder can only log its own
+		// timeout at debug level (DnsManager is shared across clients), so this
+		// is the only place that can say WHO asked. A timeout net error is
+		// counted upstream (forwardError) but not re-logged at error level.
+		fields := log.Fields{
+			"client": req.Src.String(),
+			"dns":    req.Dst.String(),
+			"qname":  queryInfo.qname,
+			"qtype":  queryInfo.qtype,
+		}
 		if err != nil {
+			fields["err"] = err.Error()
 			if isNetError, _, _, isTemporary := GetNetErrorInfo(err); !isNetError || !isTemporary {
-				log.Errorf("%+v", err)
+				log.WithFields(fields).Errorf("dns lookup failed; answered SERVFAIL")
+			} else {
+				log.WithFields(fields).Warnln("dns upstream timeout; answered SERVFAIL")
 			}
+		} else {
+			log.WithFields(fields).Warnln("dns lookup produced no usable answer; answered SERVFAIL")
 		}
 		dataToWrite = data
 		dnsRcodeSet(dataToWrite, dnsmessage.RcodeServerFailure)

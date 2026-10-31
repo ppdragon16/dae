@@ -365,9 +365,12 @@ func (m *DnsManager) Resolve(ctx context.Context, data []byte) ([]byte, error) {
 		}
 	}
 
-	if log.IsLevelEnabled(log.WarnLevel) {
+	// Pool-level visibility only: this connection is shared by every client,
+	// so the requester is unknowable here -- the client-facing warning with
+	// src/dst lives in DnsController.Handle, which owns that context.
+	if log.IsLevelEnabled(log.DebugLevel) {
 		qInfo := dnsQueryInfo(data)
-		log.Warnf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qInfo.qname, qInfo.qtype)
+		log.Debugf("dns timeout, stream: %v, qname: %v, qtype: %v", m.stream, qInfo.qname, qInfo.qtype)
 	}
 	return nil, context.DeadlineExceeded
 }
