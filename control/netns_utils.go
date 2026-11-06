@@ -315,11 +315,12 @@ func (ns *DaeNetns) ensureNetnsAndLo() (err error) {
 		return fmt.Errorf("failed to create netns: %v", err)
 	}
 	ns.handlesInitialized = true
-	// NewNamed() switches the thread into the new namespace; manage its
-	// loopback before returning to the host.
-	if err = netns.Set(ns.hostNs); err != nil {
-		return fmt.Errorf("failed to switch to host netns: %v", err)
-	}
+	// NewNamed() switches the thread into the new namespace. Bring its
+	// loopback up HERE: netlink link lookups resolve against the current
+	// netns, so a LinkByName("lo") after returning to the host namespace
+	// would find the host's lo (already up, a silent no-op) and leave daens'
+	// lo down — the "Nexthop device is not up" failure of the v6 local route
+	// in setupRoutingPolicy follows from exactly that.
 	lo, err := netlink.LinkByName("lo")
 	if err != nil {
 		return fmt.Errorf("failed to get link lo: %v", err)
@@ -327,6 +328,9 @@ func (ns *DaeNetns) ensureNetnsAndLo() (err error) {
 	// (ip net e daens) ip l s lo up
 	if err = netlink.LinkSetUp(lo); err != nil {
 		return fmt.Errorf("failed to set link lo up: %v", err)
+	}
+	if err = netns.Set(ns.hostNs); err != nil {
+		return fmt.Errorf("failed to switch to host netns: %v", err)
 	}
 	return
 }
