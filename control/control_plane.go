@@ -454,7 +454,7 @@ func NewControlPlane(
 	plane := &ControlPlane{
 		core:                   core,
 		deferFuncs:             deferFuncs,
-		listenIp:               "0.0.0.0",
+		listenIp:               "::",
 		outbounds:              outbounds,
 		noConnectivityOutbound: noConnectivityOutbound,
 		dnsController:          nil,
@@ -1624,9 +1624,27 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16, reusep
 		reuseport = 1
 	}
 	// Listen.
+	// Dual-stack tproxy listener. The eBPF datapath assigns every packet of
+	// one l4 protocol to a single listener socket (listen_socket_map keys by
+	// l4proto, not by family), so that socket must accept both address
+	// families: an IPv6 socket with IPV6_V6ONLY=0 also takes IPv4 (as
+	// v4-mapped) connections, which is exactly what upstream does with its
+	// explicit tcp4+tcp6 pair collapsed into one socket. With a v4-only
+	// listener, IPv6 flows were tproxied into daens and then starved — the
+	// kernel never found a socket to deliver them to, and the client saw
+	// endless SYN retransmits.
 	var listenConfig = net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
-			return dialer.TproxyControl(c)
+			if err := dialer.TproxyControl(c); err != nil {
+				return err
+			}
+			// IPV6_V6ONLY does not exist on a genuine IPv4 socket; that is
+			// the v4-only fallback below, so the error is deliberately
+			// ignored.
+			_ = c.Control(func(fd uintptr) {
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0)
+			})
+			return nil
 		},
 	}
 	if reuseport > 1 {
@@ -1649,6 +1667,7 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16, reusep
 		}
 	}
 	listenAddr := net.JoinHostPort(c.listenIp, strconv.Itoa(int(port)))
+	v4ListenAddr := net.JoinHostPort("0.0.0.0", strconv.Itoa(int(port)))
 	tcpListeners := make([]net.Listener, 0, int(reuseport))
 	packetConns := make([]net.PacketConn, 0, int(reuseport))
 	cleanup := func() {
@@ -1660,17 +1679,24 @@ func (c *ControlPlane) ListenAndServe(readyChan chan<- bool, port uint16, reusep
 		}
 	}
 	for i := 0; i < int(reuseport); i++ {
-		tcpListener, err := listenConfig.Listen(context.TODO(), "tcp", listenAddr)
+		tcpListener, err := listenConfig.Listen(context.TODO(), "tcp6", listenAddr)
 		if err != nil {
-			cleanup()
-			return nil, common.Errf("listenTCP: %w", err)
+			// No IPv6 support on this host: fall back to a v4-only socket.
+			tcpListener, err = listenConfig.Listen(context.TODO(), "tcp", v4ListenAddr)
+			if err != nil {
+				cleanup()
+				return nil, common.Errf("listenTCP: %w", err)
+			}
 		}
 		tcpListeners = append(tcpListeners, tcpListener)
-		packetConn, err := listenConfig.ListenPacket(context.TODO(), "udp", listenAddr)
+		packetConn, err := listenConfig.ListenPacket(context.TODO(), "udp6", listenAddr)
 		if err != nil {
-			_ = tcpListener.Close()
-			cleanup()
-			return nil, common.Errf("listenUDP: %w", err)
+			packetConn, err = listenConfig.ListenPacket(context.TODO(), "udp", v4ListenAddr)
+			if err != nil {
+				_ = tcpListener.Close()
+				cleanup()
+				return nil, common.Errf("listenUDP: %w", err)
+			}
 		}
 		packetConns = append(packetConns, packetConn)
 	}
