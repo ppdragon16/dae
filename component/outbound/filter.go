@@ -7,7 +7,9 @@ package outbound
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/daeuniverse/dae/component/outbound/dialer"
@@ -40,8 +42,32 @@ type NodeInfo struct {
 	CreatedDialer *dialer.Dialer
 }
 
+// nodeRequestsTfo reports whether a node link opted into TCP Fast Open via a
+// tfo=true query parameter (tcp_fast_open accepted as an alias). TFO requires
+// the node's server listener to have it enabled too; it only affects the
+// first-hop TCP connection, so chained hops keep the plain dialer.
+func nodeRequestsTfo(link string) bool {
+	u, err := url.Parse(link)
+	if err != nil {
+		return false
+	}
+	raw := u.Query().Get("tfo")
+	if raw == "" {
+		raw = u.Query().Get("tcp_fast_open")
+	}
+	enabled, err := strconv.ParseBool(raw)
+	return err == nil && enabled
+}
+
 func (n *NodeInfo) createDialerIfNeeded(option *dialer.GlobalOption, d netproxy.Dialer) (*dialer.Dialer, error) {
 	if n.CreatedDialer == nil {
+		if d == direct.Direct && nodeRequestsTfo(n.Link) {
+			// First hop only: a TFO dialer defers the connection to the first
+			// write, so it must not be handed to a next-hop node as its
+			// transport, and the check funcs (which write a real probe) keep
+			// working unchanged.
+			d = direct.TfoDirect
+		}
 		for _, dialer := range n.Dialers {
 			var err error
 			d, err = dialer.Dialer(&option.ExtraOption, d)
