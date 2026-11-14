@@ -25,7 +25,7 @@ func SetLogger(logLevel string, disableTimestamp bool, logFileOpt *lumberjack.Lo
 		TimestampFormat:  "Jan 02 15:04:05",
 	})
 	if logFileOpt != nil {
-		log.SetOutput(logFileOpt)
+		log.SetOutput(&fastlog.ByteValidator{W: logFileOpt})
 	}
 	fastlog.Configure(log.StandardLogger().Out)
 }

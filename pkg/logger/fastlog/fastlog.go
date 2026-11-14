@@ -33,7 +33,7 @@ var std *Logger
 // Configure initializes the global fast-log singleton.
 // It should be called once during startup from SetLogger.
 func Configure(out io.Writer) {
-	std = &Logger{out: out}
+	std = &Logger{out: &ByteValidator{W: out}}
 }
 
 // Enabled reports whether a Log* call would emit anything: the fast logger
