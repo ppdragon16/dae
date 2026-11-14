@@ -127,6 +127,24 @@ dns {
       # qname(geosite:gfw) -> race(proxy_dns, googledns)
       fallback: cn_dns
     }
+
+    # Response routing: match a DNS *response* by the upstream that answered
+    # it, the response code, the answer IPs, the qtype, or the client, then
+    # accept / reject it, or re-resolve via another upstream. Canonical use is
+    # anti-poisoning — re-query through a race group when a domestic upstream
+    # answers a foreign IP for a foreign name. ip(empty) matches answers with
+    # NO address records (NODATA — e.g. the AAAA of a domain without IPv6), so
+    # the guard below keeps empty answers from triggering a pointless proxied
+    # re-query. Note: an answer accepted here is final; the lookup-depth bound
+    # (3) applies to upgrade chains, and !upstream(...) exclusion prevents
+    # self-loops.
+    response {
+      # Answers with addresses: only re-resolve when every address is foreign.
+      qtype(a, aaaa) && !ip(empty) && !ip(geoip:private) && !ip(geoip:cn) && upstream(cn_dns) -> race_dns
+      # Names that do not exist: accept as-is.
+      rcode(nxdomain) -> accept
+      fallback: accept
+    }
   }
 }
 

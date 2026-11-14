@@ -359,6 +359,14 @@ Notes:
 - `!ip(geoip:private)` keeps LAN/static answers out of the re-resolution: they
   are intentional answers, and public upstreams would only replace them with
   NXDOMAIN.
+- `ip(empty)` matches an answer with **no address records at all** (NODATA —
+  e.g. the `AAAA` of a domain without IPv6; an emptied reject parses to zero
+  records too). `ip(<cidr>)` never matches an empty set, and `!ip(<cidr>)` hits
+  both empty and non-empty-foreign answers, so `ip(empty)` is the only way to
+  tell "no records" apart from "records, all foreign". Gating the upgrade with
+  `!ip(empty)` keeps the (proxied) re-resolution from firing on every AAAA
+  query for a domain that simply has no IPv6; `!ip(empty) && !ip(geoip:cn)`
+  upgrades only answers that actually carry a suspicious address.
 - Re-resolved answers are cached like ordinary ones, so subsequent queries hit
   the cache and only re-run the (cheap) response matching.
 - `!` negation, multiple values (`upstream(a, b)` = a OR b), and `&&` chaining
