@@ -78,7 +78,7 @@ func TestLogDialFormat(t *testing.T) {
 
 	checks := []string{
 		`level=info`,
-		`[TCP4] 192.168.1.1:54321 <-> 1.2.3.4:443`,
+		`[TCP4] 192.168.1.1:54321 <-> example.com:443`,
 		`network=tcp4`,
 		`sniffed=example.com`,
 		`ip="1.2.3.4:443"`,
@@ -721,5 +721,85 @@ func TestLogSniffTimeoutIsAllocationFree(t *testing.T) {
 		if attempt == 2 {
 			t.Fatalf("LogSniffTimeout allocated %v times per call, want 0", allocs)
 		}
+	}
+}
+
+func TestLogDnsUpgradeFormat(t *testing.T) {
+	var buf bytes.Buffer
+	Configure(&buf)
+
+	LogDnsUpgrade(
+		mustAddrPort("192.168.1.1:54321"),
+		"knicks.jd.com.",
+		1, // A
+		1, // depth
+		0, // NOERROR
+		[]netip.Addr{
+			netip.MustParseAddr("64.118.158.72"),
+			netip.MustParseAddr("2606:4700:4700::1111"),
+		},
+		60, // ttl
+		"udp://223.5.5.5:53",
+		"udp://1.1.1.1:53",
+	)
+
+	output := buf.String()
+	t.Logf("LogDnsUpgrade output:\n%s", output)
+
+	checks := []string{
+		`level=info`,
+		`[DNS] 192.168.1.1:54321 <-> udp://1.1.1.1:53 (upgrade from udp://223.5.5.5:53)`,
+		`qname=knicks.jd.com.`,
+		`qtype=1`,
+		`depth=1`,
+		`rcode=NOERROR`,
+		`ips="64.118.158.72,2606:4700:4700::1111"`,
+		`ttl=60`,
+	}
+	for _, check := range checks {
+		if !strings.Contains(output, check) {
+			t.Errorf("output missing %q", check)
+		}
+	}
+	if strings.Contains(output, "ip_truncated") {
+		t.Errorf("ip_truncated must be absent when the list is complete:\n%s", output)
+	}
+}
+
+func TestLogDnsUpgradeTruncation(t *testing.T) {
+	var buf bytes.Buffer
+	Configure(&buf)
+
+	full := make([]netip.Addr, 0, 10)
+	for i := range 10 {
+		full = append(full, netip.AddrFrom4([4]byte{10, 0, 0, byte(i)}))
+	}
+	// The logger caps the list itself and flags the cut with ip_truncated.
+	LogDnsUpgrade(
+		mustAddrPort("192.168.1.1:54321"),
+		"many.example.com.",
+		28, // AAAA-flagged qtype value is irrelevant here
+		3,  // depth
+		2,  // SERVFAIL
+		full,
+		0, // ttl
+		"udp://223.5.5.5:53",
+		"udp://8.8.8.8:53",
+	)
+
+	output := buf.String()
+	t.Logf("LogDnsUpgrade output:\n%s", output)
+
+	if strings.Count(output, "10.0.0.") != 8 {
+		t.Errorf("expected exactly 8 listed addresses:\n%s", output)
+	}
+	if !strings.Contains(output, "ip_truncated=true") {
+		t.Errorf("output missing ip_truncated=true:\n%s", output)
+	}
+	if !strings.Contains(output, `rcode=SERVFAIL`) {
+		t.Errorf("output missing rcode=SERVFAIL:\n%s", output)
+	}
+	if !strings.Contains(output, "depth=3") {
+		t.Errorf("output missing depth=3:\n%s", output)
 	}
 }

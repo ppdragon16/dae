@@ -627,12 +627,18 @@ Dial:
 		if invokingDepth == MaxDnsLookupDepth {
 			return common.Errf("too deep DNS lookup invoking (depth: %v); there may be infinite loop in your DNS response routing", MaxDnsLookupDepth)
 		}
-		if log.IsLevelEnabled(log.DebugLevel) {
-			log.WithFields(log.Fields{
-				"qname":         queryInfo.qname,
-				"last_upstream": upstream.String(),
-				"next_upstream": nextUpstream.String(),
-			}).Debugln("Change DNS upstream and resend")
+		// Info-level record of the response-phase upgrade: WHICH answer was
+		// discarded and WHERE the query is being re-sent. The [DNS] fastlog of
+		// the next round only shows the new upstream, so this is the only
+		// place that connects the discarded answer to the re-resolution —
+		// e.g. cn_dns answering a geosite:cn domain with a foreign IP and the
+		// response rule sending it to race_dns.
+		if fastlog.Enabled() {
+			ips, ttl := dnsAnswers(dnsResp.respData)
+			fastlog.LogDnsUpgrade(req.Src, queryInfo.qname, queryInfo.qtype,
+				uint32(invokingDepth), dnsRcode(dnsResp.respData),
+				ips, ttl,
+				upstream.String(), nextUpstream.String())
 		}
 		upstream = nextUpstream
 		if dnsResp.respData != nil && dnsResp.fromPool {
