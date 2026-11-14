@@ -582,6 +582,16 @@ func (c *DnsController) handleDNSRequestByUpstream(
 	defer dialArgumentPool.Put(dialArgument)
 
 	var err error
+	// The answer parsed for the current round, reused by the upgrade log and
+	// — when the loop exits through the accept path, where the final answer
+	// is exactly the parsed one — by the lookup-cache update after the loop.
+	// nil means "no reusable parse": the loop never parsed (no response
+	// rules), or the reject path emptied the answer (c.reject() zeroes
+	// ANCOUNT, and the cache update is supposed to see the emptied answer).
+	// An accepted-but-empty answer also parses to nil, and re-parsing it is
+	// harmlessly cheap, so nil doubles as the empty-answer sentinel.
+	var finalIps []netip.Addr
+	var finalTtl uint32
 Dial:
 	for invokingDepth := 1; invokingDepth <= MaxDnsLookupDepth; invokingDepth++ {
 		// ---- request phase ----
@@ -599,13 +609,21 @@ Dial:
 		if !c.routing.HasResponseRules() {
 			if dnsResp.isNew {
 				c.logDnsResponse(req, dialArgument, queryInfo, true)
+				// Parse here under the same guard the lookup-cache update
+				// applies after the loop, so the post-loop code never has to
+				// re-parse.
+				if isDnsResponseValid(dnsResp.respData) {
+					finalIps, finalTtl = dnsAnswers(dnsResp.respData)
+				}
 			}
 			break Dial
 		}
+		// Parse the answer once per round: ResponseSelect, the upgrade log
+		// and the post-loop cache update all work on this same respData.
+		ips, answerTtl := dnsAnswers(dnsResp.respData)
 		// Route response.
 		var ResponseIndex consts.DnsResponseOutboundIndex
 		var nextUpstream *dns.Upstream
-		ips, _ := dnsAnswers(dnsResp.respData)
 		ResponseIndex, nextUpstream, err = c.routing.ResponseSelect(queryInfo.qname, queryInfo.qtype, ips, uint16(dnsRcode(dnsResp.respData)), upstream, req.routingResult.Mac, req.Src.Addr())
 		if err != nil {
 			return err
@@ -616,9 +634,12 @@ Dial:
 			}
 			switch ResponseIndex {
 			case consts.DnsResponseOutboundIndex_Reject:
+				// c.reject() zeroes ANCOUNT, so finalIps stays nil and the
+				// post-loop update acts on the emptied answer.
 				c.reject(dnsResp.respData)
-				fallthrough
+				break Dial
 			case consts.DnsResponseOutboundIndex_Accept:
+				finalIps, finalTtl = ips, answerTtl
 				break Dial
 			default:
 				return common.Errf("unknown upstream: %v", ResponseIndex.String())
@@ -634,10 +655,9 @@ Dial:
 		// e.g. cn_dns answering a geosite:cn domain with a foreign IP and the
 		// response rule sending it to race_dns.
 		if fastlog.Enabled() {
-			ips, ttl := dnsAnswers(dnsResp.respData)
 			fastlog.LogDnsUpgrade(req.Src, queryInfo.qname, queryInfo.qtype,
 				uint32(invokingDepth), dnsRcode(dnsResp.respData),
-				ips, ttl,
+				ips, answerTtl,
 				upstream.String(), nextUpstream.String())
 		}
 		upstream = nextUpstream
@@ -647,7 +667,11 @@ Dial:
 	}
 
 	if dnsResp.isNew && isDnsResponseValid(dnsResp.respData) {
-		ips, ttl := dnsAnswers(dnsResp.respData)
+		// finalIps is nil exactly when there are no answer records to act
+		// on: the reject path emptied the answer, or the accepted answer was
+		// empty. Both proceed with the zero values — the same results the
+		// eager parse of the no-response-rules path would have produced.
+		ips, ttl := finalIps, finalTtl
 		// SniffVerifyMode_None never uses sniffDomainCache — skip entirely.
 		if len(ips) > 0 && c.sniffVerifyMode != consts.SniffVerifyMode_None {
 			qHash := c.QnameHash(queryInfo.qname)
