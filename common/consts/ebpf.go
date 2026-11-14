@@ -62,6 +62,10 @@ const (
 	MatchType_QType
 	MatchType_Static
 	MatchType_RCode
+	// MatchType_IpEmpty is DNS-response-routing-only (Go side); the kernel
+	// enum above stops at MatchType_Fallback and must stay in sync only up
+	// to there.
+	MatchType_IpEmpty
 )
 
 type OutboundIndex uint8

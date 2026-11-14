@@ -41,7 +41,7 @@ func NewResponseMatcherBuilder(rules []*config_parser.RoutingRule, upstreamName2
 	rulesBuilder.RegisterFunctionParser(consts.Function_QName, routing.PlainParserFactory(b.addQName))
 	rulesBuilder.RegisterFunctionParser(consts.Function_QType, TypeParserFactory(b.addQType))
 	rulesBuilder.RegisterFunctionParser(consts.Function_RCode, RCodeParserFactory(b.addRCode))
-	rulesBuilder.RegisterFunctionParser(consts.Function_Ip, routing.IpParserFactory(b.addIp))
+	rulesBuilder.RegisterFunctionParser(consts.Function_Ip, b.ipParser())
 	rulesBuilder.RegisterFunctionParser(consts.Function_Upstream, routing.EmptyKeyPlainParserFactory(b.addUpstream))
 	rulesBuilder.RegisterFunctionParser(consts.Function_Mac, routing.MacParserFactory(b.addSourceMac))
 	rulesBuilder.RegisterFunctionParser(consts.Function_SourceIp, routing.IpParserFactory(b.addSourceIp))
@@ -276,6 +276,41 @@ func (b *ResponseMatcherBuilder) addRCode(f *config_parser.Function, values []ui
 	return nil
 }
 
+// ipParser handles ip(<cidr>, ...) and the special operand ip(empty), which
+// matches a response with no answer addresses at all (NODATA / an emptied
+// reject). ip(empty) cannot mix with CIDR operands — the two call for
+// different matchsets.
+func (b *ResponseMatcherBuilder) ipParser() routing.FunctionParser {
+	inner := routing.IpParserFactory(b.addIp)
+	return func(f *config_parser.Function, key string, paramValueGroup []string, overrideOutbound *routing.Outbound) (err error) {
+		for _, v := range paramValueGroup {
+			if !strings.EqualFold(v, "empty") {
+				continue
+			}
+			if len(paramValueGroup) != 1 {
+				return fmt.Errorf("ip(empty) takes no other operands; write ip(empty) and ip(<cidr>) as separate rules")
+			}
+			return b.addIpEmpty(f, overrideOutbound)
+		}
+		return inner(f, key, paramValueGroup, overrideOutbound)
+	}
+}
+
+// addIpEmpty appends a matchset matching an answer with zero address records.
+// With Not (i.e. !ip(empty)) it matches answers carrying at least one address.
+func (b *ResponseMatcherBuilder) addIpEmpty(f *config_parser.Function, upstream *routing.Outbound) (err error) {
+	upstreamId, err := b.upstreamToId(upstream.Name)
+	if err != nil {
+		return err
+	}
+	b.rules = append(b.rules, responseMatchSet{
+		Type:     consts.MatchType_IpEmpty,
+		Not:      f.Not,
+		Upstream: uint8(upstreamId),
+	})
+	return nil
+}
+
 func (b *ResponseMatcherBuilder) addFallback(fallbackOutbound config.FunctionOrString) (err error) {
 	upstream, err := routing.ParseOutbound(config.FunctionOrStringToFunction(fallbackOutbound))
 	if err != nil {
@@ -394,6 +429,10 @@ func (m *ResponseMatcher) Match(
 			}
 		case consts.MatchType_IpSet:
 			if matchIpSet(m.ipSet[match.Value], ips) {
+				goodSubrule = true
+			}
+		case consts.MatchType_IpEmpty:
+			if len(ips) == 0 {
 				goodSubrule = true
 			}
 		case consts.MatchType_QType:

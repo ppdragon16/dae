@@ -16,8 +16,11 @@ import (
 	"github.com/daeuniverse/dae/pkg/config_parser"
 	"github.com/daeuniverse/dae/pkg/trie"
 
-	dnsmessage "github.com/miekg/dns"
 	"strings"
+
+	"github.com/daeuniverse/dae/config"
+
+	dnsmessage "github.com/miekg/dns"
 )
 
 func testResponseRule(outbound string, andFunctions ...*config_parser.Function) *config_parser.RoutingRule {
@@ -466,4 +469,145 @@ func TestResponseMatcherExpandsRaceGroupTag(t *testing.T) {
 			t.Fatalf("%s: reject=%v, want %v", tc.name, gotReject, tc.wantReject)
 		}
 	}
+}
+
+func TestResponseMatcherIpEmpty(t *testing.T) {
+	m := buildTestResponseMatcher(t, []*config_parser.RoutingRule{
+		// ip(empty) matches answers without addresses; !ip(empty) the rest.
+		testResponseRule("reject", testResponseFunction("ip", "empty")),
+		testResponseRule("accept", testResponseFunctionWithNot("ip", "empty")),
+	}, "reject")
+
+	// An empty answer (NODATA / an emptied reject) hits ip(empty).
+	got, err := m.Match("empty.example.com.", uint16(dnsmessage.TypeA), nil, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.MustParseAddr("192.168.1.1"), uint16(dnsmessage.RcodeSuccess))
+	if err != nil {
+		t.Fatalf("Match() error = %v", err)
+	}
+	if got != consts.DnsResponseOutboundIndex_Reject {
+		t.Fatalf("empty answer: got %v, want reject", got)
+	}
+
+	// An answer with addresses skips ip(empty) and hits !ip(empty).
+	got, err = m.Match("full.example.com.", uint16(dnsmessage.TypeA), []netip.Addr{netip.MustParseAddr("1.2.3.4")}, consts.DnsRequestOutboundIndex_AsIs, [6]byte{}, netip.MustParseAddr("192.168.1.1"), uint16(dnsmessage.RcodeSuccess))
+	if err != nil {
+		t.Fatalf("Match() error = %v", err)
+	}
+	if got != consts.DnsResponseOutboundIndex_Accept {
+		t.Fatalf("answered: got %v, want accept", got)
+	}
+}
+
+func testResponseFunctionWithNot(name string, values ...string) *config_parser.Function {
+	f := testResponseFunction(name, values...)
+	f.Not = true
+	return f
+}
+
+func TestResponseParserIpEmpty(t *testing.T) {
+	sections, err := config_parser.Parse(`
+global {}
+dns {
+  upstream {
+    local_dns: 'udp://127.0.0.1:53'
+  }
+  routing {
+    request {
+      fallback: local_dns
+    }
+    response {
+      qtype(a, aaaa) && ip(empty) && upstream(local_dns) -> accept
+      qtype(a, aaaa) && !ip(empty) && !ip(8.8.8.8/32) && upstream(local_dns) -> reject
+      fallback: accept
+    }
+  }
+}
+routing {
+  fallback: direct
+}
+`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	conf, err := config.New(sections)
+	if err != nil {
+		t.Fatalf("config.New: %v", err)
+	}
+	rules := conf.Dns.Routing.Response.Rules
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 response rules, got %v", len(rules))
+	}
+	b, err := NewResponseMatcherBuilder(rules,
+		map[string]uint8{"local_dns": 0}, conf.Dns.Routing.Response.Fallback, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	m, err := b.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Empty AAAA answer from local_dns: first rule hits, accepted.
+	got, err := m.Match("x.example.com.", uint16(dnsmessage.TypeAAAA), nil, 0, [6]byte{}, netip.MustParseAddr("192.168.1.1"), uint16(dnsmessage.RcodeSuccess))
+	if err != nil {
+		t.Fatalf("Match() error = %v", err)
+	}
+	if got != consts.DnsResponseOutboundIndex_Accept {
+		t.Fatalf("empty AAAA: got %v, want accept", got)
+	}
+
+	// Answer with an IP outside 8.8.8.8/32: first rule misses (ip(empty)
+	// false), second hits (!ip(empty) && !ip(8.8.8.8/32)), rejected.
+	got, err = m.Match("x.example.com.", uint16(dnsmessage.TypeA), []netip.Addr{netip.MustParseAddr("9.9.9.9")}, 0, [6]byte{}, netip.MustParseAddr("192.168.1.1"), uint16(dnsmessage.RcodeSuccess))
+	if err != nil {
+		t.Fatalf("Match() error = %v", err)
+	}
+	if got != consts.DnsResponseOutboundIndex_Reject {
+		t.Fatalf("non-excluded A: got %v, want reject", got)
+	}
+
+	// Answer with the excluded IP: second rule misses on !ip(8.8.8.8/32),
+	// falls through to fallback accept.
+	got, err = m.Match("x.example.com.", uint16(dnsmessage.TypeA), []netip.Addr{netip.MustParseAddr("8.8.8.8")}, 0, [6]byte{}, netip.MustParseAddr("192.168.1.1"), uint16(dnsmessage.RcodeSuccess))
+	if err != nil {
+		t.Fatalf("Match() error = %v", err)
+	}
+	if got != consts.DnsResponseOutboundIndex_Accept {
+		t.Fatalf("excluded A: got %v, want accept (fallback)", got)
+	}
+}
+
+func TestResponseParserIpEmptyMixedOperandError(t *testing.T) {
+	sections, err := config_parser.Parse(`
+global {}
+dns {
+  upstream {
+    local_dns: 'udp://127.0.0.1:53'
+  }
+  routing {
+    request {
+      fallback: local_dns
+    }
+    response {
+      ip(empty, 1.2.3.4/32) -> accept
+      fallback: accept
+    }
+  }
+}
+routing {
+  fallback: direct
+}
+`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	conf, err := config.New(sections)
+	if err != nil {
+		t.Fatalf("config.New: %v", err)
+	}
+	_, err = NewResponseMatcherBuilder(conf.Dns.Routing.Response.Rules,
+		map[string]uint8{"local_dns": 0}, conf.Dns.Routing.Response.Fallback, nil)
+	if err == nil {
+		t.Fatal("expected ip(empty, cidr) to be rejected")
+	}
+	t.Logf("mixed operand error: %v", err)
 }
