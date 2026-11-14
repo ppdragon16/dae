@@ -110,7 +110,7 @@ func (ue *UdpEndpoint) run() {
 		ue.counterTraffic.Add(int64(n))
 		atomic.AddInt64(&ue.trafficSinceLastCheck, int64(n))
 		// Only print routing for new connection to avoid the log exploded (Quic and BT).
-		if !ue.receivedReply && log.IsLevelEnabled(log.InfoLevel) && fastlog.Enabled() {
+		if !ue.receivedReply {
 			fastlog.LogUdpReply(ue.Src, from)
 		}
 

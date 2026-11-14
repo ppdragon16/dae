@@ -13,6 +13,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Logger is a zero-allocation structured logger for high-frequency events.
@@ -34,9 +36,15 @@ func Configure(out io.Writer) {
 	std = &Logger{out: out}
 }
 
-// Enabled reports whether the fast logger has been configured.
+// Enabled reports whether a Log* call would emit anything: the fast logger
+// must be configured and the logrus level must admit Info lines. fastlog
+// bypasses logrus — it hardcodes level=info into its output — so the level
+// gate lives here and inside every Log* function (this same check); callers
+// that precompute non-trivial arguments can additionally check Enabled()
+// before doing so. The level is read live, so a runtime log_level change
+// takes effect immediately.
 func Enabled() bool {
-	return std != nil
+	return std != nil && log.IsLevelEnabled(log.InfoLevel)
 }
 
 // getTs returns a cached timestamp as []byte.

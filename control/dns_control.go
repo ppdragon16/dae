@@ -1165,7 +1165,7 @@ func (c *DnsController) ResolveForVerification(fqdn string, src netip.AddrPort, 
 }
 
 func (c *DnsController) logDnsResponse(req *dnsRequest, dialArgument *dialArgument, queryInfo queryInfo, accepted bool) {
-	if !log.IsLevelEnabled(log.InfoLevel) || !fastlog.Enabled() {
+	if !fastlog.Enabled() {
 		return
 	}
 

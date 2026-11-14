@@ -64,7 +64,7 @@ func LogSniffTimeout(
 	head []byte,
 	elapsed time.Duration,
 ) {
-	if std == nil {
+	if !Enabled() {
 		return
 	}
 

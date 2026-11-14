@@ -236,7 +236,7 @@ func (tc *TrafficLogConn) Write(p []byte) (int, error) {
 }
 
 func LogDial(src, dst netip.AddrPort, domain string, dialOption *DialOption, networkType *common.NetworkType, routingResult *bpfRoutingResult) {
-	if !log.IsLevelEnabled(log.InfoLevel) || !fastlog.Enabled() {
+	if !fastlog.Enabled() {
 		return
 	}
 

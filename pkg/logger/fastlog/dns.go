@@ -34,7 +34,7 @@ func LogDnsResponse(
 	dscp uint8,
 	accepted bool,
 ) {
-	if std == nil {
+	if !Enabled() {
 		return
 	}
 
@@ -115,7 +115,7 @@ func LogDnsUpgrade(
 	ttl uint32, // minimum TTL of those records
 	lastUpstream, nextUpstream string,
 ) {
-	if std == nil {
+	if !Enabled() {
 		return
 	}
 	// Cap the list: CDN answers can carry dozens of records, and the line

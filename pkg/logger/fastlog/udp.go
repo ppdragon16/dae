@@ -17,7 +17,7 @@ import (
 //
 //	time="..." level=info msg="Received UDP packet reply: src <- from"
 func LogUdpReply(src, from netip.AddrPort) {
-	if std == nil {
+	if !Enabled() {
 		return
 	}
 

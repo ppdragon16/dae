@@ -34,7 +34,7 @@ func LogDial(
 	outbound, policy, dialerName string,
 	originalOutbound, originalPolicy, fallbackDialer string,
 ) {
-	if std == nil {
+	if !Enabled() {
 		return
 	}
 
