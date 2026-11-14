@@ -91,9 +91,24 @@ func (c *ControlPlane) createUdpEndpoint(ueKey UdpEndpointKey, data []byte) (ue 
 		// the hijack above and reach exactly this path. Mirror the
 		// normalization instead of dropping the packet.
 		if dst.Port() != 53 {
-			return nil, common.Wrap(err, "No AddrPort presented")
-		}
-		if err = c.core.RetrieveUDPRoutingResult(netip.AddrPortFrom(src.Addr(), 0), dst, routingResult); err != nil {
+			// A non-DNS flow reaching here means the tuples entry the kernel
+			// just wrote for this brand-new flow was gone by the time the
+			// control plane read it — a janitor sweep racing the write (663
+			// such misses in one burst once the map holds enough flows).
+			// Dropping the packet blackholes the flow until the client
+			// retries; instead, bump the request to control-plane routing.
+			// The sniffed domain (resolved above) is usually enough to
+			// reproduce the dataplane's decision; the client MAC is
+			// dataplane-only context, so mac()-based request rules are the
+			// one thing this degraded route cannot see.
+			log.WithFields(log.Fields{
+				"src":    src.String(),
+				"dst":    dst.String(),
+				"domain": sniffingResult.domain,
+				"err":    err.Error(),
+			}).Warnln("no routing tuple for a new udp flow; routing it in the control plane")
+			routingResult.Outbound = uint8(consts.OutboundControlPlaneRouting)
+		} else if err = c.core.RetrieveUDPRoutingResult(netip.AddrPortFrom(src.Addr(), 0), dst, routingResult); err != nil {
 			return nil, common.Wrap(err, "No AddrPort presented")
 		}
 	}
