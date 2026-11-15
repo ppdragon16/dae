@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"math"
 	"net"
@@ -102,12 +103,15 @@ type ControlPlane struct {
 	bpfMapJanitor bpfMapJanitor
 
 	// Subscription update support.
-	cfgFile         string
-	subscriptionDir string
-	config          *config.ConfigTrimmed
-	inuseDialers    []*dialer.Dialer
-	muUpdateSub     sync.Mutex
-	UpdatingSub     atomic.Bool
+	cfgFile                        string
+	subscriptionDir                string
+	subscriptionAutoUpdateInterval time.Duration
+	lastSubHash                    uint64
+	subHash                        maphash.Hash
+	config                         *config.ConfigTrimmed
+	inuseDialers                   []*dialer.Dialer
+	muUpdateSub                    sync.Mutex
+	UpdatingSub                    atomic.Bool
 
 	// DNS update support.
 	UpdatingDns atomic.Bool
@@ -476,8 +480,11 @@ func NewControlPlane(
 		udpTaskPool:           NewUdpTaskPool[AddrPortPair, emitParam](AddrPortPairHash),
 
 		bpfMapJanitor: newBpfMapJanitor(func() *bpfObjects { return core.bpf.bpfObjects }),
+
+		subscriptionAutoUpdateInterval: global.SubscriptionAutoUpdateInterval,
 	}
 	plane.inuseDialers = inuseDialers
+	plane.lastSubHash = plane.subStateHash(tagToNodeList, groups)
 	if err := plane.rebuildOutboundRedirects(groups); err != nil {
 		return nil, err
 	}
@@ -635,6 +642,12 @@ func NewControlPlane(
 	// Bind to dae0 and dae0peer
 	if err = core.bindDaens(); err != nil {
 		return nil, common.Errf("bindDaens: %w", err)
+	}
+
+	// Automatic subscription updates: an interval of 0 (the default) keeps the
+	// manual `dae update sub` flow as the only trigger.
+	if plane.subscriptionAutoUpdateInterval > 0 {
+		go plane.autoUpdateSubscriptions(plane.ctx)
 	}
 
 	return plane, nil
@@ -1837,6 +1850,101 @@ func (c *ControlPlane) chooseBestDnsDialer(
 
 // UpdateSubscriptions re-fetches subscriptions and hot-swaps dialers
 // in existing DialerGroups without rebuilding routing or BPF state.
+
+// subStateHash hashes the subscription-derived state: the sorted set of
+// (tag, node link) pairs plus the group configs (filter/annotation/options).
+// Two states with equal hashes hot-swap dialers into identical replacements —
+// nothing observable changes — so UpdateSubscriptions skips the swap when the
+// hashes match. maphash is seeded once per process and Reset between calls
+// (sequential use under muUpdateSub), and a 64-bit collision between two
+// different states is ~2^-64: even if one happened, the cost is a skipped
+// update that the next round retries.
+func (c *ControlPlane) subStateHash(tagToNodeList map[string][]string, groups []config.Group) uint64 {
+	// Entries are combined additively, which is commutative and associative:
+	// the hash is independent of map iteration order and of node order within
+	// a tag, with no sorting pass at all. Addition also keeps multiplicity —
+	// a duplicated node link changes the sum, so {A, A} differs from {A}.
+	var sum uint64
+	for tag, nodes := range tagToNodeList {
+		for _, n := range nodes {
+			c.subHash.Reset()
+			c.subHash.WriteString(tag)
+			c.subHash.WriteByte(0)
+			c.subHash.WriteString(n)
+			sum += c.subHash.Sum64()
+		}
+	}
+	c.subHash.Reset()
+	hashGroupConfigs(&c.subHash, groups)
+	sum += c.subHash.Sum64()
+	return sum
+}
+
+// hashGroupConfigs hashes the group configs by VALUE. The structs contain
+// pointers ([]*Function, []*Param) freshly allocated by every config
+// reparse, so %+v (which prints addresses) would produce a different hash
+// for an identical config and defeat the unchanged check. Every field is
+// therefore reduced to its deterministic string form: Function and Param go
+// through their lossless MarshalString, and Policy is normalized to a
+// function list first.
+func hashGroupConfigs(h *maphash.Hash, groups []config.Group) {
+	for _, g := range groups {
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00", g.Name, g.Redirect, g.NextHop)
+		fmt.Fprintf(h, "%d\x00%d\x00", g.CheckInterval, g.CheckTolerance)
+		for _, d := range g.UdpCheckDns {
+			h.WriteString(d)
+			h.WriteByte(0)
+		}
+		if g.Policy != nil {
+			for _, f := range config.FunctionListOrStringToFunctionList(g.Policy) {
+				h.WriteString(f.MarshalString(true, true, true))
+				h.WriteByte(0)
+			}
+		}
+		for _, subrules := range g.Filter {
+			for _, f := range subrules {
+				h.WriteString(f.MarshalString(true, true, true))
+				h.WriteByte(0)
+			}
+		}
+		for _, subrules := range g.FilterAnnotation {
+			for _, p := range subrules {
+				hashParam(h, p)
+			}
+		}
+		h.WriteByte(0)
+	}
+}
+
+func hashParam(h *maphash.Hash, p *config_parser.Param) {
+	fmt.Fprintf(h, "%s\x00%s\x00", p.Key, p.Val)
+	for _, f := range p.AndFunctions {
+		h.WriteString(f.MarshalString(true, true, true))
+		h.WriteByte(0)
+	}
+	for _, sub := range p.Annotation {
+		hashParam(h, sub)
+		h.WriteByte(0)
+	}
+}
+
+// autoUpdateSubscriptions periodically re-runs UpdateSubscriptions. A round
+// whose resolved state matches the last applied one is skipped by the compare
+// inside UpdateSubscriptions, so an unchanged subscription costs one fetch and
+// one parse — no dialer swap, no connectivity-check churn.
+func (c *ControlPlane) autoUpdateSubscriptions(ctx context.Context) {
+	var t *time.Timer
+	var ok bool
+	for {
+		if t, ok = common.SleepOrDone(ctx.Done(), c.subscriptionAutoUpdateInterval, t); !ok {
+			return
+		}
+		if err := c.UpdateSubscriptions(); err != nil {
+			log.WithError(err).Errorln("[update-sub] automatic subscription update failed")
+		}
+	}
+}
+
 func (c *ControlPlane) UpdateSubscriptions() error {
 	c.muUpdateSub.Lock()
 	defer c.muUpdateSub.Unlock()
@@ -1885,6 +1993,17 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	newTagToNodeList := subscription.ResolveAllSubscriptions(&client, c.subscriptionDir, nodeStrs, subStrs)
 	if len(newTagToNodeList) == 0 {
 		return fmt.Errorf("no nodes resolved from any subscription")
+	}
+
+	// Skip the swap when the resolved state (node links per tag plus group
+	// configs) is identical to the last applied one: an unchanged
+	// subscription must not reset connectivity-check state for every dialer.
+	// The hash is committed only after the phases below complete, so a
+	// failed round retries on the next trigger.
+	hash := c.subStateHash(newTagToNodeList, c.config.Group)
+	if hash == c.lastSubHash {
+		log.Infoln("[update-sub] subscriptions unchanged; skipping dialer swap")
+		return nil
 	}
 
 	// Phase 2: Build new DialerSet from fresh data.
@@ -1995,6 +2114,7 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	}
 
 	log.Warnln("[update-sub] Subscription update completed successfully")
+	c.lastSubHash = hash
 	runtime.GC()
 	return nil
 }

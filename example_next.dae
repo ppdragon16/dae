@@ -17,6 +17,10 @@ global {
     disable_waiting_network: true
     check_interval: 30s
     check_tolerance: 30ms
+    # Auto re-fetch subscriptions and hot-swap dialers only when the resolved
+    # node links actually changed (an unchanged round costs one fetch+parse).
+    # 0 disables the periodic auto-update; `dae update sub` always works.
+    # subscription_auto_update_interval: 24h
     udp_check_dns: 'one.one.one.one:53,1.1.1.1' # No ipv6 connectivity test
     enable_traffic_log: true # default: false, save traffic info to "traffic.log" file
 }
