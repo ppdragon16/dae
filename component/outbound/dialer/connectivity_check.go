@@ -370,6 +370,7 @@ func (d *Dialer) runCheckLoopWith(ctx context.Context, checkOpts []*CheckOption,
 	done := ctx.Done()
 	log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check started")
 
+	var initialCheckTimer *time.Timer
 	// Discovery and steady state alternate: discovery probes every network type
 	// and picks one, steady state checks that one, and a sustained failure of it
 	// sends the loop back to discovery.
@@ -415,12 +416,11 @@ func (d *Dialer) runCheckLoopWith(ctx context.Context, checkOpts []*CheckOption,
 			// (rounds are minutes apart, and Go 1.23+ collects unreferenced
 			// timers), and it sidesteps the stale-channel-value dance that a
 			// reused Timer needs on older Go.
-			select {
-			case <-done:
+			var ok bool
+			if initialCheckTimer, ok = common.SleepOrDone(done, d.CheckInterval, initialCheckTimer); !ok {
 				slowWarn.Stop()
 				log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before it found a network type")
 				return
-			case <-time.After(d.CheckInterval):
 			}
 		}
 		slowWarn.Stop()
@@ -623,10 +623,8 @@ func (d *Dialer) startCheckTicker(ctx context.Context) {
 	done := ctx.Done()
 	// Sleep to avoid avalanche, but stay cancellable: a superseded ticker must
 	// not wake up and install itself (and it must not adopt a newer context).
-	select {
-	case <-done:
+	if _, ok := common.SleepOrDone(done, time.Duration(fastrand.Int63n(int64(d.CheckInterval))), nil); !ok {
 		return
-	case <-time.After(time.Duration(fastrand.Int63n(int64(d.CheckInterval)))):
 	}
 	d.tickerMu.Lock()
 	ticker := time.NewTicker(d.CheckInterval)

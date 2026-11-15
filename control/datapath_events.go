@@ -334,11 +334,14 @@ func (c *datapathEventConsumer) publishEventSlots(bpf *bpfState) {
 
 func (c *datapathEventConsumer) run(ctx context.Context, reader *ringbuf.Reader, done chan struct{}) {
 	defer close(done)
+	ctxDone := ctx.Done()
 	go func() {
-		<-ctx.Done()
+		<-ctxDone
 		_ = reader.Close()
 	}()
 
+	var t *time.Timer
+	var ok bool
 	for {
 		rec, err := reader.Read()
 		if err != nil {
@@ -349,9 +352,7 @@ func (c *datapathEventConsumer) run(ctx context.Context, reader *ringbuf.Reader,
 				log.Debugf("failed to read the datapath event ring buffer: %v", err)
 			}
 			// Do not spin on a persistent error.
-			select {
-			case <-time.After(100 * time.Millisecond):
-			case <-ctx.Done():
+			if t, ok = common.SleepOrDone(ctxDone, 100*time.Millisecond, t); !ok {
 				return
 			}
 			continue
