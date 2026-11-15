@@ -8,16 +8,20 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cilium/ebpf"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
 	"github.com/daeuniverse/dae/common"
+	"github.com/daeuniverse/dae/pkg/logger"
+	"github.com/daeuniverse/outbound/pool"
 )
 
 const (
@@ -204,6 +208,8 @@ func (j *bpfMapJanitor) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 			}
+
+			patrolLogTail()
 
 			now := time.Now()
 			cleaned := 0
@@ -478,4 +484,68 @@ func isIgnorableBatchLookupErr(err error) bool {
 		strings.Contains(errStr, "file descriptor") ||
 		strings.Contains(errStr, "closed") ||
 		strings.Contains(errStr, "key does not exist")
+}
+
+// patrolLogTail checks the tail of the log file for foreign writers. Both
+// loggers hold the file behind an O_APPEND fd and serialize their writes, so
+// within this process the tail can only ever contain well-formed log lines.
+// Invalid UTF-8 or a line that does not start like a log line therefore means
+// some other fd — an fd-number collision after a stray close, or an external
+// process — wrote into the file. Dump the fd table to stderr (syslog, not the
+// log file) to narrow down which fd it was. Read-only: ~64 KiB per janitor
+// round.
+func patrolLogTail() {
+	path := logger.LogFilePath()
+	if path == "" {
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return
+	}
+	const window = 64 << 10
+	n := min(st.Size(), window)
+	buf := pool.GetBuffer(int(n))
+	defer pool.PutBuffer(buf)
+	if _, err = f.ReadAt(buf, st.Size()-n); err != nil {
+		return
+	}
+	// The window starts at a fixed byte offset and can begin inside a
+	// multi-byte rune (node names carry emoji and CJK). Drop leading
+	// continuation bytes so validity is judged from the first complete rune
+	// on — the rune straddling the window edge belongs to a line outside it.
+	for len(buf) > 0 && buf[0]&0xC0 == 0x80 {
+		buf = buf[1:]
+	}
+	// The only invariant that holds is utf8 validity: logrus messages may
+	// legitimately contain newlines (a multi-line msg — say, the node list
+	// printed after fetching subscriptions — spans several lines whose
+	// continuations do not start like log lines), so line-shaped checks
+	// would false-positive on ordinary output. The binary DNS response that
+	// started this is not valid utf8, and that is the class of foreign
+	// write worth catching; a foreign write of well-formed text cannot be
+	// distinguished from a legitimate multi-line message here.
+	if utf8.Valid(buf) {
+		return
+	}
+	var fds strings.Builder
+	if ents, err := os.ReadDir("/proc/self/fd"); err == nil {
+		for _, e := range ents {
+			if link, err := os.Readlink("/proc/self/fd/" + e.Name()); err == nil {
+				fds.WriteString("  ")
+				fds.WriteString(e.Name())
+				fds.WriteString(" -> ")
+				fds.WriteString(link)
+				fds.WriteString("\n")
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr,
+		"dae: non-utf8 write detected in the log file %s (last %d bytes); "+
+			"fd table of this process:\n%s", path, n, fds.String())
 }

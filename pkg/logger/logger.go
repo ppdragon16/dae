@@ -24,8 +24,27 @@ func SetLogger(logLevel string, disableTimestamp bool, logFileOpt *lumberjack.Lo
 		FullTimestamp:    true,
 		TimestampFormat:  "Jan 02 15:04:05",
 	})
+	// A nil logFileOpt (the reload path) means "keep the current output
+	// untouched": it is already validated by the initial run, re-wrapping it
+	// here would stack one validator per reload, and re-deriving the log
+	// path is both unnecessary and nil-unsafe.
 	if logFileOpt != nil {
-		log.SetOutput(&fastlog.ByteValidator{W: logFileOpt})
+		// One validator instance shared by both loggers: logrus writes
+		// through it, and fastlog's out IS logrus's Out (captured here), so
+		// the same gate covers both without the double utf8.Valid a second
+		// instance would add.
+		out := &fastlog.ByteValidator{W: logFileOpt}
+		log.SetOutput(out)
+		fastlog.Configure(out)
+		logFilePath = logFileOpt.Filename
 	}
-	fastlog.Configure(log.StandardLogger().Out)
+}
+
+// logFilePath is the file the loggers write to ("" when logging to a stream).
+// The janitor's log-tail patrol uses it to watch for foreign writers.
+var logFilePath string
+
+// LogFilePath returns the current log file path, or "" when not file-backed.
+func LogFilePath() string {
+	return logFilePath
 }
