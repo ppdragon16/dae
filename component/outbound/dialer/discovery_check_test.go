@@ -74,7 +74,6 @@ func TestDialer_InitialCheckGiveUpKeepsRetrying(t *testing.T) {
 		CheckInterval:     5 * time.Millisecond,
 	}
 	d := NewDialer(probe, option, &Property{Property: D.Property{Name: "flaky"}}, true)
-	d.checkRetryInterval = time.Millisecond
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
 	// Reproduce the dangerous case: this dialer was alive before the
@@ -101,7 +100,6 @@ func TestDialer_InitialCheckGiveUpKeepsRetrying(t *testing.T) {
 func TestDialer_DiscoveryRecovers(t *testing.T) {
 	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: 5 * time.Millisecond},
 		&Property{Property: D.Property{Name: "recover"}}, true)
-	d.checkRetryInterval = time.Millisecond
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
 	d.alive.Store(true)
@@ -147,7 +145,6 @@ func TestDialer_DiscoveryRetriesArePaced(t *testing.T) {
 
 	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
 		&Property{Property: D.Property{Name: "paced"}}, true)
-	d.checkRetryInterval = interval
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
 
@@ -197,13 +194,12 @@ func TestDialer_InitialCheckReportsProbeError(t *testing.T) {
 // works. Without it the dialer kept re-probing the dead type forever and the
 // node stayed excluded until a reload, even though another type was fine.
 func TestDialer_SteadyStateFailureReDiscovers(t *testing.T) {
-	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
+	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: 5 * time.Millisecond},
 		&Property{Property: D.Property{Name: "rediscover"}}, true)
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
 	// Drive the retry budget fast: the assertion is about what happens after it
 	// is exhausted, not about the schedule itself.
-	d.checkRetryInterval = time.Millisecond
 
 	var tcpHealthy atomic.Bool
 	tcpHealthy.Store(true)
@@ -245,11 +241,10 @@ func TestDialer_SteadyStateFailureReDiscovers(t *testing.T) {
 // contract: a single failed probe inside one cycle must NOT be treated as the
 // type being dead, so no rediscovery happens and the dialer stays alive.
 func TestDialer_TransientProbeFailureIsAbsorbed(t *testing.T) {
-	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: time.Hour},
+	d := NewDialer(&recoverableNetDialer{}, &GlobalOption{CheckInterval: 5 * time.Millisecond},
 		&Property{Property: D.Property{Name: "blip"}}, true)
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})
-	d.checkRetryInterval = time.Millisecond
 
 	// Calls 1 and 2 are discovery's cold + warm probe; call 3 is the steady
 	// cycle's first probe and fails; call 4 (the retry) succeeds.
@@ -302,7 +297,7 @@ func (d *deadConnectDialer) Disconnect() error { return nil }
 // unsupported for every type during re-discovery, so flows of all types lost
 // the node for the whole probing window.
 func TestDialer_InitialCheckFailureKeepsSupportMatrix(t *testing.T) {
-	d := NewDialer(&deadConnectDialer{}, &GlobalOption{CheckInterval: time.Hour},
+	d := NewDialer(&deadConnectDialer{}, &GlobalOption{CheckInterval: 5 * time.Millisecond},
 		&Property{Property: D.Property{Name: "keep-matrix"}}, true)
 	t.Cleanup(d.stopCheck)
 	d.RegisterDialerGroup(&mockDialerGroup{id: 1})

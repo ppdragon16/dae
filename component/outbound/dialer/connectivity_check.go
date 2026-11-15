@@ -40,12 +40,6 @@ const (
 	// first activation runs before it gives up on discovering a usable
 	// network type.
 	initialCheckRounds = 3
-
-	// defaultInitialCheckRetryInterval is the pause between discovery rounds. It is
-	// a default, not a package-level knob: tests shorten it per dialer through
-	// Dialer.checkRetryInterval, which is set before the check goroutine starts and
-	// therefore needs no synchronisation.
-	defaultInitialCheckRetryInterval = 5 * time.Second
 )
 
 func (d *Dialer) Alive() bool {
@@ -376,11 +370,6 @@ func (d *Dialer) runCheckLoopWith(ctx context.Context, checkOpts []*CheckOption,
 	done := ctx.Done()
 	log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check started")
 
-	// One timer is reused by every discovery round: time.After inside the loop
-	// would allocate a fresh timer on every retry.
-	retryTimer := time.NewTimer(d.checkRetryInterval)
-	defer retryTimer.Stop()
-
 	// Discovery and steady state alternate: discovery probes every network type
 	// and picks one, steady state checks that one, and a sustained failure of it
 	// sends the loop back to discovery.
@@ -418,18 +407,21 @@ func (d *Dialer) runCheckLoopWith(ctx context.Context, checkOpts []*CheckOption,
 				"node":  d.Name,
 				"error": checkErr.Error(),
 			}).Warnln("Initial connectivity check found no usable network type; retrying the full discovery")
-			// Wait out the rest of the retry interval before the next round. The
-			// timer was armed before this round, so a round that already took longer
-			// than the interval returns here immediately instead of adding another
-			// one on top of it.
+			// Wait before the next discovery round. A failed discovery means
+			// the node is already judged dead, and a full round is expensive
+			// (a dial budget plus probes over every network type), so pace the
+			// retry at the regular check interval rather than hammering the
+			// node every few seconds. A fresh timer per round is fine here
+			// (rounds are minutes apart, and Go 1.23+ collects unreferenced
+			// timers), and it sidesteps the stale-channel-value dance that a
+			// reused Timer needs on older Go.
 			select {
 			case <-done:
 				slowWarn.Stop()
 				log.WithFields(log.Fields{"node": d.Name}).Infoln("Connectivity check stopped before it found a network type")
 				return
-			case <-retryTimer.C:
+			case <-time.After(d.CheckInterval):
 			}
-			retryTimer.Reset(d.checkRetryInterval)
 		}
 		slowWarn.Stop()
 		log.WithFields(log.Fields{
