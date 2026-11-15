@@ -154,6 +154,26 @@ Subscription update re-resolves all subscriptions and hot-swaps dialers, but the
 
 > **Note:** Only one `dae update` command can run at a time — concurrent updates are silently skipped.
 
+#### Automatic subscription updates
+
+Set `subscription_auto_update_interval` in the `global` section to re-run the
+equivalent of `dae update sub` periodically, without any external script:
+
+```shell
+global {
+  subscription_auto_update_interval: 24h # 0 (the default) disables auto-update
+}
+```
+
+Each round still costs one fetch and one parse, but the resolved state is
+hashed (sorted tag+node-link pairs plus the group configs) and compared
+against the last applied one: when nothing changed, the dialer swap is
+skipped entirely — no DialerSet rebuild, no connectivity-check churn. The
+hash also covers the group configs, so `filter`/annotation edits picked up
+from the config file are applied even when the node links are identical.
+A failed update is retried on the next tick. The manual command and the
+timer share the same update lock, so they never run concurrently.
+
 ### `dae update dns`
 
 Hot-swaps the entire DNS subsystem (upstreams, routing, cache settings). The command will fail if a `via` target references a group that does not exist.

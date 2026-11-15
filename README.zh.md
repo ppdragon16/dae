@@ -154,6 +154,23 @@ dae update routing # 应用路由规则变更
 
 > **注意：** 同一时间只能执行一个 `dae update` 命令——并发更新会被静默跳过。
 
+#### 订阅自动更新
+
+在 `global` 段设置 `subscription_auto_update_interval`，即可周期性地执行
+与 `dae update sub` 等价的操作，无需任何外部脚本：
+
+```shell
+global {
+  subscription_auto_update_interval: 24h # 0（默认值）表示关闭自动更新
+}
+```
+
+每轮仍需一次抓取和一次解析，但解析出的状态会被哈希（排序后的 tag+节点链接
+组合，外加 group 配置）并与上次应用的哈希比较：内容未变时完全跳过 dialer
+热换——不重建 DialerSet、不扰动连通性检查。哈希同时覆盖 group 配置，因此
+从配置文件中读取到的 `filter`/标注修改即使节点链接完全相同也会生效。失败的
+更新会在下一轮重试。手动命令与定时器共享同一把更新锁，不会并发运行。
+
 ### `dae update dns`
 
 热替换整个 DNS 子系统（上游、路由规则、缓存设置）。如果 `via` 引用了不存在的 group，命令会失败。
