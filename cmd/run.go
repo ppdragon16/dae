@@ -477,12 +477,18 @@ func newControlPlane(bpf any, conf *config.Config, externGeoDataDirs []string) (
 		epo := 5 * time.Second
 		client := http.Client{
 			Transport: &http.Transport{
+				// One-shot probe: CloseIdleConnections below releases the
+				// keep-alive connection on return; the timeout is the backstop
+				// for the hand-back window. Without it the probe's fd and its
+				// read/write loop goroutines accumulate once per reload.
+				IdleConnTimeout: 90 * time.Second,
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return direct.Direct.DialContext(ctx, "tcp", addr)
 				},
 			},
 			Timeout: epo,
 		}
+		defer client.CloseIdleConnections()
 		log.Infoln("Waiting for network...")
 		for i := 0; ; i++ {
 			resp, err := client.Get(CheckNetworkLinks[i%len(CheckNetworkLinks)])
@@ -510,12 +516,17 @@ func newControlPlane(bpf any, conf *config.Config, externGeoDataDirs []string) (
 	}
 	client := http.Client{
 		Transport: &http.Transport{
+			// One-shot subscription fetch, repeated once per reload: without
+			// CloseIdleConnections the abandoned keep-alive connection would
+			// keep its fd and read/write loop goroutines alive forever.
+			IdleConnTimeout: 90 * time.Second,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return direct.Direct.DialContext(ctx, "tcp", addr)
 			},
 		},
 		Timeout: 30 * time.Second,
 	}
+	defer client.CloseIdleConnections()
 	subscriptionDir := os.Getenv("DAE_LOCATION_SUBSCRIPTION")
 	if subscriptionDir == "" {
 		subscriptionDir = filepath.Dir(cfgFile)

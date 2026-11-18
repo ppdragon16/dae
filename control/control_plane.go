@@ -1976,12 +1976,17 @@ func (c *ControlPlane) UpdateSubscriptions() error {
 	log.Infoln("[update-sub] Phase 1: re-resolving subscriptions...")
 	client := http.Client{
 		Transport: &http.Transport{
+			// One-shot re-resolve, run per update trigger: without
+			// CloseIdleConnections the abandoned keep-alive connection would
+			// keep its fd and read/write loop goroutines alive forever.
+			IdleConnTimeout: 90 * time.Second,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return direct.Direct.DialContext(ctx, "tcp", addr)
 			},
 		},
 		Timeout: 30 * time.Second,
 	}
+	defer client.CloseIdleConnections()
 	nodeStrs := make([]string, len(c.config.Node))
 	for i, n := range c.config.Node {
 		nodeStrs[i] = string(n)

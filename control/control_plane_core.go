@@ -148,8 +148,14 @@ func (c *controlPlaneCore) Close() (err error) {
 	if !c.bpfEjected {
 		stopDatapathEventConsumer()
 	}
-	// Invoke defer funcs in reverse order.
-	for _, v := range slices.Backward(c.deferFuncs) {
+	// Invoke defer funcs in reverse order. Copy-drop-run: a surviving flow
+	// goroutine can keep this retired core reachable for an unbounded time
+	// (udp endpoints drain after a reload), and the closures pin what they
+	// capture -- dropping the slice before running lets the whole slice's
+	// contents be collected instead of staying rooted through this core.
+	pending := c.deferFuncs
+	c.deferFuncs = nil
+	for _, v := range slices.Backward(pending) {
 		if e := v(); e != nil {
 			// Combine errors.
 			if err != nil {
