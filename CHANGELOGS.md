@@ -10,6 +10,52 @@ HTML version available at https://dae.v2raya.org/docs/current/changelogs
 curl --silent "https://api.github.com/repos/daeuniverse/dae/releases" | jq -r '.[] | {tag_name,created_at,prerelease}'
 ```
 
+## Fork releases
+
+This fork ships its own releases; the full notes live on the
+[fork's GitHub Releases](https://github.com/ppdragon16/dae/releases).
+The sections below are upstream's changelog.
+
+### v2026.11.20
+
+> Release date: 2026/11/20
+
+#### Fixes
+
+- **VLESS + REALITY + `xtls-rprx-vision`: fixed corruption of any transfer past the first TLS record.** The vision direct-copy handoff read the TLS layer's buffered state through a wrong type, so real browsing failed with `ERR_SSL_PROTOCOL_ERROR` while connectivity checks and 204 probes stayed green. The handoff now uses the utls fork's typed buffer accessors, and a build without them fails loudly at the direct transition instead of corrupting the stream.
+- REALITY certificate verification goes through the public `VerifyConnection` callback (no `reflect` offset into `utls.Conn`, empty chains rejected, constant-time signature comparison).
+- SOCKS5 rejects incomplete or over-length credential pairs before the greeting instead of silently using anonymous authentication.
+- BPF: 4-byte packet loads on L3 hooks are split into 2-byte halves so strict-alignment kernels (e.g. LoongArch `ARCH_STRICT_ALIGN`) load the programs.
+- UDP: a brand-new flow whose `routing_tuples` entry was lost is re-routed instead of having its first packet dropped.
+- Reload: the previous generation's flipped TC filter is deleted, one-shot HTTP clients release their keep-alive connections, and a retired core drops its executed defer closures.
+- Interfaces are re-bound on a link down→up transition instead of being skipped (previously the filters were never re-attached).
+- The daens veth peer is created directly inside the target netns, so the host namespace no longer sees a transient `dae0peer` `RTM_NEWLINK/DELLINK` pair.
+- Loopback is brought up inside daens, the tproxy listener is dual-stack, and tproxy IP rules are marked `proto kernel`.
+- Connectivity checks validate the DNS header, so nodes whose REALITY authentication fails (fallback site answers with an HTTP error) are marked unhealthy instead of looking healthy.
+- DNS: answers are parsed once per lookup round; lookup failures log the requesting client; the SERVFAIL fallback no longer logs a nil error.
+- Logging: non-UTF-8 writes are rejected with a stderr stack, and fastlog honors the configured level.
+
+#### Features
+
+- `global.subscription_auto_update_interval`: periodically re-resolve subscriptions, skipping the dialer hot-swap when the resolved state is unchanged.
+- `tfo=1` (or `tcp_fast_open=true`) on a node link dials its first hop with TCP Fast Open.
+- DNS response routing supports `ip(empty)` / `!ip(empty)`.
+- TCP sniffing only blocks when the domain can still change the outcome; other connections relay immediately and are classified in the background.
+- `sniffing_timeout` stands on its own (no longer auto-zeroed by `dial_target_override`/`reroute_mode`) and is documented as TCP-only.
+
+#### Dependencies
+
+- outbound → `ppdragon16/outbound v0.0.0-next.utls.77`
+- utls → `ppdragon16/utls v1.8.2-pooled.16`
+- quic-go → `ppdragon16/quic-go v0.0.0-next.utls.20`
+- toolchain floor → go1.26.11
+
+### v2026.10.09
+
+> Release date: 2026/10/09
+
+See the [release notes](https://github.com/ppdragon16/dae/releases/tag/v2026.10.09).
+
 ## Releases
 
 <!-- BEGIN NEW TOC ENTRY -->
