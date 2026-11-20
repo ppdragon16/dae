@@ -241,16 +241,34 @@ func ResolveSOA(d netproxy.Dialer, dns netip.AddrPort, host string, network stri
 
 func DnsCheck(dialer netproxy.Dialer, server string, network string, data []byte) (bool, error) {
 	// Liveness-probe buffer, deliberately MTU-sized rather than
-	// consts.DnsMaxMessageSize: DnsCheck does not parse the answer (it only asks
-	// whether one arrived), and the query it sends carries no EDNS0 OPT, so a
-	// compliant responder stays within 512 bytes — a 2048 bucket is four
-	// times that. Keeping it small matters because this runs up to four times
-	// per dialer per check round across the whole node fleet. The parsed path
-	// (resolve, below) is the one that needs the full-message buffer.
+	// consts.DnsMaxMessageSize: DnsCheck only validates a minimal DNS header
+	// (see below), and the query it sends carries no EDNS0 OPT, so a compliant
+	// responder stays within 512 bytes — a 2048 bucket is four times that.
+	// Keeping it small matters because this runs up to four times per dialer
+	// per check round across the whole node fleet. The parsed path (resolve,
+	// below) is the one that needs the full-message buffer.
 	resp := pool.GetBuffer(consts.EthernetMtu)
 	defer pool.PutBuffer(resp)
-	_, err := resolveMsg(dialer, server, network, data, resp)
-	return err == nil, err
+	resp, err := resolveMsg(dialer, server, network, data, resp)
+	if err != nil {
+		return false, err
+	}
+	// A REALITY/cover-traffic fallback (or any hijacking middlebox) answers a
+	// probe with well-formed non-DNS bytes — e.g. an HTTP error page from the
+	// fallback site — which a content-blind check counts as "alive", keeping a
+	// fully broken node selected. Validate the minimal DNS header instead: a
+	// genuine reply carries the query's ID, the QR flag, and at least a full
+	// header. An HTTP error page fails all three.
+	if len(resp) < 12 {
+		return false, fmt.Errorf("dns check: response too short (%d bytes)", len(resp))
+	}
+	if resp[0] != data[0] || resp[1] != data[1] {
+		return false, fmt.Errorf("dns check: response id mismatch: %02x%02x != %02x%02x", resp[0], resp[1], data[0], data[1])
+	}
+	if resp[2]&0x80 == 0 {
+		return false, fmt.Errorf("dns check: response is not a reply (QR unset)")
+	}
+	return true, nil
 }
 
 func resolveMsg(dialer netproxy.Dialer, server string, network string, data []byte, respBuf []byte) (resp []byte, err error) {
